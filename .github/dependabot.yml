@@ -1,0 +1,23 @@
+# Dependency updates as PRs. Each PR runs the same gates as any other change,
+# so a license or vulnerability regression in an update fails CI.
+#
+# Only the directories listed here are scanned. The fixture modules under
+# test/gates/testdata pin old or copyleft versions on purpose and are left
+# out. Dependabot does not move the `go` directive; the Go toolchain is
+# bumped by hand in go.mod.
+version: 2
+updates:
+  # Covers the dependencies and the tool directives alike.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
