@@ -1,0 +1,106 @@
+# The lint gate. golangci-lint is a tool directive in go.mod, which pins its
+# version; scripts/lint.sh runs it and CI runs that same script.
+
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: all
+  disable:
+    - exhaustruct
+    - exhaustruct_v5
+    - godox
+    - gomodguard
+    - nlreturn
+    - noinlineerr
+    - tagliatelle
+    - wsl
+    - wsl_v5
+  settings:
+    gomoddirectives:
+      # A replace to a directory is allowed; the gate fixtures use one to
+      # stand in an internal module. A replace to another module path is not.
+      replace-local: true
+    depguard:
+      rules:
+        # This repository ships to customers and may depend only on public
+        # modules. NEVER import github.com/keycardlabs/; the public SDKs live
+        # under github.com/keycardai/.
+        no-internal-keycard-modules:
+          list-mode: lax
+          files:
+            - $all
+          deny:
+            - pkg: github.com/keycardlabs/
+              desc: internal Keycard modules cannot ship in this repository; use the public github.com/keycardai/ modules
+    errcheck:
+      # A failed write to stdout or stderr has nowhere to be reported.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    govet:
+      enable-all: true
+      disable:
+        # Struct field order is chosen for readability, not for padding.
+        - fieldalignment
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    varnamelen:
+      min-name-length: 3
+      ignore-names:
+        - i
+        - j
+        - k
+        - ok
+        - err
+        - w
+        - r
+        - tc
+        - tt
+  exclusions:
+    generated: lax
+    rules:
+      # A test reads and writes paths it built itself, so the file-inclusion,
+      # file-permission and subprocess rules have nothing to say about it.
+      - path: _test\.go
+        linters:
+          - gosec
+        text: (G204|G304|G306)
+      - path: _test\.go
+        linters: [funlen, varnamelen]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - golines
+  settings:
+    # Imports are three blank-line-separated groups in this order: standard
+    # library, third-party, this module. Each group is sorted.
+    gci:
+      custom-order: true
+      sections:
+        - standard
+        - default
+        - localmodule
+    gofmt:
+      rewrite-rules:
+        - pattern: interface{}
+          replacement: any
+    gofumpt:
+      module-path: github.com/keycardai/egress-proxy
+      extra:
+        group-params: true
+        balance-calls: true
+    golines:
+      max-len: 120
+      tab-len: 2

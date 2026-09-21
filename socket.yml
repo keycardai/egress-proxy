@@ -1,0 +1,9 @@
+# Socket scans every manifest in the repository. The modules under
+# test/gates/testdata are negative fixtures for the CI gates: they depend on
+# a GPL module and on a version with a published vulnerability on purpose, so
+# the gate self-test can prove each gate rejects them. Nothing under that path
+# is in any build list this repository ships.
+version: 2
+
+projectIgnorePaths:
+  - "test/gates/testdata"
