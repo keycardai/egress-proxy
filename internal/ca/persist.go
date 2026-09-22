@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,55 @@ const (
 var errNotMemoryBacked = errors.New("ca: the state directory is not on a memory-backed filesystem")
 
 var errMaterial = errors.New("ca: stored material refused")
+
+// errSharedDirectory is returned when the state directory and the output
+// directory are the same directory, or one sits under the other. The
+// workload reads the output directory, so a key under it is a key the
+// workload can read.
+var errSharedDirectory = errors.New("ca: the state directory and the output directory overlap")
+
+// Overlaps reports whether one directory is the other or sits under it. It
+// cleans both paths, so a trailing slash, a repeated separator or a dot
+// segment cannot hide a nesting the filesystem honours.
+//
+// It compares text and cannot see a symlink. PrepareDirectories resolves the
+// paths first and then calls this, which is the check that holds.
+func Overlaps(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	separator := string(filepath.Separator)
+	return a == b || strings.HasPrefix(a, b+separator) || strings.HasPrefix(b, a+separator)
+}
+
+// PrepareDirectories creates the output directory, and the state directory
+// when one is configured, then refuses a pair where one resolves inside the
+// other.
+//
+// Call it before LoadOrNew. Resolving the paths needs them to exist, and a
+// refused pair must never have a key written into it.
+func PrepareDirectories(stateDir, outDir string) error {
+	if err := os.MkdirAll(outDir, outDirMode); err != nil {
+		return fmt.Errorf("ca: create %s: %w", outDir, err)
+	}
+	if stateDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(stateDir, stateDirMode); err != nil {
+		return fmt.Errorf("ca: create %s: %w", stateDir, err)
+	}
+	resolvedState, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		return fmt.Errorf("ca: resolve %s: %w", stateDir, err)
+	}
+	resolvedOut, err := filepath.EvalSymlinks(outDir)
+	if err != nil {
+		return fmt.Errorf("ca: resolve %s: %w", outDir, err)
+	}
+	if Overlaps(resolvedState, resolvedOut) {
+		return fmt.Errorf("%w: %s resolves to %s, and %s to %s",
+			errSharedDirectory, stateDir, resolvedState, outDir, resolvedOut)
+	}
+	return nil
+}
 
 // LoadOrNew returns the authority held in stateDir, or mints one and stores
 // it there. An empty stateDir mints an authority that lives in process

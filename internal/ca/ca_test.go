@@ -128,6 +128,32 @@ func TestStoreCachesAndRenews(t *testing.T) {
 	assert.Equal(t, int64(4), store.Mints(), "Mints after the renewal")
 }
 
+// TestPrepareDirectoriesRefusesASymlinkedStateDirectory covers what the
+// document check in internal/config cannot: the two paths do not overlap as
+// text, and the state directory resolves inside the output directory the
+// workload reads.
+func TestPrepareDirectoriesRefusesASymlinkedStateDirectory(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	outDir := filepath.Join(base, "shared-ca")
+	inner := filepath.Join(outDir, "inner")
+	require.NoError(t, os.MkdirAll(inner, 0o750))
+	stateDir := filepath.Join(base, "state-link")
+	require.NoError(t, os.Symlink(inner, stateDir))
+
+	err := ca.PrepareDirectories(stateDir, outDir)
+	require.ErrorContains(t, err, "overlap", "a link into the output directory is refused")
+
+	// A pair that does not overlap is prepared, and both directories exist.
+	apart := filepath.Join(base, "state")
+	require.NoError(t, ca.PrepareDirectories(apart, outDir))
+	for _, dir := range []string{apart, outDir} {
+		info, statErr := os.Stat(dir)
+		require.NoError(t, statErr, "%s", dir)
+		assert.True(t, info.IsDir(), "%s is a directory", dir)
+	}
+}
+
 func TestLoadOrNewWithoutAStateDirectoryMints(t *testing.T) {
 	t.Parallel()
 	authority, loaded, err := ca.LoadOrNew("", ca.Options{})

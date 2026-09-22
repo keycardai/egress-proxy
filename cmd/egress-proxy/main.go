@@ -49,40 +49,42 @@ func main() {
 
 // flags are the settings the command line and the environment supply.
 type flags struct {
-	configPath        string
-	sandboxID         string
-	zoneURL           string
-	clientID          string
-	workloadTokenFile string
-	impersonateUser   string
-	connect           string
-	admin             string
-	caOutDir          string
-	caStateDir        string
-	leafTTL           time.Duration
-	cacheSize         int
-	upstreamCAFiles   []string
-	maxConnections    int
-	idleTimeout       time.Duration
+	configPath            string
+	sandboxID             string
+	zoneURL               string
+	clientID              string
+	workloadTokenFile     string
+	impersonateUser       string
+	connect               string
+	admin                 string
+	caOutDir              string
+	caStateDir            string
+	leafTTL               time.Duration
+	cacheSize             int
+	upstreamCAFiles       []string
+	maxConnections        int
+	idleTimeout           time.Duration
+	responseHeaderTimeout time.Duration
 }
 
 // overrides is the flags as the document parser applies them.
 func (f flags) overrides() config.Overrides {
 	return config.Overrides{
-		SandboxID:         f.sandboxID,
-		ZoneURL:           f.zoneURL,
-		ClientID:          f.clientID,
-		WorkloadTokenFile: f.workloadTokenFile,
-		ImpersonateUser:   f.impersonateUser,
-		Connect:           f.connect,
-		Admin:             f.admin,
-		CAOutDir:          f.caOutDir,
-		CAStateDir:        f.caStateDir,
-		LeafTTL:           f.leafTTL,
-		CacheSize:         f.cacheSize,
-		UpstreamCAFiles:   f.upstreamCAFiles,
-		MaxConnections:    f.maxConnections,
-		IdleTimeout:       f.idleTimeout,
+		SandboxID:             f.sandboxID,
+		ZoneURL:               f.zoneURL,
+		ClientID:              f.clientID,
+		WorkloadTokenFile:     f.workloadTokenFile,
+		ImpersonateUser:       f.impersonateUser,
+		Connect:               f.connect,
+		Admin:                 f.admin,
+		CAOutDir:              f.caOutDir,
+		CAStateDir:            f.caStateDir,
+		LeafTTL:               f.leafTTL,
+		CacheSize:             f.cacheSize,
+		UpstreamCAFiles:       f.upstreamCAFiles,
+		MaxConnections:        f.maxConnections,
+		IdleTimeout:           f.idleTimeout,
+		ResponseHeaderTimeout: f.responseHeaderTimeout,
 	}
 }
 
@@ -130,6 +132,11 @@ func flagSet(opts *flags) []cli.Flag {
 		&cli.DurationFlag{
 			Name: "idle-timeout", Destination: &opts.idleTimeout, Sources: env("IDLE_TIMEOUT"),
 			Usage: "close a connection idle for this long (limits.idle_timeout)",
+		},
+		&cli.DurationFlag{
+			Name: "response-header-timeout", Destination: &opts.responseHeaderTimeout,
+			Sources: env("RESPONSE_HEADER_TIMEOUT"),
+			Usage:   "how long an upstream has to send a response head (limits.response_header_timeout)",
 		},
 	}
 }
@@ -200,6 +207,11 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, fmt.Errorf("tls: %w", err)
 	}
+	// Before the key exists: a state directory that resolves inside the
+	// output directory is a key the workload can read.
+	if err = ca.PrepareDirectories(cfg.CA.StateDir, cfg.CA.OutDir); err != nil {
+		return nil, fmt.Errorf("certificate authority: %w", err)
+	}
 	authority, loaded, err := ca.LoadOrNew(cfg.CA.StateDir, ca.Options{LeafTTL: cfg.CA.LeafTTL.Duration()})
 	if err != nil {
 		return nil, fmt.Errorf("certificate authority: %w", err)
@@ -220,11 +232,12 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 			DocumentDigest: cfg.Digest,
 			ConfigDigest:   cfg.ConfigDigest,
 		}, nil),
-		UpstreamRoots:  roots,
-		Logger:         logger,
-		MaxConnections: cfg.Limits.MaxConnections,
-		IdleTimeout:    cfg.Limits.IdleTimeout.Duration(),
-		ShutdownGrace:  shutdownGrace,
+		UpstreamRoots:         roots,
+		Logger:                logger,
+		MaxConnections:        cfg.Limits.MaxConnections,
+		IdleTimeout:           cfg.Limits.IdleTimeout.Duration(),
+		ResponseHeaderTimeout: cfg.Limits.ResponseHeaderTimeout.Duration(),
+		ShutdownGrace:         shutdownGrace,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("proxy: %w", err)

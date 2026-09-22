@@ -24,6 +24,7 @@ import (
 	"github.com/gowebpki/jcs"
 	"sigs.k8s.io/yaml"
 
+	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -36,6 +37,9 @@ const (
 	DefaultCacheSize      = 1024
 	DefaultMaxConnections = 1024
 	DefaultIdleTimeout    = 5 * time.Minute
+	// DefaultResponseHeaderTimeout bounds the wait for an upstream response
+	// head. It does not bound a body, so a streamed response is unaffected.
+	DefaultResponseHeaderTimeout = 30 * time.Second
 
 	// Version is the only document version this build reads.
 	Version = 1
@@ -126,10 +130,14 @@ type TLS struct {
 	UpstreamCAFiles []string `json:"upstream_ca_files"`
 }
 
-// Limits bound every listener.
+// Limits bound every listener and the upstream leg.
 type Limits struct {
 	MaxConnections int      `json:"max_connections"`
 	IdleTimeout    Duration `json:"idle_timeout"`
+	// ResponseHeaderTimeout is how long an upstream has to send a response
+	// head once the request is written. It does not bound the body, so a
+	// streamed response runs as long as it stays active.
+	ResponseHeaderTimeout Duration `json:"response_header_timeout"`
 }
 
 // Policy is what joins and what leaves the platform deny list.
@@ -227,20 +235,21 @@ type Config struct {
 // identify what an override supplied. ConfigDigest covers the effective
 // settings and does, and Overridden names the keys an override replaced.
 type Overrides struct {
-	SandboxID         string
-	ZoneURL           string
-	ClientID          string
-	WorkloadTokenFile string
-	ImpersonateUser   string
-	Connect           string
-	Admin             string
-	CAOutDir          string
-	CAStateDir        string
-	LeafTTL           time.Duration
-	CacheSize         int
-	UpstreamCAFiles   []string
-	MaxConnections    int
-	IdleTimeout       time.Duration
+	SandboxID             string
+	ZoneURL               string
+	ClientID              string
+	WorkloadTokenFile     string
+	ImpersonateUser       string
+	Connect               string
+	Admin                 string
+	CAOutDir              string
+	CAStateDir            string
+	LeafTTL               time.Duration
+	CacheSize             int
+	UpstreamCAFiles       []string
+	MaxConnections        int
+	IdleTimeout           time.Duration
+	ResponseHeaderTimeout time.Duration
 }
 
 // Load reads and parses the document at path with the overrides applied.
@@ -404,6 +413,9 @@ func (c *Config) applyDefaults() {
 	if c.Limits.IdleTimeout == 0 {
 		c.Limits.IdleTimeout = Duration(DefaultIdleTimeout)
 	}
+	if c.Limits.ResponseHeaderTimeout == 0 {
+		c.Limits.ResponseHeaderTimeout = Duration(DefaultResponseHeaderTimeout)
+	}
 	for i := range c.Endpoints {
 		endpoint := &c.Endpoints[i]
 		endpoint.Host = policy.NormalizeHost(endpoint.Host)
@@ -459,6 +471,11 @@ func (c *Config) applyOverrides(overrides Overrides) {
 		"limits.idle_timeout",
 		overrides.IdleTimeout != 0,
 		func() { c.Limits.IdleTimeout = Duration(overrides.IdleTimeout) },
+	)
+	override(
+		"limits.response_header_timeout",
+		overrides.ResponseHeaderTimeout != 0,
+		func() { c.Limits.ResponseHeaderTimeout = Duration(overrides.ResponseHeaderTimeout) },
 	)
 	sort.Strings(c.Overridden)
 }
@@ -518,6 +535,9 @@ func (c *Config) validateProcess(found *problems) {
 	if c.Limits.IdleTimeout <= 0 {
 		found.addf("limits.idle_timeout must be positive")
 	}
+	if c.Limits.ResponseHeaderTimeout <= 0 {
+		found.addf("limits.response_header_timeout must be positive")
+	}
 }
 
 func (c CA) validate(found *problems) {
@@ -527,7 +547,7 @@ func (c CA) validate(found *problems) {
 	if c.StateDir != "" && !filepath.IsAbs(c.StateDir) {
 		found.addf("ca.state_dir %q must be an absolute path", c.StateDir)
 	}
-	if c.StateDir != "" && overlaps(c.StateDir, c.OutDir) {
+	if c.StateDir != "" && ca.Overlaps(c.StateDir, c.OutDir) {
 		found.addf("ca.state_dir %q overlaps ca.out_dir %q; the key must never be under the shared mount",
 			c.StateDir, c.OutDir)
 	}
@@ -537,11 +557,6 @@ func (c CA) validate(found *problems) {
 	if c.CacheSize < 1 {
 		found.addf("ca.cache_size must be at least 1")
 	}
-}
-
-// overlaps reports whether one path is the other or under it.
-func overlaps(a, b string) bool {
-	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 func (c *Config) validatePolicy(found *problems) {

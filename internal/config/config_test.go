@@ -33,6 +33,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 		{"ca.cache_size", cfg.CA.CacheSize, 1024},
 		{"limits.max_connections", cfg.Limits.MaxConnections, 1024},
 		{"limits.idle_timeout", cfg.Limits.IdleTimeout.Duration(), 5 * time.Minute},
+		{"limits.response_header_timeout", cfg.Limits.ResponseHeaderTimeout.Duration(), 30 * time.Second},
 		{"endpoint path_prefix", cfg.Endpoints[0].PathPrefix, "/"},
 		{"endpoint resource", cfg.Endpoints[0].Resource, "https://pypi.org/"},
 		{"identity absent", cfg.Identity == nil, true},
@@ -205,6 +206,36 @@ func TestParseRefusals(t *testing.T) {
 			name:    "state dir under out dir",
 			doc:     minimal + "ca:\n  out_dir: /shared-ca\n  state_dir: /shared-ca/key\n",
 			wantErr: "overlaps ca.out_dir",
+		},
+		{
+			name:    "state dir under out dir, written with a trailing slash",
+			doc:     minimal + "ca:\n  out_dir: /shared-ca/\n  state_dir: /shared-ca/state\n",
+			wantErr: "overlaps ca.out_dir",
+		},
+		{
+			name:    "state dir under out dir, reached through a dot segment",
+			doc:     minimal + "ca:\n  out_dir: /shared-ca\n  state_dir: /shared-ca/../shared-ca/state\n",
+			wantErr: "overlaps ca.out_dir",
+		},
+		{
+			name:    "state dir is the out dir",
+			doc:     minimal + "ca:\n  out_dir: /shared-ca\n  state_dir: /shared-ca\n",
+			wantErr: "overlaps ca.out_dir",
+		},
+		{
+			name:    "out dir under state dir",
+			doc:     minimal + "ca:\n  out_dir: /run/egress/ca/shared\n  state_dir: /run/egress/ca\n",
+			wantErr: "overlaps ca.out_dir",
+		},
+		{
+			name:    "a negative response header timeout",
+			doc:     minimal + "limits:\n  response_header_timeout: -1s\n",
+			wantErr: "limits.response_header_timeout",
+		},
+		{
+			name:    "a negative idle timeout",
+			doc:     minimal + "limits:\n  idle_timeout: -1s\n",
+			wantErr: "limits.idle_timeout",
 		},
 		{
 			name:    "leaf ttl not a duration",

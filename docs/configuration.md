@@ -132,7 +132,13 @@ itself.
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
 | `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections that the CONNECT listener accepts. Further accepts wait until a connection ends. |
-| `idle_timeout` | `5m` | `--idle-timeout`, `EGRESS_PROXY_IDLE_TIMEOUT` | The time before the proxy closes a connection that neither reads nor writes. The proxy applies this limit on the frontend and inside a tunnel. It refuses a request head that has not arrived after 10 seconds. |
+| `idle_timeout` | `5m` | `--idle-timeout`, `EGRESS_PROXY_IDLE_TIMEOUT` | The time before the proxy closes a connection that neither reads nor writes. The proxy applies this limit on the frontend, inside a tunnel, and on the upstream connection. It refuses a request head that has not arrived after 10 seconds. |
+| `response_header_timeout` | `30s` | `--response-header-timeout`, `EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT` | The time an upstream has to send a response head once the proxy writes the request. A slower upstream gets `upstream_failed`. This limit does not bound a body, so a server-sent event stream runs as long as it stays active. |
+
+An absent setting takes the default, and so does a setting written as zero,
+because this schema reads zero as unset. A negative value is refused. Nothing
+bounds a whole request, because a long request that is still transferring is
+working rather than stalled.
 
 ### `policy`
 

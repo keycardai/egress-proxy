@@ -55,9 +55,12 @@ const (
 	defaultReadHeaderTimeout = 10 * time.Second
 	defaultHandshakeTimeout  = 10 * time.Second
 	defaultDialTimeout       = 30 * time.Second
-	defaultIdleTimeout       = 5 * time.Minute
-	defaultShutdownGrace     = 10 * time.Second
-	defaultMaxConnections    = 1024
+	// defaultResponseHeaderTimeout bounds the wait for an upstream response
+	// head. It bounds no body, so a streamed response is unaffected.
+	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultIdleTimeout           = 5 * time.Minute
+	defaultShutdownGrace         = 10 * time.Second
+	defaultMaxConnections        = 1024
 
 	maxIdleConns        = 100
 	maxIdleConnsPerHost = 8
@@ -89,9 +92,13 @@ type Options struct {
 	// means 1024.
 	MaxConnections int
 	// IdleTimeout closes a connection that neither reads nor writes for this
-	// long, on both the frontend and inside a tunnel. Zero means five
-	// minutes.
+	// long, on the frontend, inside a tunnel, and on the upstream leg. Zero
+	// means five minutes.
 	IdleTimeout time.Duration
+	// ResponseHeaderTimeout bounds how long an upstream has to send a
+	// response head once the request is written. Zero means thirty seconds.
+	// It bounds no body, so a streamed response is unaffected.
+	ResponseHeaderTimeout time.Duration
 	// ReadHeaderTimeout bounds how long a client can take to send a request
 	// head. Zero means ten seconds.
 	ReadHeaderTimeout time.Duration
@@ -124,6 +131,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.DialTimeout <= 0 {
 		o.DialTimeout = defaultDialTimeout
+	}
+	if o.ResponseHeaderTimeout <= 0 {
+		o.ResponseHeaderTimeout = defaultResponseHeaderTimeout
 	}
 	if o.ShutdownGrace <= 0 {
 		o.ShutdownGrace = defaultShutdownGrace
@@ -258,6 +268,14 @@ func (s *Server) newFrontend() *goproxy.ProxyHttpServer {
 // newTransport is the upstream leg: TLS 1.2 or better verified against the
 // given roots, no proxy, and a deny list check on every resolved address
 // before the socket connects.
+//
+// Four budgets bound an upstream that goes quiet, because a stalled request
+// holds a frontend connection and the connection cap is finite. The dial and
+// the TLS handshake each carry one. ResponseHeaderTimeout bounds the wait
+// for a response head. Every upstream connection carries the same idle bound
+// the frontend uses, which covers a body that stops arriving. Nothing bounds
+// a whole request, because a server-sent event stream is a long request that
+// is working.
 func (s *Server) newTransport() *http.Transport {
 	deny := s.opts.Matcher.DenyList()
 	dialer := &net.Dialer{
@@ -273,17 +291,25 @@ func (s *Server) newTransport() *http.Transport {
 			return nil
 		},
 	}
+	idle := s.opts.IdleTimeout
 	return &http.Transport{
-		Proxy:       nil,
-		DialContext: dialer.DialContext,
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err //nolint:wrapcheck // the transport reads the error by type
+			}
+			return &idleConn{Conn: conn, timeout: idle}, nil
+		},
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    s.opts.UpstreamRoots,
 		},
-		MaxIdleConns:        maxIdleConns,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-		IdleConnTimeout:     upstreamIdleTimeout,
-		TLSHandshakeTimeout: tlsHandshakeTimeout,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       upstreamIdleTimeout,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: s.opts.ResponseHeaderTimeout,
 	}
 }
 

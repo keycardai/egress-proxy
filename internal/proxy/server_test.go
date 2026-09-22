@@ -137,6 +137,12 @@ func newUpstream(t *testing.T) (*upstream, *ca.Authority) {
 	up := &upstream{release: make(chan struct{})}
 	up.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if strings.HasPrefix(r.URL.Path, "/stall/") {
+			// Never write a head. The handler returns once the proxy gives
+			// up and closes the connection, so Close does not block.
+			<-r.Context().Done()
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/stream/") {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "data: first\n\n")
@@ -175,9 +181,10 @@ type harness struct {
 type harnessOptions struct {
 	// loopbackDenied leaves loopback on the deny list, so the upstream name
 	// resolves into a denied range.
-	loopbackDenied bool
-	maxConnections int
-	idleTimeout    time.Duration
+	loopbackDenied        bool
+	maxConnections        int
+	idleTimeout           time.Duration
+	responseHeaderTimeout time.Duration
 	// unstarted leaves Run to the test.
 	unstarted bool
 }
@@ -195,6 +202,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		{Host: upstreamHost, PathPrefix: "/ok/"},
 		{Host: upstreamHost, PathPrefix: "/stream/"},
 		{Host: upstreamHost, PathPrefix: "/cred/", HasCredential: true},
+		{Host: upstreamHost, PathPrefix: "/stall/"},
 	}, deny)
 	require.NoError(t, err)
 	authority, err := ca.New(ca.Options{})
@@ -208,10 +216,11 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		Audit: audit.NewStamped(sink, audit.Stamp{
 			SandboxID: "sbx-test", DocumentDigest: "sha256:doc", ConfigDigest: "sha256:cfg",
 		}, nil),
-		UpstreamRoots:  upstreamCA.Pool(),
-		MaxConnections: opts.maxConnections,
-		IdleTimeout:    opts.idleTimeout,
-		ShutdownGrace:  time.Second,
+		UpstreamRoots:         upstreamCA.Pool(),
+		MaxConnections:        opts.maxConnections,
+		IdleTimeout:           opts.idleTimeout,
+		ResponseHeaderTimeout: opts.responseHeaderTimeout,
+		ShutdownGrace:         time.Second,
 	})
 	require.NoError(t, err)
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -739,6 +748,23 @@ func TestRunReturnsWhenTheListenerFails(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.FailNow(t, "Run did not return after its listener failed")
 	}
+}
+
+// TestAStalledUpstreamIsBoundedByTheResponseHeaderTimeout proves an upstream
+// that accepts a request and never answers cannot hold a frontend
+// connection. Without the budget the request waits until the client gives
+// up, and a workload can pin the whole connection cap that way.
+func TestAStalledUpstreamIsBoundedByTheResponseHeaderTimeout(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{responseHeaderTimeout: 300 * time.Millisecond})
+	started := time.Now()
+	answer, err := h.get(t, h.upstreamURL("/stall/x"))
+	require.NoError(t, err, "the proxy answered rather than hanging")
+	assert.Equal(t, http.StatusBadGateway, answer.status, "response status")
+	assert.Equal(t, policy.ReasonUpstreamFailed, answer.reason(), "response reason")
+	assert.Less(t, time.Since(started), 4*time.Second, "the proxy gave up on the response head")
+	record := h.sink.find(t, "the stalled upstream", byReason(audit.ScopeRequest, policy.ReasonUpstreamFailed))
+	assert.NotEmpty(t, record.Outcome.Error, "the record says why")
 }
 
 func TestNewRefusesMissingOptions(t *testing.T) {
