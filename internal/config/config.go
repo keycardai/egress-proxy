@@ -337,6 +337,37 @@ func canonicalPrefixes(prefixes []netip.Prefix) []string {
 	return out
 }
 
+// canonicalEndpoints orders an endpoint list by host and then path prefix.
+// The matcher sorts each host's prefixes by descending length and validation
+// refuses a repeated host and prefix pair, so document order changes no
+// answer and must change no digest.
+func canonicalEndpoints(endpoints []Endpoint) []Endpoint {
+	out := append([]Endpoint(nil), endpoints...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Host != out[j].Host {
+			return out[i].Host < out[j].Host
+		}
+		return out[i].PathPrefix < out[j].PathPrefix
+	})
+	return out
+}
+
+// canonicalFiles sorts and deduplicates a file list. The same file named
+// twice, or in another order, contributes the same material.
+func canonicalFiles(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // PolicyEndpoints returns the endpoints in the matcher's shape.
 func (c *Config) PolicyEndpoints() []policy.Endpoint {
 	out := make([]policy.Endpoint, 0, len(c.Endpoints))
@@ -378,11 +409,11 @@ func (c *Config) UpstreamRoots() (*x509.CertPool, error) {
 // clear.
 func (c *Config) digestDecisionInputs() (string, error) {
 	inputs := decisionInputs{
-		Endpoints:          c.Endpoints,
+		Endpoints:          canonicalEndpoints(c.Endpoints),
 		ClusterCIDRs:       canonicalPrefixes(c.ClusterCIDRs),
 		DenyListExceptions: canonicalPrefixes(c.DenyListExceptions),
 		Identity:           c.Identity,
-		UpstreamCAFiles:    append([]string(nil), c.TLS.UpstreamCAFiles...),
+		UpstreamCAFiles:    canonicalFiles(c.TLS.UpstreamCAFiles),
 		DenyList:           policy.CompiledDigest(),
 	}
 	encoded, err := json.Marshal(inputs)

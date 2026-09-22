@@ -152,9 +152,11 @@ func load(dir string, opts Options) (*Authority, error) { //nolint:cyclop // bre
 	if !authority.cert.IsCA {
 		return nil, fmt.Errorf("%w: not a CA certificate", errMaterial)
 	}
-	requiredKeyUsage := x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature
-	if authority.cert.KeyUsage&requiredKeyUsage == 0 {
-		return nil, fmt.Errorf("%w: invalid certificate usage", errMaterial)
+	// x509.CreateCertificate does not check the parent's key usage. A
+	// certificate without KeyUsageCertSign mints leaves that every client
+	// rejects at chain verification, so refuse it at load.
+	if authority.cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, fmt.Errorf("%w: the certificate cannot sign certificates", errMaterial)
 	}
 	return authority, nil
 }

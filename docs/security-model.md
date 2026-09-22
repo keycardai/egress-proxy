@@ -97,7 +97,7 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| A misspelled, repeated, or case-variant key silently changes enforcement. | The parser rejects unknown keys, repeated keys, keys that differ only in case, and a second YAML document. | `TestParseRefusals` |
+| A misspelled, repeated, or case-variant key silently changes enforcement. | The parser rejects unknown keys, repeated keys, and keys that differ only in case. | `TestParseRefusals` |
 | An audit record cannot be tied to the document that made the decision. | Every record carries the document canonical digest. | `TestDigestIsOverTheDocumentAsWritten`, `TestJSONSinkWritesOneLinePerRecord` |
 | An environment variable or flag changes enforcement without changing the digest. | Every record also carries `config.digest` over the settings after an override applies, so two sidecars that enforce differently never share it. The endpoints and policy still come from the document alone. The start-up log and `/info` name every overridden key, and the `EGRESS_PROXY_` prefix gives a manifest lint one namespace to inspect. | `TestConfigDigestCoversTheEffectiveSettings`, `TestOverrides`, `TestCommandResolvesFlagsAndEnvironment` |
 | A build that denies different destinations is indistinguishable in the records. | `config.digest` covers a digest of the ranges, host names and suffixes compiled into the binary, so two builds that deny differently never share it. | `TestConfigDigestCoversTheEffectiveSettings` |

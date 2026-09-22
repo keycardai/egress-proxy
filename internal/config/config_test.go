@@ -72,6 +72,11 @@ func TestDigestIsOverTheDocumentAsWritten(t *testing.T) {
 const identityDoc = "identity:\n  zone_url: https://z\n  client_id: c\n  workload_token_file: /t\n" +
 	"  impersonate: {user: u}\n"
 
+// twoEndpointsReversed lists the endpoints of minimal plus
+// files.pythonhosted.org in the opposite document order.
+const twoEndpointsReversed = "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n" +
+	"  - host: files.pythonhosted.org\n  - host: pypi.org\n"
+
 // TestConfigDigestCoversTheEffectiveSettings pins the property the audit
 // record needs. Two processes that answer every request alike share a config
 // digest, whatever document, flag or variable each one was given, and two
@@ -122,6 +127,38 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			name:     "a cluster range in another spelling and order",
 			doc:      minimal + identityDoc + "policy:\n  cluster_cidrs: [\"10.42.0.0/16\"]\n",
 			against:  minimal + identityDoc + "policy:\n  cluster_cidrs: [\"10.42.0.1/16\", \"10.42.0.0/16\"]\n",
+			wantSame: true,
+		},
+		{
+			name:    "the same two endpoints in either order",
+			doc:     minimal + "  - host: files.pythonhosted.org\n" + identityDoc,
+			against: twoEndpointsReversed + identityDoc,
+			// Compile sorts each host's prefixes and refuses a repeated
+			// host and prefix pair, so document order decides nothing.
+			wantSame: true,
+		},
+		{
+			name: "the same two prefixes on one host in either order",
+			doc: strings.Replace(minimal, "- host: pypi.org",
+				"- host: pypi.org\n    path_prefix: /simple/\n  - host: pypi.org\n    path_prefix: /pypi/", 1) +
+				identityDoc,
+			against: strings.Replace(minimal, "- host: pypi.org",
+				"- host: pypi.org\n    path_prefix: /pypi/\n  - host: pypi.org\n    path_prefix: /simple/", 1) +
+				identityDoc,
+			wantSame: true,
+		},
+		{
+			name:    "the same two upstream roots in either order",
+			doc:     minimal + identityDoc + "tls:\n  upstream_ca_files: [\"/a.pem\", \"/b.pem\"]\n",
+			against: minimal + identityDoc + "tls:\n  upstream_ca_files: [\"/b.pem\", \"/a.pem\"]\n",
+			// The same roots trust the same issuers whatever the order,
+			// and a root named twice adds nothing.
+			wantSame: true,
+		},
+		{
+			name:     "an upstream root named twice",
+			doc:      minimal + identityDoc + "tls:\n  upstream_ca_files: [\"/a.pem\"]\n",
+			against:  minimal + identityDoc + "tls:\n  upstream_ca_files: [\"/a.pem\", \"/a.pem\"]\n",
 			wantSame: true,
 		},
 		{name: "another endpoint", doc: minimal + "  - host: files.pythonhosted.org\n" + identityDoc},
