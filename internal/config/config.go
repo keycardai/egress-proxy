@@ -268,6 +268,9 @@ func Load(path string, overrides Overrides) (*Config, error) {
 // Parse parses a document, applies the overrides over it and the defaults
 // under both, and validates the result.
 func Parse(data []byte, overrides Overrides) (*Config, error) {
+	if err := refuseSecondDocument(data); err != nil {
+		return nil, fmt.Errorf("%w: %w", errInvalid, err)
+	}
 	jsonText, err := yaml.YAMLToJSONStrict(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)

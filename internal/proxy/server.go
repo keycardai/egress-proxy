@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,6 +67,13 @@ const (
 	maxIdleConnsPerHost = 8
 	upstreamIdleTimeout = 90 * time.Second
 	tlsHandshakeTimeout = 10 * time.Second
+
+	// handlerJoinBound bounds the join at the end of stop. After Close every
+	// handler has a cancelled context, and every connection Close reaches is
+	// closed, so a handler returns as soon as it sees either. The bound keeps
+	// a handler that is stuck, or an audit sink that stalls, from holding the
+	// process.
+	handlerJoinBound = 5 * time.Second
 )
 
 var (
@@ -151,6 +159,7 @@ type Server struct {
 	intake    *intake
 	transport *http.Transport
 	reverse   *httputil.ReverseProxy
+	handlers  inflight
 }
 
 // New builds the proxy.
@@ -173,9 +182,10 @@ func New(opts Options) (*Server, error) {
 		Transport: server.transport,
 		// Responses stream: LLM traffic is server-sent events, and a
 		// buffered proxy stalls it.
-		FlushInterval: -1,
-		ErrorHandler:  server.upstreamError,
-		ErrorLog:      slog.NewLogLogger(opts.Logger.Handler(), slog.LevelWarn),
+		FlushInterval:  -1,
+		ModifyResponse: server.recordUpstreamStatus,
+		ErrorHandler:   server.upstreamError,
+		ErrorLog:       slog.NewLogLogger(opts.Logger.Handler(), slog.LevelWarn),
 	}
 
 	var http1 http.Protocols
@@ -206,17 +216,24 @@ func New(opts Options) (*Server, error) {
 // stops both servers: a graceful shutdown bounded by ShutdownGrace, and a
 // close of whatever is still open. It returns the first server failure, or
 // nil after a shutdown the context asked for. Call Run once per Server.
+//
+// A request carries the run context's values and not its cancellation, so
+// cancelling ctx starts the drain. The requests still open when the drain
+// ends are cancelled, which is how an upgraded connection ends, because
+// Close does not reach a hijacked connection.
 func (s *Server) Run(ctx context.Context, listener net.Listener) error {
 	limited := limitListener(listener, s.opts.MaxConnections, s.opts.IdleTimeout)
 	group, ctx := errgroup.WithContext(ctx)
-	base := func(net.Listener) context.Context { return ctx }
+	requestCtx, endRequests := context.WithCancel(context.WithoutCancel(ctx))
+	defer endRequests()
+	base := func(net.Listener) context.Context { return requestCtx }
 	s.front.BaseContext = base
 	s.tunnels.BaseContext = base
 	group.Go(func() error { return served("frontend", s.front.Serve(limited)) })
 	group.Go(func() error { return served("tunnels", s.tunnels.Serve(s.intake)) })
 	group.Go(func() error {
 		<-ctx.Done()
-		s.stop(ctx)
+		s.stop(ctx, endRequests)
 		return nil
 	})
 	if err := group.Wait(); err != nil {
@@ -233,10 +250,71 @@ func served(name string, err error) error {
 	return fmt.Errorf("%s: %w", name, err)
 }
 
-// stop drains both servers for the grace period, then closes what remains.
-// It logs a shutdown that ran out of time and finishes it with Close.
-// Nothing here fails the run.
-func (s *Server) stop(ctx context.Context) {
+// inflight counts the tunnel handlers still running. stop waits on it
+// after Close, because a handler the reverse proxy hijacked for an upgrade
+// ends on its own goroutine and emits its record last, and Close does not
+// wait for it. The wait seals the counter first, so the set it joins cannot
+// grow while it joins.
+type inflight struct {
+	mu      sync.Mutex
+	running int
+	// sealed is set by wait. A sealed counter admits no handler.
+	sealed bool
+	// drained is set by wait and closed by the leave that brings running
+	// to zero.
+	drained chan struct{}
+}
+
+// enter counts a handler and reports whether it may serve. A sealed counter
+// admits none, and a handler it refuses calls no leave.
+func (f *inflight) enter() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sealed {
+		return false
+	}
+	f.running++
+	return true
+}
+
+func (f *inflight) leave() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.running--
+	if f.running == 0 && f.drained != nil {
+		close(f.drained)
+		f.drained = nil
+	}
+}
+
+// wait seals the counter and reports whether the handlers finished within
+// bound.
+func (f *inflight) wait(bound time.Duration) bool {
+	f.mu.Lock()
+	f.sealed = true
+	if f.running == 0 {
+		f.mu.Unlock()
+		return true
+	}
+	f.drained = make(chan struct{})
+	drained := f.drained
+	f.mu.Unlock()
+	select {
+	case <-drained:
+		return true
+	case <-time.After(bound):
+		return false
+	}
+}
+
+// stop drains both servers for the grace period, then ends the requests
+// still open and closes what remains. It logs a shutdown that ran out of
+// time and finishes it with Close. endRequests runs before Close because
+// Close does not reach a connection a handler hijacked. It then joins the
+// tunnel handlers for up to handlerJoinBound, so the records of the handlers
+// that finish in time land before Run returns, and logs a join that ran out
+// of time. Nothing here fails the run.
+func (s *Server) stop(ctx context.Context, endRequests context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.opts.ShutdownGrace)
 	defer cancel()
 	if err := errors.Join(s.front.Shutdown(ctx), s.tunnels.Shutdown(ctx)); err != nil {
@@ -244,8 +322,13 @@ func (s *Server) stop(ctx context.Context) {
 			slog.Duration("grace", s.opts.ShutdownGrace),
 			slog.String("error", err.Error()))
 	}
+	endRequests()
 	if err := errors.Join(s.front.Close(), s.tunnels.Close()); err != nil && !errors.Is(err, net.ErrClosed) {
 		s.logger.Warn("closing the servers", slog.String("error", err.Error()))
+	}
+	if !s.handlers.wait(handlerJoinBound) {
+		s.logger.Warn("tunnel handlers still running after the close",
+			slog.Duration("bound", handlerJoinBound))
 	}
 	s.transport.CloseIdleConnections()
 }

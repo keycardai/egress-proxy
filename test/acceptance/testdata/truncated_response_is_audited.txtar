@@ -1,0 +1,38 @@
+# A response whose body ends short of its Content-Length leaves a
+# request-scoped audit record: the request was allowed and forwarded, the
+# status the upstream sent is recorded, and the outcome names the response
+# that did not complete. curl fails on the short body.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The upstream declares 100 bytes and writes five, so curl fails.
+! exec curl -sS --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/truncated
+
+sigterm
+wait proxy
+
+audit stdout scope=request request.path=/truncated decision.verdict=allow decision.reason=endpoint_allowed outcome.status=200 outcome.error~.
+
+-- config.yaml --
+version: 1
+tls:
+  upstream_ca_files: ["upstream/ca.crt"]
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost

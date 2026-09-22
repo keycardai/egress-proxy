@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -194,6 +196,9 @@ type forward struct {
 	port   int
 	denied bool
 	err    error
+	// status is the status the upstream answered, set before the response
+	// is written.
+	status int
 }
 
 type forwardKey struct{}
@@ -206,6 +211,11 @@ func forwardFrom(ctx context.Context) *forward {
 // serveTunnelRequest makes the request-scoped decision and forwards an
 // allowed request.
 func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
+	// A request that arrives once the join has begun is not served, because its connection is closed already.
+	if !s.handlers.enter() {
+		return
+	}
+	defer s.handlers.leave()
 	state := tunnelFrom(r.Context())
 	if state == nil {
 		http.Error(w, "no tunnel", http.StatusInternalServerError)
@@ -232,8 +242,27 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 
 	fwd := &forward{host: state.sni, port: state.port}
 	recorder := &statusRecorder{ResponseWriter: w}
+	// ReverseProxy panics with http.ErrAbortHandler when it cannot finish
+	// copying a body, so the record is emitted from a deferred call and the
+	// panic goes on to net/http, which closes the connection.
+	defer func() {
+		recovered := recover()
+		s.emitForwarded(record, fwd, recorder, r, recovered)
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
 	s.reverse.ServeHTTP(recorder, r.WithContext(context.WithValue(r.Context(), forwardKey{}, fwd)))
-	record.Outcome = &audit.Outcome{Status: recorder.status}
+}
+
+// emitForwarded records what came of an allowed request. The decision stays
+// what decideRequest returned unless the forward itself was refused or
+// failed. recovered is non-nil when the response did not complete.
+func (s *Server) emitForwarded(
+	record audit.Record, fwd *forward, recorder *statusRecorder, r *http.Request, recovered any,
+) {
+	// A hijacked upgrade reaches no recorder, so the forward holds its status.
+	record.Outcome = &audit.Outcome{Status: cmp.Or(recorder.status, fwd.status)}
 	switch {
 	case fwd.denied:
 		record.Decision = audit.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonDenyAlways}
@@ -241,8 +270,26 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 	case fwd.err != nil:
 		record.Decision = audit.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonUpstreamFailed}
 		record.Outcome.Error = fwd.err.Error()
+	case recovered != nil:
+		record.Outcome.Error = panicOutcome(recovered, r.Context().Err())
 	}
 	s.opts.Audit.Emit(record)
+}
+
+// panicOutcome names what a panic out of the forward left behind. The abort
+// says the response did not complete, and requestErr tells a client that
+// went away from an upstream body that did not complete. Any other value is
+// a panic in the handler and carries its own text.
+func panicOutcome(recovered any, requestErr error) string {
+	abort, _ := recovered.(error)
+	switch {
+	case abort == nil || !errors.Is(abort, http.ErrAbortHandler):
+		return "the handler panicked: " + fmt.Sprint(recovered)
+	case requestErr != nil:
+		return "the client went away or the server stopped before the response completed"
+	default:
+		return "the upstream response body did not complete"
+	}
 }
 
 // decideRequest is the per-request decision: the target is well formed, the
@@ -273,6 +320,16 @@ func rewrite(pr *httputil.ProxyRequest) {
 	pr.Out.URL.Scheme = "https"
 	pr.Out.URL.Host = net.JoinHostPort(fwd.host, strconv.Itoa(fwd.port))
 	pr.Out.Host = pr.In.Host
+}
+
+// recordUpstreamStatus keeps the upstream's status on the forward. The
+// status recorder misses a 101, which the reverse proxy writes onto the
+// hijacked connection.
+func (s *Server) recordUpstreamStatus(res *http.Response) error {
+	if fwd := forwardFrom(res.Request.Context()); fwd != nil {
+		fwd.status = res.StatusCode
+	}
+	return nil
 }
 
 // upstreamError answers an allowed request that produced no response. A dial
@@ -398,7 +455,10 @@ type statusRecorder struct {
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
+	// An informational status precedes the final status and is not recorded.
+	if status >= http.StatusOK {
+		r.status = status
+	}
 	r.ResponseWriter.WriteHeader(status)
 }
 

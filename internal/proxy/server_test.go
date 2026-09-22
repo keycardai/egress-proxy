@@ -946,6 +946,8 @@ func TestTruncatedResponseIsAudited(t *testing.T) {
 	})
 	assert.NotEmpty(t, record.RequestID, "record request id")
 	require.NotNil(t, record.Outcome, "record outcome")
+	assert.Equal(t, policy.VerdictAllow, record.Decision.Verdict, "the request was allowed and forwarded")
+	assert.Equal(t, policy.ReasonEndpointAllowed, record.Decision.Reason, "the decision reason is unchanged")
 	assert.Equal(t, http.StatusOK, record.Outcome.Status, "record status")
 	assert.NotEmpty(t, record.Outcome.Error, "the record reports the incomplete response")
 }
@@ -1010,6 +1012,38 @@ func TestShutdownDrainsInFlightRequest(t *testing.T) {
 		assert.Equal(t, "finished", got.body, "response body")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the request did not finish within the shutdown grace")
+	}
+}
+
+// TestShutdownEndsAnUpgradedConnection proves that the requests still open
+// when the drain ends are cancelled. The reverse proxy hijacks the client
+// connection for a protocol upgrade and ends it only when the request
+// context is done, which http.Server.Close never reaches.
+func TestShutdownEndsAnUpgradedConnection(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{unstarted: true})
+	h.upstream.server.Config.Handler = http.HandlerFunc(upgradeHandler)
+	run := h.run(t)
+	conn, reader := h.upgrade(t)
+	run.cancel()
+	select {
+	case <-run.finished:
+		require.NoError(t, run.err, "Run after cancellation")
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish")
+	}
+	ended := make(chan error, 1)
+	go func() {
+		_, err := reader.Read(make([]byte, 1))
+		ended <- err
+	}()
+	select {
+	case err := <-ended:
+		require.Error(t, err, "the upgraded connection ends with the drain")
+	case <-time.After(5 * time.Second):
+		// The close ends the read, so the goroutine does not outlive the test.
+		_ = conn.Close()
+		t.Fatal("the upgraded connection outlived the drain")
 	}
 }
 

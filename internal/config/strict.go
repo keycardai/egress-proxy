@@ -5,14 +5,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
+
+	yaml "go.yaml.in/yaml/v2"
 )
 
 var (
-	errCaseFold     = errors.New("keys that differ only in case name one setting")
-	errKeyNotString = errors.New("an object key is not a string")
+	errCaseFold       = errors.New("keys that differ only in case name one setting")
+	errKeyNotString   = errors.New("an object key is not a string")
+	errSecondDocument = errors.New("the input holds more than one YAML document")
 )
+
+// refuseSecondDocument refuses an input that carries a second YAML document.
+// The conversion to JSON reads the first document alone, so a second one
+// would take no part in the settings or in the document digest.
+func refuseSecondDocument(data []byte) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var first, second any
+	// A first document that does not parse leaves the decoder unusable, and
+	// the strict conversion that follows reports the syntax problem.
+	if err := decoder.Decode(&first); err == nil {
+		if err := decoder.Decode(&second); !errors.Is(err, io.EOF) {
+			return errSecondDocument
+		}
+	}
+	return nil
+}
 
 // refuseCaseFoldedKeys walks the JSON once and refuses two keys at one
 // level that are equal under case folding. The struct decoder matches field
