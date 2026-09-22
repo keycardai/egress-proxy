@@ -1,0 +1,81 @@
+# The CONNECT frontend end to end with the built binary: a listed host is
+# reached through HTTPS_PROXY by curl, an unlisted host and a deny-listed
+# address are refused at the CONNECT, the refused destinations never reach
+# the upstream, the admin socket answers, SIGTERM stops the proxy cleanly,
+# and every decision has an audit record on stdout.
+#
+# The per-instance settings reach the proxy through the environment, as a
+# manifest sets them; the endpoints and the policy come from the document.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+# The CA output directory holds the certificate and nothing else.
+exists shared-ca/ca.crt
+! exists shared-ca/ca.key
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# An allowed host is reached through HTTPS_PROXY.
+exec curl -sS --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello
+stdout '^hello from upstream /hello$'
+
+# An unlisted host is refused at the CONNECT; curl fails and reports the
+# CONNECT status.
+! exec curl -sS -o /dev/null -w '%{http_connect}' https://denied.invalid/
+stdout '^403$'
+
+# A deny-listed address is refused at the CONNECT.
+! exec curl -sS -o /dev/null -w '%{http_connect}' https://169.254.169.254/latest/meta-data/
+stdout '^403$'
+
+# The admin socket answers.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/healthz
+stdout '^ok$'
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"sandbox_id": "acceptance"'
+stdout '"overridden": \['
+
+# The refused destinations never reached the upstream.
+grep -count=1 '^request ' upstream/requests.log
+grep 'request GET /hello host=localhost:' upstream/requests.log
+
+# SIGTERM stops the proxy cleanly: exit 0, the stop is logged, and the admin
+# socket is unlinked.
+sigterm
+wait proxy
+! exists $ADMIN_DIR/admin.sock
+stderr '"msg":"stopping"'
+stderr '"overridden":\["ca.out_dir","listen.admin","listen.connect","sandbox.id"\]'
+
+# Every decision has an audit record, stamped with the sandbox id and both
+# digests: the document as mounted, and the settings in force.
+audit stdout scope=connection destination.host=localhost decision.verdict=allow decision.reason=endpoint_allowed
+! audit stdout scope=connection decision.endpoint~.
+audit stdout scope=request destination.sni=localhost request.method=GET request.path=/hello decision.reason=endpoint_allowed decision.endpoint=localhost/ outcome.status=200
+audit stdout scope=connection destination.host=denied.invalid decision.verdict=deny decision.reason=no_matching_endpoint
+audit stdout scope=connection destination.host=169.254.169.254 decision.verdict=deny decision.reason=deny_always
+audit -all stdout sandbox_id=acceptance
+audit -all stdout document.digest~^sha256:[0-9a-f]{64}$
+audit -all stdout config.digest~^sha256:[0-9a-f]{64}$
+
+-- config.yaml --
+version: 1
+tls:
+  upstream_ca_files: ["upstream/ca.crt"]
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost

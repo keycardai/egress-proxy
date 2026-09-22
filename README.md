@@ -8,6 +8,30 @@ Currently only HTTP/HTTPS is supported.
 
 This project does not provide workload isolation "sandboxing" or the network configuration necessary for traffic to be forced through the proxy, or for the untrusted workload to trust the proxy's self-signed root CA. This service is designed to be deployed as a component into such a configuration, as a means by which trust can be removed from untrustworthy workloads. See [https://github.com/keycardai/agent-sandbox-poc] for a reference example of such a deployment.
 
+## Run
+
+    go build ./cmd/egress-proxy
+    ./egress-proxy --config config.example.yaml --ca-out-dir ./shared-ca --admin /tmp/egress-admin.sock
+
+Every flag also reads an `EGRESS_PROXY_*` variable, so a manifest can set the
+per-instance values from the pod's own metadata and share one document.
+
+The proxy listens for `CONNECT` on `127.0.0.1:3128` by default and writes its
+CA certificate to the output directory. A client that trusts that certificate
+and sets `HTTPS_PROXY=http://127.0.0.1:3128` reaches the endpoints the
+document lists and nothing else:
+
+    HTTPS_PROXY=http://127.0.0.1:3128 curl --cacert ./shared-ca/ca.crt https://pypi.org/simple/
+
+Every decision is one JSON line on stdout; logs are JSON on stderr. The admin
+socket answers `/healthz` and `/info`:
+
+    curl --unix-socket /tmp/egress-admin.sock http://admin/info
+
+`docs/configuration.md` describes every key of the document and every reason
+code in the audit stream. `docs/security-model.md` states what the proxy
+enforces and what it does not.
+
 ## Build
 
     make build      # the binaries

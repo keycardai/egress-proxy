@@ -1,5 +1,6 @@
 # Every job here runs a Makefile target, so the local gate and the CI gate
-# are one gate. Actions are pinned by commit and Dependabot moves the pins.
+# are one gate. Each action pin names a commit, and Dependabot moves the
+# pins.
 name: ci
 
 on:

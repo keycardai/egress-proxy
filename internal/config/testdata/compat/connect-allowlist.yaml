@@ -1,0 +1,50 @@
+# The first published shape of the document: identity, process settings,
+# policy and endpoints with every placement kind.
+version: 1
+sandbox:
+  id: "sbx-igmua2g0"
+identity:
+  zone_url: "https://acme.keycard.cloud"
+  client_id: "app-cred-1"
+  workload_token_file: "/var/run/secrets/keycard/token"
+  impersonate:
+    user: "igmua2g0fwapl21qll7tczdw7t"
+listen:
+  connect: "127.0.0.1:3128"
+  admin: "/run/egress/admin.sock"
+ca:
+  out_dir: "/shared-ca"
+  state_dir: "/run/egress/ca"
+  leaf_ttl: "24h"
+  cache_size: 1024
+tls:
+  upstream_ca_files: []
+limits:
+  max_connections: 1024
+  idle_timeout: "5m"
+policy:
+  cluster_cidrs: ["10.42.0.0/16", "10.43.0.0/16"]
+  deny_list_exceptions: []
+endpoints:
+  - host: "api.github.com"
+    resource: "https://api.github.com/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GITHUB_TOKEN
+  - host: "github.com"
+    resource: "https://api.github.com/"
+    credential:
+      placement: {kind: basic, user: x-access-token}
+      env: GITHUB_TOKEN
+  - host: "openrouter.ai"
+    path_prefix: "/api/v1/"
+    resource: "https://openrouter.ai/api/v1"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: OPENROUTER_API_KEY
+  - host: "maps.example"
+    credential:
+      placement: {kind: query, name: key}
+      env: MAPS_API_KEY
+  - host: "pypi.org"
+  - host: "files.pythonhosted.org"

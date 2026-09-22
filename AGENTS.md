@@ -13,7 +13,8 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   `//go:build linux` with a stub for every other platform.
 - Layout:
   `cmd/` for binaries, `internal/` for everything else,
-  `test/acceptance/<purpose>/run.sh` for the runnable acceptance scripts,
+  `test/acceptance/` for the acceptance tests, Go behind the `acceptance`
+  build tag with one testscript per scenario under `testdata/`,
   `test/e2e/` for the cluster lanes,
   `test/gates/` for the gate self-tests, `scripts/` for the gate scripts,
   `images/` for image definitions.
@@ -31,14 +32,21 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
 These apply to every task in this repository.
 
 1. One task is one PR, under 2,000 non-generated lines including tests. The
-   subject starts with the task id: `A2: proxy core with CONNECT frontend`.
+   subject summarizes the purpose: `proxy core with CONNECT frontend`.
 2. Every task lands with table-driven tests that pin expected values and
-   denial reason codes, never merely "no error".
-3. A task that changes the request path adds or extends an acceptance script
-   under `test/acceptance/`. A script's directory is named for what it
-   proves (`connect-allow-deny`, `credential-injection`), never for a task
-   or milestone id, because the tree outlives the plan that produced it. CI
-   runs every acceptance script on every commit.
+   denial reason codes, never merely "no error". Assertions use
+   `stretchr/testify`: `require` where a failure makes the rest of the test
+   meaningless, `assert` otherwise. See "Tests" below.
+3. A task that changes the request path adds or extends an acceptance
+   scenario under `test/acceptance/testdata/`. A scenario is a testscript
+   (`github.com/rogpeppe/go-internal/testscript`) that drives the built
+   binary through its flags, environment and an external client, with the
+   custom commands `test/acceptance/acceptance_test.go` registers. Its file
+   is named for what it proves (`connect_allow_deny.txtar`,
+   `credential_injection.txtar`), never for a task or milestone id, because
+   the tree outlives the plan that produced it. CI runs every scenario on
+   every commit. Acceptance and gate code is Go; there are no shell scripts
+   to maintain beyond the gate wrappers under `scripts/`.
 4. Configuration is additive. The config schema grows fields and never
    renames or repurposes one. `internal/config/testdata/compat/` holds every
    earlier example document and a test parses all of them.
@@ -51,11 +59,10 @@ These apply to every task in this repository.
    Read the source under `$(go env GOMODCACHE)` or run `go doc`. Where a
    design document is wrong about an API, implement against the real API and
    record the discrepancy in the PR.
-8. Use the library. The iteration plan names a maintained, permissively
-   licensed library for each problem the earlier proof of concept hand-rolled.
-   A PR that writes what a listed library does says why the library does not
-   fit. A new dependency goes through the license gate, not through a
-   reviewer's memory.
+8. Use the library. Prefer a maintained, permissively licensed module over a
+   hand-rolled version of the same thing, and say in the PR why the obvious
+   library does not fit when you write one anyway. A new dependency goes
+   through the license gate, not through a reviewer's memory.
 9. Drive the artifact that ships. An acceptance test exercises the built
    image and the rendered manifest, not a hand-built stand-in.
 10. Security lands with the surface, never after it. A task that adds an
@@ -66,6 +73,100 @@ These apply to every task in this repository.
     model is complete for every shipped surface and reviewed against the code.
 11. Never rewrite history.
 
+## Design decisions that constrain later tasks
+
+These are settled and load-bearing. Changing one is a design change rather
+than a refactor, and it changes `docs/security-model.md` with it.
+
+- **goproxy handles the CONNECT line and nothing else.** It cannot serve the
+  loop inside a tunnel: v1.9.1 dereferences a nil URL when a request carries
+  an asterisk-form target and a `Host` with a port, inside a goroutine it
+  starts itself, so no recover outside goproxy reaches it. An allowed tunnel
+  is hijacked, TLS is terminated on a goroutine of ours that recovers, and
+  the decrypted connection goes into `intake`, a channel-backed listener that
+  a second `http.Server` serves. A transparent frontend should push into that
+  same intake rather than synthesizing a CONNECT, which needs a small
+  exported entry point on `proxy.Server`.
+- **A connection decision names no endpoint, but shares the reason codes.**
+  The connection-scoped answer knows only a host, so it leaves
+  `decision.endpoint` empty: a path prefix on a record that no path took part
+  in is misleading. The reasons stay `endpoint_allowed` and
+  `no_matching_endpoint` in both scopes, because the endpoint is the unit a
+  document declares, and that holds even where a later protocol matches on
+  something other than a path. Read `scope` to tell the two apart.
+- **Reason codes are a stable contract.** An audit query and an agent's error
+  handling both key on them, so add a code rather than reword one. They are a
+  named type, and the `exhaustive` linter makes a new code fail the build
+  until every switch that maps one decides what to do with it. The same holds
+  for `policy.Verdict`, `audit.Scope` and `config.PlacementKind`.
+- **Two digests identify every decision.** `document.digest` covers the
+  mounted document before overrides and defaults. `config.digest` covers the
+  settings in force after them, so two sidecars that answer every request
+  alike share it whatever each was given. A setting belongs in
+  `decisionInputs` when its value can make two sidecars answer the same
+  request differently, which keeps `sandbox.id`, the listen addresses, the CA
+  directories and the limits out. The digest input is never exposed, so
+  hashing a file path leaks nothing.
+- **Settings come from the document, then the environment, then flags.** Only
+  the per-instance and process settings have a flag and an `EGRESS_PROXY_*`
+  variable. The endpoints and the `policy` section come from the document
+  alone and must never gain one, because a record has to name every rule that
+  was in force. A variable is named for the setting it fills rather than the
+  source that feeds it, so the mapping from pod metadata lives in the
+  manifest. `Config.Overridden` lists the keys an override replaced, and the
+  process announces them on every start.
+- **Both servers take a context and stop together.** `Run` composes the proxy
+  and the admin socket under one `errgroup`, so a failure in either cancels
+  the other, each drains within its grace period, and `Run` returns once both
+  have stopped. An error discarded during shutdown is logged unless it is the
+  expected already-closed case.
+- **The CA key goes only to `ca.state_dir`.** The binary proves that
+  directory is memory-backed with a filesystem-type check rather than
+  trusting the manifest, and refuses a path that overlaps the output
+  directory. The output directory holds the certificate and nothing else.
+
+## Tests
+
+- `require` halts, `assert` continues. Port the old failure message into the
+  assertion's message argument rather than dropping it, and split a compound
+  condition so a failure names the field that actually differs.
+- Wait on a signal, not on a clock. A test that needs something another
+  goroutine produces subscribes to it; polling with a sleep is the fallback
+  for a side effect of another process, such as a file appearing or a port
+  binding.
+- Prove a new negative assertion fails before trusting it. Break the thing it
+  guards, watch the test go red, then restore. Restore from a copy you made,
+  never with `git checkout`, which discards unstaged work in the file.
+- Verify third-party behaviour rather than asserting it from memory. A short
+  throwaway program under a scratch directory settles what a library actually
+  does, and the answer belongs in the PR.
+- The acceptance scenarios drive the built binary through its flags,
+  environment and an external client. Beyond testscript's own commands,
+  `acceptance_test.go` registers `upstream`, `freeport`, `shortdir`,
+  `waitfile`, `waitport`, `sigterm`, and `audit`, which matches dotted fields
+  in the JSON audit stream and takes `-all` to require every record to match.
+
+## Comments
+
+Comments describe the current state of the code in the present tense.
+Anything historical belongs in the commit message.
+
+- Give the rule, not the derivation. Drop the worked example and the
+  reasoning chain that produced it.
+- No postmortems and no rejected alternatives. State the invariant that holds
+  now, not the bug that motivated it or what the code is not.
+- Operational rules are imperative and findable: "NEVER write the key outside
+  the state directory" beats three paragraphs circling the same point.
+- Nothing that rots. No line or query counts, no "mirrors otherFunction"
+  cross-references, no "for now" or "currently".
+- Plain language. Active voice, simple tenses, one claim per sentence. Modals
+  limited to can, will and must. No em-dashes and no semicolons joining two
+  claims: write two sentences or name the relation.
+- Say it once. Shared rationale lives at the thing it belongs to, not
+  restated in every caller.
+- The same standard applies in tests. Say why the test is shaped the way it
+  is, not what you saw while writing it.
+
 ## Gates
 
 A change is not done until all of these pass. Each `make` target is also a CI
@@ -75,7 +176,7 @@ job, so the local gate and the CI gate are one gate.
     make test        go vet, go test -race ./..., including the gate self-tests
     make lint        golangci-lint at the pinned version, with the depguard import gate
     make checks      license allow-list, NOTICE freshness, govulncheck
-    make acceptance  every acceptance script under test/acceptance
+    make acceptance  the acceptance tests under test/acceptance, against the built binary
     make e2e         the cluster lanes (skips when there are none)
 
 `make all` runs build, test, lint, checks and acceptance in that order.

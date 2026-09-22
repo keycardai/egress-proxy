@@ -9,7 +9,7 @@ help:
 	@echo "test            go vet and go test -race ./..., including the gate self-tests"
 	@echo "lint            golangci-lint (with the depguard import gate), the version go.mod pins"
 	@echo "checks          license allow-list, NOTICE freshness and govulncheck"
-	@echo "acceptance      every acceptance script under test/acceptance"
+	@echo "acceptance      the acceptance tests under test/acceptance, which drive the built binary"
 	@echo "e2e             the cluster lanes under test/e2e"
 	@echo "notice          regenerate NOTICE from the build list"
 	@echo "tidy            go mod tidy"
@@ -19,9 +19,10 @@ help:
 build:
 	$(GO) build ./...
 
+# The acceptance tests are behind a build tag, so vet names it to cover them.
 .PHONY: vet
 vet:
-	$(GO) vet ./...
+	$(GO) vet -tags acceptance ./...
 
 # The gate self-tests under test/gates run the gate scripts against their
 # negative fixtures, so this target builds the tools. -short skips them.
@@ -60,17 +61,14 @@ vuln:
 notice:
 	./scripts/notice.sh
 
-# Every acceptance script runs on every commit, so a later change cannot
-# silently regress an earlier one. Directories are named for what the script
-# proves, not for a task or milestone id.
+# The acceptance tests build the binary and drive it from Go, one testscript
+# per scenario under test/acceptance/testdata, named for what it proves. They
+# are behind the acceptance build tag so `go test ./...` never runs binaries.
+# Every scenario runs on every commit, so a later change cannot silently
+# regress an earlier one.
 .PHONY: acceptance
 acceptance:
-	@set -e; found=0; \
-	for script in test/acceptance/*/run.sh; do \
-		[ -e "$$script" ] || continue; found=1; \
-		echo "acceptance: $$script"; "$$script"; \
-	done; \
-	[ "$$found" = 1 ] || echo "acceptance: no scripts under test/acceptance yet"
+	$(GO) test -tags acceptance -count=1 ./test/acceptance/...
 
 # The k3d lanes on sigs.k8s.io/e2e-framework. The lanes are behind the e2e
 # build tag so `go test ./...` never starts a cluster.

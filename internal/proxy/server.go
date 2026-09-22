@@ -1,0 +1,312 @@
+// Package proxy is the CONNECT frontend and the request pipeline behind it.
+//
+// goproxy accepts the CONNECT and makes the connection decision. The proxy
+// then hijacks an allowed tunnel, terminates TLS with a leaf minted for the
+// SNI, and hands the decrypted connection to a net/http server. That
+// server's handler makes the request decision and forwards the request
+// through httputil.ReverseProxy.
+//
+// net/http serves the loop inside the tunnel, not goproxy. goproxy v1.9.1
+// dereferences a nil URL when a request inside a MITM tunnel carries an
+// asterisk-form target and a Host with a port (https.go line 498). That
+// panic runs in a goroutine goproxy starts, so no recover outside goproxy
+// reaches it. net/http recovers a panic per connection, routes `OPTIONS *`
+// to the handler through DisableGeneralOptionsHandler, and streams
+// responses.
+//
+// This package sets two postures explicitly. The upstream transport verifies
+// against a root pool the caller supplies and refuses anything below TLS
+// 1.2. Nothing chains to another proxy: goproxy's constructor reads
+// HTTPS_PROXY from the environment, which names this process inside a
+// sandbox, so New clears both dial hooks.
+package proxy
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/netip"
+	"syscall"
+	"time"
+
+	"github.com/elazarl/goproxy"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/keycardai/egress-proxy/internal/audit"
+	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/internal/policy"
+)
+
+// Headers the proxy puts on a refusal, so a client that does not read the
+// body still sees why.
+const (
+	HeaderReason    = "X-Keycard-Deny-Reason"
+	HeaderRequestID = "X-Keycard-Request-Id"
+)
+
+const (
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultHandshakeTimeout  = 10 * time.Second
+	defaultDialTimeout       = 30 * time.Second
+	defaultIdleTimeout       = 5 * time.Minute
+	defaultShutdownGrace     = 10 * time.Second
+	defaultMaxConnections    = 1024
+
+	maxIdleConns        = 100
+	maxIdleConnsPerHost = 8
+	upstreamIdleTimeout = 90 * time.Second
+	tlsHandshakeTimeout = 10 * time.Second
+)
+
+var (
+	errNoMatcher   = errors.New("proxy: no matcher")
+	errNoCertStore = errors.New("proxy: no certificate store")
+	errNoAudit     = errors.New("proxy: no audit sink")
+	errNoRoots     = errors.New("proxy: no upstream roots")
+)
+
+// Options configures a Server. Matcher, Certificates, Audit and
+// UpstreamRoots are required.
+type Options struct {
+	// Matcher makes the connection and request decisions.
+	Matcher *policy.Matcher
+	// Certificates mints the leaves the workload sees.
+	Certificates *ca.Store
+	// Audit receives one record per decision.
+	Audit audit.Sink
+	// UpstreamRoots verifies upstream certificates.
+	UpstreamRoots *x509.CertPool
+	// Logger records the request path. A nil logger discards.
+	Logger *slog.Logger
+	// MaxConnections caps simultaneous connections on the listener. Zero
+	// means 1024.
+	MaxConnections int
+	// IdleTimeout closes a connection that neither reads nor writes for this
+	// long, on both the frontend and inside a tunnel. Zero means five
+	// minutes.
+	IdleTimeout time.Duration
+	// ReadHeaderTimeout bounds how long a client can take to send a request
+	// head. Zero means ten seconds.
+	ReadHeaderTimeout time.Duration
+	// HandshakeTimeout bounds the TLS handshake inside a tunnel. Zero means
+	// ten seconds.
+	HandshakeTimeout time.Duration
+	// DialTimeout bounds one upstream dial. Zero means thirty seconds.
+	DialTimeout time.Duration
+	// ShutdownGrace is how long Run waits for in-flight requests after its
+	// context is cancelled before closing every connection. Zero means ten
+	// seconds.
+	ShutdownGrace time.Duration
+}
+
+func (o Options) withDefaults() Options {
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	if o.MaxConnections <= 0 {
+		o.MaxConnections = defaultMaxConnections
+	}
+	if o.IdleTimeout <= 0 {
+		o.IdleTimeout = defaultIdleTimeout
+	}
+	if o.ReadHeaderTimeout <= 0 {
+		o.ReadHeaderTimeout = defaultReadHeaderTimeout
+	}
+	if o.HandshakeTimeout <= 0 {
+		o.HandshakeTimeout = defaultHandshakeTimeout
+	}
+	if o.DialTimeout <= 0 {
+		o.DialTimeout = defaultDialTimeout
+	}
+	if o.ShutdownGrace <= 0 {
+		o.ShutdownGrace = defaultShutdownGrace
+	}
+	return o
+}
+
+// Server is the CONNECT frontend. Run serves it until its context is
+// cancelled.
+type Server struct {
+	opts      Options
+	logger    *slog.Logger
+	front     *http.Server
+	tunnels   *http.Server
+	intake    *intake
+	transport *http.Transport
+	reverse   *httputil.ReverseProxy
+}
+
+// New builds the proxy.
+func New(opts Options) (*Server, error) {
+	switch {
+	case opts.Matcher == nil:
+		return nil, errNoMatcher
+	case opts.Certificates == nil:
+		return nil, errNoCertStore
+	case opts.Audit == nil:
+		return nil, errNoAudit
+	case opts.UpstreamRoots == nil:
+		return nil, errNoRoots
+	}
+	opts = opts.withDefaults()
+	server := &Server{opts: opts, logger: opts.Logger, intake: newIntake()}
+	server.transport = server.newTransport()
+	server.reverse = &httputil.ReverseProxy{
+		Rewrite:   rewrite,
+		Transport: server.transport,
+		// Responses stream: LLM traffic is server-sent events, and a
+		// buffered proxy stalls it.
+		FlushInterval: -1,
+		ErrorHandler:  server.upstreamError,
+		ErrorLog:      slog.NewLogLogger(opts.Logger.Handler(), slog.LevelWarn),
+	}
+
+	var http1 http.Protocols
+	http1.SetHTTP1(true)
+	errorLog := slog.NewLogLogger(opts.Logger.Handler(), slog.LevelWarn)
+	server.front = &http.Server{
+		Handler:           server.newFrontend(),
+		ReadHeaderTimeout: opts.ReadHeaderTimeout,
+		IdleTimeout:       opts.IdleTimeout,
+		ErrorLog:          errorLog,
+		Protocols:         &http1,
+	}
+	server.tunnels = &http.Server{
+		Handler:           http.HandlerFunc(server.serveTunnelRequest),
+		ReadHeaderTimeout: opts.ReadHeaderTimeout,
+		IdleTimeout:       opts.IdleTimeout,
+		ErrorLog:          errorLog,
+		Protocols:         &http1,
+		// The handler answers `OPTIONS *` like any other request, so the
+		// proxy refuses and audits it.
+		DisableGeneralOptionsHandler: true,
+		ConnContext:                  tunnelContext,
+	}
+	return server, nil
+}
+
+// Run serves the listener until ctx is cancelled or a server fails, then
+// stops both servers: a graceful shutdown bounded by ShutdownGrace, and a
+// close of whatever is still open. It returns the first server failure, or
+// nil after a shutdown the context asked for. Call Run once per Server.
+func (s *Server) Run(ctx context.Context, listener net.Listener) error {
+	limited := limitListener(listener, s.opts.MaxConnections, s.opts.IdleTimeout)
+	group, ctx := errgroup.WithContext(ctx)
+	base := func(net.Listener) context.Context { return ctx }
+	s.front.BaseContext = base
+	s.tunnels.BaseContext = base
+	group.Go(func() error { return served("frontend", s.front.Serve(limited)) })
+	group.Go(func() error { return served("tunnels", s.tunnels.Serve(s.intake)) })
+	group.Go(func() error {
+		<-ctx.Done()
+		s.stop(ctx)
+		return nil
+	})
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
+	return nil
+}
+
+// served maps the return of http.Server.Serve: a shutdown is not a failure.
+func served(name string, err error) error {
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", name, err)
+}
+
+// stop drains both servers for the grace period, then closes what remains.
+// It logs a shutdown that ran out of time and finishes it with Close.
+// Nothing here fails the run.
+func (s *Server) stop(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.opts.ShutdownGrace)
+	defer cancel()
+	if err := errors.Join(s.front.Shutdown(ctx), s.tunnels.Shutdown(ctx)); err != nil {
+		s.logger.Warn("graceful shutdown did not finish within the grace period; closing the remaining connections",
+			slog.Duration("grace", s.opts.ShutdownGrace),
+			slog.String("error", err.Error()))
+	}
+	if err := errors.Join(s.front.Close(), s.tunnels.Close()); err != nil && !errors.Is(err, net.ErrClosed) {
+		s.logger.Warn("closing the servers", slog.String("error", err.Error()))
+	}
+	s.transport.CloseIdleConnections()
+}
+
+// newFrontend wires goproxy as the CONNECT frontend.
+func (s *Server) newFrontend() *goproxy.ProxyHttpServer {
+	front := goproxy.NewProxyHttpServer()
+	front.Verbose = false
+	front.Logger = printfLogger{logger: s.logger}
+	front.Tr = s.transport
+	// NEVER leave these set. The constructor fills them from HTTPS_PROXY.
+	front.ConnectDial = nil
+	front.ConnectDialWithReq = nil
+	front.NonproxyHandler = http.HandlerFunc(s.serveNonProxy)
+	front.OnRequest().HandleConnectFunc(s.handleConnect)
+	front.OnRequest().DoFunc(s.handlePlain)
+	return front
+}
+
+// newTransport is the upstream leg: TLS 1.2 or better verified against the
+// given roots, no proxy, and a deny list check on every resolved address
+// before the socket connects.
+func (s *Server) newTransport() *http.Transport {
+	deny := s.opts.Matcher.DenyList()
+	dialer := &net.Dialer{
+		Timeout: s.opts.DialTimeout,
+		ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
+			addrPort, err := netip.ParseAddrPort(address)
+			if err != nil {
+				return &deniedError{address: address}
+			}
+			if deny.DeniesAddr(addrPort.Addr()) {
+				return &deniedError{address: address}
+			}
+			return nil
+		},
+	}
+	return &http.Transport{
+		Proxy:       nil,
+		DialContext: dialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    s.opts.UpstreamRoots,
+		},
+		MaxIdleConns:        maxIdleConns,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     upstreamIdleTimeout,
+		TLSHandshakeTimeout: tlsHandshakeTimeout,
+	}
+}
+
+// deniedError is the dial guard's refusal: the name resolved into a denied
+// range.
+type deniedError struct {
+	address string
+}
+
+func (e *deniedError) Error() string {
+	return "the destination resolved to " + e.address + ", which the platform deny list covers"
+}
+
+// newID is a connection or request identifier.
+func newID() string {
+	return rand.Text()
+}
+
+// printfLogger adapts slog to goproxy's Logger interface.
+type printfLogger struct {
+	logger *slog.Logger
+}
+
+func (l printfLogger) Printf(format string, v ...any) {
+	l.logger.Debug(fmt.Sprintf(format, v...), slog.String("component", "goproxy"))
+}
