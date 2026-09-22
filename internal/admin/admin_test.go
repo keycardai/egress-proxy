@@ -84,15 +84,14 @@ func TestServerAnswersHealthAndInfo(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "the socket is unlinked once Run returns")
 }
 
-func TestRunReturnsTheServeFailure(t *testing.T) {
+// TestRunReturnsNilOnCancellation covers the shutdown the context asks for.
+// TestRunReturnsTheServeFailure, an internal test, covers the other arm,
+// which needs the listener the Server does not export.
+func TestRunReturnsNilOnCancellation(t *testing.T) {
 	t.Parallel()
 	path := socketPath(t)
 	server, err := admin.New(t.Context(), path, func() any { return nil }, nil)
 	require.NoError(t, err)
-	// Nothing here can make Serve fail. Unlinking the socket file does not
-	// stop the listener, and the Server does not expose the descriptor to
-	// close. This case proves that the cancellation path returns nil. The
-	// proxy's Run test covers the failure path.
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	require.NoError(t, server.Run(ctx), "Run")

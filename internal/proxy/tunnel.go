@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -182,7 +183,21 @@ func (s *Server) tlsConfig(state *tunnel) *tls.Config {
 				return nil, refusal
 			}
 			state.sni = sni
-			return s.opts.Certificates.Certificate(sni)
+			certificate, err := s.opts.Certificates.Certificate(sni)
+			if err != nil {
+				s.opts.Audit.Emit(audit.Record{
+					ConnectionID: state.connectionID,
+					Scope:        audit.ScopeConnection,
+					Destination:  audit.Destination{Host: state.host, Port: state.port, SNI: sni},
+					Decision: audit.Decision{
+						Verdict: policy.VerdictDeny,
+						Reason:  policy.ReasonCertificateUnavailable,
+						Error:   err.Error(),
+					},
+				})
+				return nil, fmt.Errorf("proxy: mint a leaf for %s: %w", sni, err)
+			}
+			return certificate, nil
 		},
 	}
 }
@@ -190,10 +205,13 @@ func (s *Server) tlsConfig(state *tunnel) *tls.Config {
 // forward is what the request decision hands to the reverse proxy and reads
 // back from it.
 type forward struct {
-	host   string
-	port   int
-	denied bool
-	err    error
+	host string
+	port int
+	// requestID is the id on the record for this request. A refusal the
+	// reverse proxy answers carries it, so every deny names a record.
+	requestID string
+	denied    bool
+	err       error
 }
 
 type forwardKey struct{}
@@ -230,7 +248,7 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fwd := &forward{host: state.sni, port: state.port}
+	fwd := &forward{host: state.sni, port: state.port, requestID: requestID}
 	recorder := &statusRecorder{ResponseWriter: w}
 	s.reverse.ServeHTTP(recorder, r.WithContext(context.WithValue(r.Context(), forwardKey{}, fwd)))
 	record.Outcome = &audit.Outcome{Status: recorder.status}
@@ -283,10 +301,10 @@ func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error
 	fwd.err = err
 	if _, denied := errors.AsType[*deniedError](err); denied {
 		fwd.denied = true
-		writeDeny(w, http.StatusForbidden, policy.ReasonDenyAlways, "")
+		writeDeny(w, http.StatusForbidden, policy.ReasonDenyAlways, fwd.requestID)
 		return
 	}
-	writeDeny(w, http.StatusBadGateway, policy.ReasonUpstreamFailed, "")
+	writeDeny(w, http.StatusBadGateway, policy.ReasonUpstreamFailed, fwd.requestID)
 }
 
 // handlePlain refuses a request that reached the proxy in absolute form
@@ -354,6 +372,10 @@ func statusFor(reason policy.Reason) int {
 		return http.StatusBadRequest
 	case policy.ReasonUpstreamFailed:
 		return http.StatusBadGateway
+	case policy.ReasonCertificateUnavailable:
+		// The handshake fails before any request, so this reason reaches an
+		// audit record and never a response.
+		return http.StatusInternalServerError
 	case policy.ReasonDenyAlways, policy.ReasonNoMatchingEndpoint, policy.ReasonHostMismatch, policy.ReasonNoSNI,
 		policy.ReasonCredentialUnavailable:
 		return http.StatusForbidden

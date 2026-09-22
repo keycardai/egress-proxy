@@ -94,7 +94,7 @@ func TestWriteCertificateWritesOnlyTheCertificate(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, string(authority.CertificatePEM()), string(data), "the file is the CA certificate")
-	require.NotContains(t, string(data), "PRIVATE KEY", "the output directory holds key material")
+	require.NotContains(t, string(data), "PRIVATE KEY", "the output directory holds no key material")
 }
 
 func TestStoreCachesAndRenews(t *testing.T) {
@@ -167,7 +167,11 @@ func TestLoadOrNewRefusesADiskDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	_, _, err := ca.LoadOrNew(dir, ca.Options{})
 	require.ErrorContains(t, err, "not on a memory-backed filesystem", "LoadOrNew on a disk directory")
-	entries, _ := os.ReadDir(dir)
+	// LoadOrNew creates the directory before it proves the filesystem, so
+	// the directory exists and reading it must succeed. Discarding that
+	// error would let an absent directory satisfy the emptiness check.
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err, "read the refused state directory")
 	assert.Empty(t, entries, "a refused state directory holds nothing")
 }
 

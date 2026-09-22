@@ -292,10 +292,39 @@ func TestParseRefusals(t *testing.T) {
 			wantErr: "policy.deny_list_exceptions[0]",
 		},
 		{name: "endpoint without host", doc: endpoint("path_prefix: /"), wantErr: "host is empty"},
-		{name: "endpoint host with port", doc: endpoint("host: pypi.org:443"), wantErr: "without a scheme, port"},
-		{name: "endpoint host with scheme", doc: endpoint("host: https://pypi.org"), wantErr: "without a scheme, port"},
-		{name: "endpoint wildcard", doc: endpoint("host: \"*.pypi.org\""), wantErr: "without a scheme, port"},
+		{name: "endpoint host with port", doc: endpoint("host: pypi.org:443"), wantErr: "must be a DNS name"},
+		{name: "endpoint host with scheme", doc: endpoint("host: https://pypi.org"), wantErr: "must be a DNS name"},
+		{name: "endpoint wildcard", doc: endpoint("host: \"*.pypi.org\""), wantErr: "must be a DNS name"},
 		{name: "endpoint IP literal", doc: endpoint("host: 93.184.216.34"), wantErr: "is an IP literal"},
+		{name: "endpoint IPv6 literal", doc: endpoint("host: \"::1\""), wantErr: "is an IP literal"},
+		// An address netip does not read as one still resolves as an
+		// address. The deny list never sees these as addresses either, so
+		// the endpoint list is the only place to refuse them.
+		{name: "endpoint octal IPv4", doc: endpoint("host: 0177.0.0.1"), wantErr: "must be a DNS name"},
+		{name: "endpoint IPv4 with a leading zero", doc: endpoint("host: 010.0.0.1"), wantErr: "must be a DNS name"},
+		{
+			name:    "endpoint IPv4 as one integer",
+			doc:     endpoint("host: \"2852039166\""),
+			wantErr: "must be a DNS name",
+		},
+		{name: "endpoint host with an underscore", doc: endpoint("host: pypi_org"), wantErr: "must be a DNS name"},
+		{name: "endpoint host with a leading hyphen", doc: endpoint("host: -pypi.org"), wantErr: "must be a DNS name"},
+		{name: "endpoint host with a trailing hyphen", doc: endpoint("host: pypi-.org"), wantErr: "must be a DNS name"},
+		{name: "endpoint host with an empty label", doc: endpoint("host: pypi..org"), wantErr: "must be a DNS name"},
+		// The SNI is ASCII, so a host holding non-ASCII characters never
+		// matches what arrives. The first character here is Cyrillic a,
+		// which reads as Latin a and would otherwise stand in for it.
+		{name: "endpoint host in Cyrillic", doc: endpoint("host: аpple.com"), wantErr: "must be a DNS name"},
+		{
+			name:    "endpoint host with an ideographic full stop",
+			doc:     endpoint("host: pypi.org。"),
+			wantErr: "must be a DNS name",
+		},
+		{
+			name:    "endpoint host label over 63 characters",
+			doc:     endpoint("host: " + strings.Repeat("a", 64) + ".org"),
+			wantErr: "must be a DNS name",
+		},
 		{name: "relative prefix", doc: endpoint("host: pypi.org\n    path_prefix: simple/"), wantErr: "path_prefix"},
 		{
 			name:    "prefix with dot segments",

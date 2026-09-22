@@ -102,10 +102,18 @@ func (s *Server) Run(ctx context.Context) error {
 	var failure error
 	select {
 	case <-ctx.Done():
+		s.stop(ctx)
+		// Serve closes the listener as it returns, and closing a Unix
+		// listener unlinks its path. Run waits for Serve, so no unlink is
+		// pending once Run has returned and nothing can remove a socket a
+		// later listener put at the same path.
+		if err := <-served; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.logger.Warn("admin: serve returned after shutdown", slog.String("error", err.Error()))
+		}
 	case err := <-served:
 		failure = fmt.Errorf("admin: serve: %w", err)
+		s.stop(ctx)
 	}
-	s.stop(ctx)
 	return failure
 }
 

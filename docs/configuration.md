@@ -167,7 +167,7 @@ connections and requests.
 
 | Key | Default | Description |
 |---|---|---|
-| `host` | required | A DNS name without a scheme, port, path, or wildcard. The proxy matches it case-insensitively against the SNI. The proxy rejects an IP literal because a TLS client sends no SNI for an IP literal. |
+| `host` | required | A DNS name without a scheme, port, path, or wildcard. Labels hold ASCII letters, digits and hyphens, and the last label is not all digits. The proxy matches the name case-insensitively against the SNI. It rejects an IP literal, because a TLS client sends no SNI for one, and it rejects an address written another way, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. Write an internationalized name as its A-label, the `xn--` punycode form. RFC 6066 section 3 requires the SNI to be ASCII, so a host holding non-ASCII characters never matches what a client sends. |
 | `path_prefix` | `/` | An absolute path in its shortest form. `/` covers every path. A prefix that ends in `/` covers everything below it. Any other prefix covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching prefix decides. |
 | `resource` | `https://<host>/` | The resource identifier that the proxy sends to token exchange. Use an absolute `https` URL without user information, a query, or a fragment. Two endpoints can share one resource. |
 | `credential` | unset | Defines where the proxy puts a credential and which placeholder the workload holds. See `endpoints[].credential`. |
@@ -208,6 +208,7 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The endpoint names a credential, but this process has no credential source. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
+| `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and the tunnel carries no request. |
 
 A refusal carries its reason in the `X-Keycard-Deny-Reason` header. It carries
 the connection or request ID in `X-Keycard-Request-Id`. The proxy uses status

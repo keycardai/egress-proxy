@@ -70,6 +70,10 @@ type Matcher struct {
 // matcher. It reports every problem it finds, so one run tells an operator
 // everything wrong with the document. It refuses a host the deny list
 // covers, so no document can shadow platform policy.
+//
+// It validates each host and path prefix itself rather than trusting the
+// caller, so an endpoint list assembled anywhere gets the same answer. An
+// empty prefix would otherwise cover every path on its host.
 func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 	var problems []string
 	byHost := make(map[string][]Endpoint)
@@ -87,6 +91,13 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 			problems = append(problems, fmt.Sprintf(
 				"endpoints[%d]: host %q is on the platform deny list and no document may allow it",
 				i, endpoint.Host,
+			))
+			continue
+		}
+		if !normalizedPath(endpoint.PathPrefix) {
+			problems = append(problems, fmt.Sprintf(
+				"endpoints[%d]: path_prefix %q must be an absolute path in its shortest form",
+				i, endpoint.PathPrefix,
 			))
 			continue
 		}

@@ -18,21 +18,22 @@ import (
 // in parallel.
 func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltest // t.Setenv
 	for name, value := range map[string]string{
-		"CONFIG":              "/env/config.yaml",
-		"SANDBOX_ID":          "sbx-env",
-		"ZONE_URL":            "https://env.example",
-		"CLIENT_ID":           "env-client",
-		"WORKLOAD_TOKEN_FILE": "/env/token",
-		"IMPERSONATE_USER":    "env-user",
-		"CONNECT":             "127.0.0.1:1",
-		"ADMIN":               "/env/admin.sock",
-		"CA_OUT_DIR":          "/env/ca",
-		"CA_STATE_DIR":        "/env/state",
-		"LEAF_TTL":            "2h",
-		"CACHE_SIZE":          "5",
-		"UPSTREAM_CA_FILES":   "/env/a.pem,/env/b.pem",
-		"MAX_CONNECTIONS":     "9",
-		"IDLE_TIMEOUT":        "90s",
+		"CONFIG":                  "/env/config.yaml",
+		"SANDBOX_ID":              "sbx-env",
+		"ZONE_URL":                "https://env.example",
+		"CLIENT_ID":               "env-client",
+		"WORKLOAD_TOKEN_FILE":     "/env/token",
+		"IMPERSONATE_USER":        "env-user",
+		"CONNECT":                 "127.0.0.1:1",
+		"ADMIN":                   "/env/admin.sock",
+		"CA_OUT_DIR":              "/env/ca",
+		"CA_STATE_DIR":            "/env/state",
+		"LEAF_TTL":                "2h",
+		"CACHE_SIZE":              "5",
+		"UPSTREAM_CA_FILES":       "/env/a.pem,/env/b.pem",
+		"MAX_CONNECTIONS":         "9",
+		"IDLE_TIMEOUT":            "90s",
+		"RESPONSE_HEADER_TIMEOUT": "45s",
 	} {
 		t.Setenv(envPrefix+name, value)
 	}
@@ -50,7 +51,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		// The flag wins over EGRESS_PROXY_CONNECT.
 		Connect: "127.0.0.1:2", Admin: "/env/admin.sock", CAOutDir: "/env/ca", CAStateDir: "/env/state",
 		LeafTTL: 2 * time.Hour, CacheSize: 5, UpstreamCAFiles: []string{"/env/a.pem", "/env/b.pem"},
-		MaxConnections: 9, IdleTimeout: 90 * time.Second,
+		MaxConnections: 9, IdleTimeout: 90 * time.Second, ResponseHeaderTimeout: 45 * time.Second,
 	}
 	assert.Equal(t, "/env/config.yaml", got.configPath, "the config path comes from the variable")
 	assert.Equal(t, want, got.overrides(), "every variable reaches the override the parser applies")

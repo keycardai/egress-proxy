@@ -64,6 +64,16 @@ var (
 	errRoots   = errors.New("upstream roots")
 
 	envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+	// hostLabelRE is one DNS label. A document's host is normalized to
+	// lowercase before it is validated.
+	hostLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+)
+
+// The limits RFC 1035 section 2.3.4 sets on a name and on one label.
+const (
+	maxDNSNameLength  = 253
+	maxDNSLabelLength = 63
 )
 
 // Document is the configuration document as written.
@@ -636,11 +646,11 @@ func (e Endpoint) validate(i int, found *problems) {
 	switch {
 	case e.Host == "":
 		found.addf("endpoints[%d]: host is empty", i)
-	case strings.ContainsAny(e.Host, ":/ *"):
-		found.addf("endpoints[%d]: host %q must be a DNS name without a scheme, port, path or wildcard", i, e.Host)
-	}
-	if _, err := netip.ParseAddr(e.Host); err == nil {
+	case isIPLiteral(e.Host):
 		found.addf("endpoints[%d]: host %q is an IP literal; a TLS client sends no SNI for one", i, e.Host)
+	case !validDNSName(e.Host):
+		found.addf("endpoints[%d]: host %q must be a DNS name of ASCII labels, "+
+			"with no scheme, port, path or wildcard", i, e.Host)
 	}
 	if !normalizedPrefix(e.PathPrefix) {
 		found.addf("endpoints[%d]: path_prefix %q must be an absolute path in its shortest form", i, e.PathPrefix)
@@ -649,6 +659,40 @@ func (e Endpoint) validate(i int, found *problems) {
 	if e.Credential != nil {
 		e.Credential.validate(i, found)
 	}
+}
+
+// isIPLiteral reports whether host is an address rather than a name, in a
+// spelling netip accepts.
+func isIPLiteral(host string) bool {
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
+
+// validDNSName reports whether host is a name a TLS client can send as an
+// SNI. Labels hold ASCII letters, digits and hyphens, and a hyphen never
+// starts or ends one.
+//
+// The final label must not be all digits. That rule refuses an address
+// written so that netip does not read it as one, such as 0177.0.0.1, which
+// glibc resolves as 127.0.0.1, or 2852039166, which it resolves as
+// 169.254.169.254.
+//
+// RFC 6066 section 3 requires the SNI to be ASCII, so an internationalized
+// name belongs here as its A-label. A host holding non-ASCII characters
+// never matches what arrives, and a lookalike character would otherwise
+// stand in for the ASCII one it resembles.
+func validDNSName(host string) bool {
+	if len(host) > maxDNSNameLength {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if len(label) > maxDNSLabelLength || !hostLabelRE.MatchString(label) {
+			return false
+		}
+	}
+	last := labels[len(labels)-1]
+	return strings.TrimLeft(last, "0123456789") != ""
 }
 
 // normalizedPrefix reports whether prefix is absolute, carries no query or

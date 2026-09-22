@@ -508,6 +508,14 @@ func TestDeniedRequestsInsideAnAllowedTunnel(t *testing.T) {
 			assert.Equal(t, upstreamHost, record.Destination.SNI, "record SNI")
 			require.NotNil(t, record.Request, "the record names the request")
 			assert.Equal(t, http.MethodGet, record.Request.Method, "record method")
+			// The request record must be tied to the tunnel it arrived on.
+			// Finding the connection-scoped allow under the same id proves
+			// the value is that tunnel's, not an empty or invented one.
+			require.NotEmpty(t, record.ConnectionID, "the record names its connection")
+			opened := h.sink.find(t, tc.name, byConnection(record.ConnectionID, policy.ReasonEndpointAllowed))
+			assert.Equal(t, audit.ScopeConnection, opened.Scope, "the connection record's scope")
+			assert.Equal(t, upstreamHost, opened.Destination.Host, "the connection record's host")
+			assert.Empty(t, opened.RequestID, "a connection-scoped record names no request")
 		})
 	}
 	t.Cleanup(func() {
@@ -638,7 +646,11 @@ func TestANameResolvingIntoADeniedRangeIsRefusedAtTheDial(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, answer.status, "response status")
 	assert.Equal(t, policy.ReasonDenyAlways, answer.reason(), "response reason")
-	record := h.sink.find(t, "the refused dial", byReason(audit.ScopeRequest, policy.ReasonDenyAlways))
+	// The refusal comes from the reverse proxy's error handler. It carries
+	// the request id, so the workload can name the record to an operator.
+	require.NotEmpty(t, answer.id(), "the refusal names its record")
+	record := h.sink.find(t, "the refused dial", byRequest(answer.id()))
+	assert.Equal(t, policy.ReasonDenyAlways, record.Decision.Reason, "record reason")
 	assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
 	assert.Contains(t, record.Decision.Error, "deny list", "the record says why")
 	require.NotNil(t, record.Outcome)
@@ -767,8 +779,62 @@ func TestAStalledUpstreamIsBoundedByTheResponseHeaderTimeout(t *testing.T) {
 	assert.NotEmpty(t, record.Outcome.Error, "the record says why")
 }
 
+// completeOptions are options New accepts. Each case in
+// TestNewRefusesMissingOptions drops one of them.
+func completeOptions(t *testing.T) proxy.Options {
+	t.Helper()
+	deny, err := policy.NewDenyList(nil, nil)
+	require.NoError(t, err, "NewDenyList")
+	matcher, err := policy.Compile([]policy.Endpoint{{Host: "api.github.com", PathPrefix: "/"}}, deny)
+	require.NoError(t, err, "Compile")
+	authority, err := ca.New(ca.Options{})
+	require.NoError(t, err, "ca.New")
+	store, err := ca.NewStore(authority, 4)
+	require.NoError(t, err, "ca.NewStore")
+	return proxy.Options{
+		Matcher:       matcher,
+		Certificates:  store,
+		Audit:         newMemorySink(),
+		UpstreamRoots: authority.Pool(),
+	}
+}
+
+// TestNewRefusesMissingOptions names each option New requires, so dropping
+// one guard fails here rather than at the first request that needs it.
 func TestNewRefusesMissingOptions(t *testing.T) {
 	t.Parallel()
-	_, err := proxy.New(proxy.Options{})
-	require.Error(t, err, "New refuses empty options")
+	tests := []struct {
+		name    string
+		drop    func(*proxy.Options)
+		wantErr string
+	}{
+		{name: "no matcher", drop: func(o *proxy.Options) { o.Matcher = nil }, wantErr: "no matcher"},
+		{
+			name:    "no certificate store",
+			drop:    func(o *proxy.Options) { o.Certificates = nil },
+			wantErr: "no certificate store",
+		},
+		{name: "no audit sink", drop: func(o *proxy.Options) { o.Audit = nil }, wantErr: "no audit sink"},
+		{
+			name:    "no upstream roots",
+			drop:    func(o *proxy.Options) { o.UpstreamRoots = nil },
+			wantErr: "no upstream roots",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := completeOptions(t)
+			tc.drop(&opts)
+			server, err := proxy.New(opts)
+			require.ErrorContains(t, err, tc.wantErr, "New")
+			assert.Nil(t, server, "a refused build returns no server")
+		})
+	}
+	t.Run("every option supplied", func(t *testing.T) {
+		t.Parallel()
+		server, err := proxy.New(completeOptions(t))
+		require.NoError(t, err, "New over complete options")
+		assert.NotNil(t, server, "the built server")
+	})
 }

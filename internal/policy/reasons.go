@@ -53,6 +53,10 @@ const (
 	// ReasonUpstreamFailed means an allowed request produced no response
 	// from the upstream.
 	ReasonUpstreamFailed Reason = "upstream_failed"
+	// ReasonCertificateUnavailable means the proxy could not mint a leaf for
+	// a server name the policy allowed. The handshake fails and the tunnel
+	// carries no request.
+	ReasonCertificateUnavailable Reason = "certificate_unavailable"
 	// ReasonEndpointAllowed is the reason on every allow. A request-scoped
 	// record names the endpoint that matched; a connection-scoped record
 	// names none, because no path took part in that decision.

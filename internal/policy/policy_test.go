@@ -99,13 +99,67 @@ func TestCompileRefusals(t *testing.T) {
 			},
 			wantErr: "repeats endpoints[0]",
 		},
+		{
+			name:      "a host the deny list covers by suffix",
+			endpoints: []policy.Endpoint{{Host: "abc123.dns.nextdns.io", PathPrefix: "/"}},
+			wantErr:   "is on the platform deny list",
+		},
+		// An empty prefix covers every path on its host, so Compile refuses
+		// it rather than leaving the guarantee to the caller that built the
+		// list.
+		{
+			name:      "an empty path prefix",
+			endpoints: []policy.Endpoint{{Host: "api.github.com"}},
+			wantErr:   `path_prefix "" must be an absolute path`,
+		},
+		{
+			name:      "a relative path prefix",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "repos"}},
+			wantErr:   `path_prefix "repos" must be an absolute path`,
+		},
+		{
+			name:      "a path prefix carrying dot segments",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "/repos/../admin"}},
+			wantErr:   "must be an absolute path in its shortest form",
+		},
+		{
+			name:      "a path prefix carrying a query",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "/repos?all=1"}},
+			wantErr:   "must be an absolute path in its shortest form",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := policy.Compile(tc.endpoints, deny)
+			matcher, err := policy.Compile(tc.endpoints, deny)
 			require.ErrorContains(t, err, tc.wantErr, "Compile")
+			assert.Nil(t, matcher, "a refused list compiles to no matcher")
 		})
+	}
+}
+
+// TestCompileReportsEveryProblem pins what the doc comment promises: one run
+// names everything wrong with the list, so an operator does not fix a
+// document one error per restart.
+func TestCompileReportsEveryProblem(t *testing.T) {
+	t.Parallel()
+	deny, err := policy.NewDenyList(nil, nil)
+	require.NoError(t, err, "NewDenyList")
+	_, err = policy.Compile([]policy.Endpoint{
+		{Host: "metadata.google.internal", PathPrefix: "/"},
+		{Host: "93.184.216.34", PathPrefix: "/"},
+		{Host: "api.github.com", PathPrefix: "repos"},
+	}, deny)
+	require.Error(t, err, "Compile")
+	for _, want := range []string{
+		"endpoints[0]",
+		"is on the platform deny list",
+		"endpoints[1]",
+		"is an IP literal",
+		"endpoints[2]",
+		"must be an absolute path",
+	} {
+		assert.ErrorContains(t, err, want, "the error names every problem")
 	}
 }
 
@@ -194,7 +248,15 @@ func TestMatcherDecisions(t *testing.T) {
 			wantVerdict: "deny", wantReason: "malformed_request",
 		},
 		{
-			name: "a query in the path is refused", host: "openrouter.ai", path: "/api/v1/?x=1",
+			// Request takes a decoded path, so the proxy cannot hand it a
+			// raw query. A "?" that does arrive is a path character, and
+			// Request refuses it either way rather than guessing which one
+			// the caller meant.
+			name: "a question mark in the path is refused", host: "openrouter.ai", path: "/api/v1/?x=1",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "a fragment marker in the path is refused", host: "openrouter.ai", path: "/api/v1/#top",
 			wantVerdict: "deny", wantReason: "malformed_request",
 		},
 		{
