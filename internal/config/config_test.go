@@ -193,6 +193,11 @@ func TestParseRefusals(t *testing.T) {
 			doc:     "--- actually broken\n" + minimal,
 			wantErr: "invalid configuration",
 		},
+		{
+			name:    "a second YAML document",
+			doc:     minimal + "---\npolicy:\n  cluster_cidrs: [8.8.8.0/24]\n",
+			wantErr: "invalid configuration",
+		},
 		{name: "wrong version", doc: strings.Replace(minimal, "version: 1", "version: 2", 1), wantErr: "version is 2"},
 		{name: "no sandbox id", doc: strings.Replace(minimal, "id: sbx-1", `id: ""`, 1), wantErr: "sandbox.id"},
 		{

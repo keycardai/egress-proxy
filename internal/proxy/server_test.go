@@ -41,6 +41,19 @@ const upstreamHost = "localhost"
 // to write wakes find as soon as Emit runs, so a passing test never waits.
 const findTimeout = time.Second
 
+// emitGate holds one Emit open: Emit closes entered for the first record
+// match accepts and then waits for release. A test sets it to prove what
+// waits on that emit. match must accept exactly one record.
+type emitGate struct {
+	match   func(audit.Record) bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newEmitGate(match func(audit.Record) bool) *emitGate {
+	return &emitGate{match: match, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
 // memorySink keeps records for assertions and wakes find when one arrives.
 type memorySink struct {
 	mu      sync.Mutex
@@ -48,6 +61,8 @@ type memorySink struct {
 	// arrived closes on the next Emit. Emit replaces it rather than reusing
 	// it, so every waiter holding the old channel wakes exactly once.
 	arrived chan struct{}
+	// gate is set before Run starts and read by every emitting goroutine.
+	gate *emitGate
 }
 
 func newMemorySink() *memorySink {
@@ -55,6 +70,12 @@ func newMemorySink() *memorySink {
 }
 
 func (m *memorySink) Emit(record audit.Record) {
+	// The gate waits before the mutex. A held emit must not stop the records
+	// another goroutine writes or a test reads.
+	if m.gate != nil && m.gate.match(record) {
+		close(m.gate.entered)
+		<-m.gate.release
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.records = append(m.records, record)
@@ -168,6 +189,30 @@ func newUpstream(t *testing.T) (*upstream, *ca.Authority) {
 	return up, authority
 }
 
+// upgradeHandler answers /ok/upgrade with a protocol switch and then echoes
+// what the client sends. A test installs it over the upstream's handler.
+func upgradeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/ok/upgrade" {
+		http.NotFound(w, r)
+		return
+	}
+	const switching = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n"
+	conn, brw, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := brw.WriteString(switching); err != nil {
+		return
+	}
+	if err := brw.Flush(); err != nil {
+		return
+	}
+	// The echo reads through brw, which may already hold bytes that arrived
+	// with the request head.
+	_, _ = io.Copy(conn, brw)
+}
+
 // harness is a proxy in front of the upstream.
 type harness struct {
 	authority *ca.Authority
@@ -242,6 +287,40 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		authority: authority, store: store, sink: sink, upstream: up,
 		addr: listener.Addr().String(), server: server,
 	}
+}
+
+// running is a Run the test controls: cancel ends its context, finished
+// closes once Run returns, and err is Run's result, valid after finished.
+type running struct {
+	cancel   context.CancelFunc
+	finished chan struct{}
+	err      error
+}
+
+// run starts Run for a harness built with unstarted, on a listener of its
+// own, and points the harness at it. The cleanup cancels and waits, so every
+// test that calls run also proves Run returns nil after a cancellation.
+func (h *harness) run(t *testing.T) *running {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	h.addr = listener.Addr().String()
+	ctx, cancel := context.WithCancel(t.Context())
+	run := &running{cancel: cancel, finished: make(chan struct{})}
+	go func() {
+		run.err = h.server.Run(ctx, listener)
+		close(run.finished)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-run.finished:
+			assert.NoError(t, run.err, "Run after cancellation")
+		case <-time.After(5 * time.Second):
+			assert.Fail(t, "shutdown did not finish")
+		}
+	})
+	return run
 }
 
 // reply is a response with its body read and closed.
@@ -375,6 +454,30 @@ func (h *harness) roundTrip(t *testing.T, conn io.ReadWriter, reader *bufio.Read
 	answer, readErr := readReply(t, resp, readErr)
 	require.NoError(t, readErr, "read the response to %q", raw)
 	return answer
+}
+
+// upgrade drives one request the upstream answers with a protocol switch and
+// returns the connection carrying it and the reader over that connection.
+// The reader holds anything the upstream sent after the 101.
+func (h *harness) upgrade(t *testing.T) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := h.tlsTunnel(t, upstreamHost)
+	require.NoError(t, err)
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_, err = io.WriteString(conn, "GET /ok/upgrade HTTP/1.1\r\nHost: "+h.upstreamAuthority()+
+		"\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n")
+	require.NoError(t, err)
+	reader := bufio.NewReader(conn)
+	//nolint:bodyclose // a 101 response carries http.NoBody
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+	require.NoError(t, err, "read the answer to the upgrade request")
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "the upstream switched protocols")
+	_, err = io.WriteString(conn, "ping\n")
+	require.NoError(t, err)
+	echoed, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ping\n", echoed, "the upgraded connection carries bytes both ways")
+	return conn, reader
 }
 
 func TestAllowedRequestReachesTheUpstream(t *testing.T) {
@@ -771,4 +874,186 @@ func TestNewRefusesMissingOptions(t *testing.T) {
 	t.Parallel()
 	_, err := proxy.New(proxy.Options{})
 	require.Error(t, err, "New refuses empty options")
+}
+
+// TestActiveStreamOutlivesIdleTimeout proves the idle bound measures
+// silence, not request length. The upstream writes a chunk every tenth of
+// the bound for twice the bound, so the connection is never idle and the
+// whole stream must arrive.
+func TestActiveStreamOutlivesIdleTimeout(t *testing.T) {
+	t.Parallel()
+	const idle = time.Second
+	const chunks = 20
+	h := start(t, harnessOptions{idleTimeout: idle})
+	h.upstream.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		ticker := time.NewTicker(idle / 10)
+		defer ticker.Stop()
+		for range chunks {
+			if _, err := io.WriteString(w, "data: active\n\n"); err != nil {
+				return
+			}
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				return
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	})
+	client := h.client()
+	// The stream outlasts the client's default budget. The request context
+	// bounds a proxy that hangs instead.
+	client.Timeout = 0
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.upstreamURL("/stream/events"), nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "response status")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "a continuously active response must outlive the idle timeout")
+	assert.Equal(t, strings.Repeat("data: active\n\n", chunks), string(body), "the whole stream")
+}
+
+// TestTruncatedResponseIsAudited proves a forwarded request whose body ends
+// short of its Content-Length still gets its request-scoped record, and
+// that the record says the response did not complete.
+func TestTruncatedResponseIsAudited(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{})
+	h.upstream.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, "short")
+	})
+	client := h.client()
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.upstreamURL("/ok/truncated"), nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF, "the upstream response is truncated")
+	assert.Equal(t, "short", string(body), "the bytes that did arrive")
+	record := h.sink.find(t, "the truncated response", func(record audit.Record) bool {
+		return record.Scope == audit.ScopeRequest && record.Request != nil && record.Request.Path == "/ok/truncated"
+	})
+	assert.NotEmpty(t, record.RequestID, "record request id")
+	require.NotNil(t, record.Outcome, "record outcome")
+	assert.Equal(t, http.StatusOK, record.Outcome.Status, "record status")
+	assert.NotEmpty(t, record.Outcome.Error, "the record reports the incomplete response")
+}
+
+// TestShutdownDrainsInFlightRequest proves that cancelling Run's context
+// starts the grace period rather than ending the requests in flight. The
+// upstream holds the request until the test releases it after the
+// cancellation. A proxy that drains answers 200 after the release. A proxy
+// that aborts answers before it.
+func TestShutdownDrainsInFlightRequest(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{unstarted: true})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h.upstream.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		select {
+		case <-release:
+			_, _ = io.WriteString(w, "finished")
+		case <-r.Context().Done():
+		}
+	})
+	run := h.run(t)
+	client := h.client()
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.upstreamURL("/ok/slow"), nil)
+	require.NoError(t, err)
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	results := make(chan result, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			results <- result{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		results <- result{status: resp.StatusCode, body: string(body), err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not reach the upstream")
+	}
+	run.cancel()
+	// An abort answers at once, so this wait is where it shows. A proxy that
+	// drains produces nothing here.
+	select {
+	case got := <-results:
+		t.Fatalf("the request ended before its release: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case got := <-results:
+		require.NoError(t, got.err, "read the response")
+		assert.Equal(t, http.StatusOK, got.status, "response status")
+		assert.Equal(t, "finished", got.body, "response body")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not finish within the shutdown grace")
+	}
+}
+
+// TestAnUpgradedRequestIsAuditedBeforeRunReturns proves two contracts for a
+// request the reverse proxy hijacked for a protocol upgrade: its record
+// reports the 101 the upstream sent, and Run does not return before the
+// record is emitted. The gate holds that emit open, so a Run that returns
+// during it is caught.
+func TestAnUpgradedRequestIsAuditedBeforeRunReturns(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{unstarted: true})
+	h.upstream.server.Config.Handler = http.HandlerFunc(upgradeHandler)
+	gate := newEmitGate(func(record audit.Record) bool {
+		return record.Scope == audit.ScopeRequest && record.Request != nil && record.Request.Path == "/ok/upgrade"
+	})
+	h.sink.gate = gate
+	run := h.run(t)
+	h.upgrade(t)
+	run.cancel()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upgraded request was not audited")
+	}
+	// A Run that returns during the emit shows in this wait.
+	select {
+	case <-run.finished:
+		t.Fatal("Run returned before the upgraded request's record was emitted")
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(gate.release)
+	select {
+	case <-run.finished:
+		require.NoError(t, run.err, "Run after cancellation")
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish")
+	}
+	// The record is in the sink the moment Run returns, so nothing waits here.
+	records, _ := h.sink.snapshot()
+	index := slices.IndexFunc(records, gate.match)
+	require.NotEqual(t, -1, index, "the upgraded request's record is in the sink once Run returned")
+	record := records[index]
+	assert.Equal(t, policy.VerdictAllow, record.Decision.Verdict, "record verdict")
+	assert.Equal(t, policy.ReasonEndpointAllowed, record.Decision.Reason, "record reason")
+	require.NotNil(t, record.Outcome, "record outcome")
+	assert.Equal(t, http.StatusSwitchingProtocols, record.Outcome.Status, "the record reports the protocol switch")
 }
