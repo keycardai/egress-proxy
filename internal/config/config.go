@@ -568,6 +568,10 @@ func (c *Config) validateProcess(found *problems) {
 	for i, file := range c.TLS.UpstreamCAFiles {
 		if strings.TrimSpace(file) == "" {
 			found.addf("tls.upstream_ca_files[%d] is empty", i)
+			continue
+		}
+		if !filepath.IsAbs(file) {
+			found.addf("tls.upstream_ca_files[%d] %q must be an absolute path", i, file)
 		}
 	}
 	if c.Limits.MaxConnections < 1 {

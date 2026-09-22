@@ -120,7 +120,7 @@ code path writes the key under `out_dir` or to another file system.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `upstream_ca_files` | `[]` | `--upstream-ca-file` (repeatable), `EGRESS_PROXY_UPSTREAM_CA_FILES` (comma-separated) | PEM files whose certificates join the system roots when the proxy verifies an upstream. Use this for a destination behind a private CA or for test fixtures. A file that the proxy cannot read or that contains no certificate stops the process. |
+| `upstream_ca_files` | `[]` | `--upstream-ca-file` (repeatable), `EGRESS_PROXY_UPSTREAM_CA_FILES` (comma-separated) | PEM files whose certificates join the system roots when the proxy verifies an upstream. Use this for a destination behind a private CA or for test fixtures. Each entry must be an absolute path. A file that the proxy cannot read or that contains no certificate stops the process. |
 
 The upstream leg verifies every certificate and refuses TLS versions below
 1.2. It ignores `HTTP_PROXY` and `HTTPS_PROXY`. The proxy shares an

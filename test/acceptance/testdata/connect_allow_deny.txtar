@@ -18,6 +18,7 @@ env EGRESS_PROXY_SANDBOX_ID=acceptance
 env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
 env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
 env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt
 exec egress-proxy &proxy&
 waitfile shared-ca/ca.crt
 waitport 127.0.0.1:$PROXY_PORT
@@ -58,7 +59,7 @@ sigterm
 wait proxy
 ! exists $ADMIN_DIR/admin.sock
 stderr '"msg":"stopping"'
-stderr '"overridden":\["ca.out_dir","listen.admin","listen.connect","sandbox.id"\]'
+stderr '"overridden":\["ca.out_dir","listen.admin","listen.connect","sandbox.id","tls.upstream_ca_files"\]'
 
 # Every decision has an audit record, stamped with the sandbox id and both
 # digests: the document as mounted, and the settings in force.
@@ -73,8 +74,6 @@ audit -all stdout config.digest~^sha256:[0-9a-f]{64}$
 
 -- config.yaml --
 version: 1
-tls:
-  upstream_ca_files: ["upstream/ca.crt"]
 policy:
   deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
 endpoints:

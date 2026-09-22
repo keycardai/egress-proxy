@@ -390,6 +390,21 @@ func TestParseRefusals(t *testing.T) {
 			wantErr: `placement.kind "cookie"`,
 		},
 		{
+			name:    "a relative upstream CA file",
+			doc:     minimal + "tls:\n  upstream_ca_files: [\"upstream/ca.crt\"]\n",
+			wantErr: `tls.upstream_ca_files[0] "upstream/ca.crt" must be an absolute path`,
+		},
+		{
+			name:    "an upstream CA file that is only a dot segment",
+			doc:     minimal + "tls:\n  upstream_ca_files: [\"./ca.crt\"]\n",
+			wantErr: "must be an absolute path",
+		},
+		{
+			name:    "an empty upstream CA file",
+			doc:     minimal + "tls:\n  upstream_ca_files: [\"\"]\n",
+			wantErr: "tls.upstream_ca_files[0] is empty",
+		},
+		{
 			name: "identity with an http zone",
 			doc: minimal + "identity:\n  zone_url: http://z\n  client_id: c\n  workload_token_file: /t\n" +
 				"  impersonate: {user: u}\n",
