@@ -115,7 +115,7 @@ func LoadOrNew(stateDir string, opts Options) (*Authority, bool, error) {
 
 // load reads the authority from dir. A missing file reads as fs.ErrNotExist.
 // Any other problem with the material reads as errMaterial.
-func load(dir string, opts Options) (*Authority, error) {
+func load(dir string, opts Options) (*Authority, error) { //nolint:cyclop // breaking this up doesn't aid readability
 	opts = opts.withDefaults()
 	keyPEM, err := os.ReadFile(filepath.Join(dir, keyFileName)) //nolint:gosec // G304: dir is ca.state_dir
 	if err != nil {
@@ -148,6 +148,13 @@ func load(dir string, opts Options) (*Authority, error) {
 	if now := opts.Now(); !now.Before(authority.cert.NotAfter.Add(-renewBefore)) {
 		return nil, fmt.Errorf("%w: the certificate expires at %s", errMaterial,
 			authority.cert.NotAfter.Format(time.RFC3339))
+	}
+	if !authority.cert.IsCA {
+		return nil, fmt.Errorf("%w: not a CA certificate", errMaterial)
+	}
+	requiredKeyUsage := x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature
+	if authority.cert.KeyUsage&requiredKeyUsage == 0 {
+		return nil, fmt.Errorf("%w: invalid certificate usage", errMaterial)
 	}
 	return authority, nil
 }
