@@ -94,6 +94,18 @@ func (m *memorySink) find(t *testing.T, what string, match func(audit.Record) bo
 	}
 }
 
+// none asserts that no record matches. Call it only once every record it
+// could match has been emitted, so the snapshot is the whole answer.
+func (m *memorySink) none(t *testing.T, what string, match func(audit.Record) bool) {
+	t.Helper()
+	records, _ := m.snapshot()
+	for _, record := range records {
+		if match(record) {
+			assert.Fail(t, "a record matched that must not exist", "for %s: %+v", what, record)
+		}
+	}
+}
+
 // byReason matches a record by scope and reason. Use it only where one
 // record in the test carries that pair.
 func byReason(scope audit.Scope, reason policy.Reason) func(audit.Record) bool {
@@ -391,8 +403,10 @@ func TestAllowedRequestReachesTheUpstream(t *testing.T) {
 	wantConnection := audit.Record{
 		TS: connection.TS, SandboxID: "sbx-test", Document: audit.DocumentRef{Digest: "sha256:doc"},
 		Config: audit.ConfigRef{Digest: "sha256:cfg"}, ConnectionID: connection.ConnectionID,
-		Scope:       audit.ScopeConnection,
-		Destination: audit.Destination{Host: upstreamHost, Port: h.upstream.port},
+		Scope: audit.ScopeConnection,
+		// The record is emitted once the handshake establishes the tunnel,
+		// so it names the SNI the client sent.
+		Destination: audit.Destination{Host: upstreamHost, Port: h.upstream.port, SNI: upstreamHost},
 		// No endpoint: the connection decision took no path into account.
 		Decision: audit.Decision{Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed},
 	}
@@ -550,6 +564,12 @@ func TestHandshakeRefusals(t *testing.T) {
 			assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
 			assert.Equal(t, upstreamHost, record.Destination.Host, "record host")
 			assert.Equal(t, h.upstream.port, record.Destination.Port, "record port")
+			// The allow lands only once the handshake establishes the
+			// tunnel. A refused handshake leaves none behind, so a query
+			// for allowed connections does not count this one. Any allow
+			// emitted before the handshake is already in the sink by now,
+			// because this deny came from inside it.
+			h.sink.none(t, tc.name, byConnection(record.ConnectionID, policy.ReasonEndpointAllowed))
 		})
 	}
 	t.Cleanup(func() {

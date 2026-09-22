@@ -112,8 +112,10 @@ The workload reaches this frontend through `HTTPS_PROXY`.
   events (SSE) should work through the proxy.
 - The proxy closes a cleartext preface inside a tunnel without sending a
   response. The proxy terminates TLS on every tunnel. Bytes that are not a TLS
-  handshake fail the handshake, and the proxy closes the connection. The
-  connection allow record remains, and the proxy logs the failure.
+  handshake fail the handshake, and the proxy closes the connection. The proxy
+  logs the failure. A handshake that fails for a reason the policy did not
+  decide carries no audit record, because the connection-scoped allow is
+  written only once the tunnel is established.
 - An idle timeout does not limit a request in flight. A response that is still
   transferring is not idle. A stalled upstream keeps its connection until the
   workload or upstream closes it.

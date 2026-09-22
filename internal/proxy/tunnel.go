@@ -67,6 +67,10 @@ func tunnelFrom(ctx context.Context) *tunnel {
 
 // handleConnect makes the connection-scoped decision on the CONNECT
 // authority. It refuses a denied host here, before the store mints a leaf.
+//
+// A refusal is recorded here. An allow is recorded once the handshake
+// establishes the tunnel, so exactly one connection-scoped record describes
+// a connection and an allow means the tunnel carried traffic.
 func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 	state := &tunnel{connectionID: newID()}
 	var decision policy.Decision
@@ -78,13 +82,13 @@ func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goprox
 		state.host = authority
 		decision = policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}
 	}
-	s.opts.Audit.Emit(audit.Record{
-		ConnectionID: state.connectionID,
-		Scope:        audit.ScopeConnection,
-		Destination:  audit.Destination{Host: state.host, Port: state.port},
-		Decision:     auditDecision(decision),
-	})
 	if !decision.Allowed() {
+		s.opts.Audit.Emit(audit.Record{
+			ConnectionID: state.connectionID,
+			Scope:        audit.ScopeConnection,
+			Destination:  audit.Destination{Host: state.host, Port: state.port},
+			Decision:     auditDecision(decision),
+		})
 		s.logger.Info("refused a connection",
 			slog.String("connection_id", state.connectionID),
 			slog.String("authority", authority),
@@ -129,6 +133,15 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 		s.closeConn(tlsConn, state, "handshake")
 		return
 	}
+	// The tunnel is established, so the allow is now true of a connection
+	// that carried traffic. It lands before any request-scoped record,
+	// because the tunnel server reads this connection only after push.
+	s.opts.Audit.Emit(audit.Record{
+		ConnectionID: state.connectionID,
+		Scope:        audit.ScopeConnection,
+		Destination:  audit.Destination{Host: state.host, Port: state.port, SNI: state.sni},
+		Decision:     audit.Decision{Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed},
+	})
 	if !s.intake.push(&tunnelConn{Conn: tlsConn, state: state}) {
 		s.closeConn(tlsConn, state, "shutdown")
 	}

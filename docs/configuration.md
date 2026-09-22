@@ -199,7 +199,7 @@ each request inside the tunnel. `connection_id` joins the two records.
 
 | Reason | Verdict | Scope | Meaning |
 |---|---|---|---|
-| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host` plus `path_prefix`. A connection record names none, because no path took part in that decision. |
+| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host` plus `path_prefix`. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never carries an allow. |
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, or one does and none covers the path. Read `scope` to tell those apart. The proxy also uses this reason for every cleartext request. |
 | `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
