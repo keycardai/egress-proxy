@@ -98,24 +98,24 @@ func TestLoadStaticFileRefusals(t *testing.T) {
 		{
 			name: "an unknown key", mode: 0o600,
 			body:    "version: 1\ncredential:\n  - resource: https://a/\n    value: v\n",
-			wantErr: `unknown field "credential"`,
+			wantErr: "unknown field or invalid value",
 		},
 		{
 			name: "an unknown key in an entry", mode: 0o600,
 			body:    "version: 1\ncredentials:\n  - resource: https://a/\n    token: v\n",
-			wantErr: `unknown field "token"`,
+			wantErr: "unknown field or invalid value",
 		},
 		{
 			name: "top-level keys that differ only in case", mode: 0o600,
 			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: one\n" +
 				"CREDENTIALS:\n  - resource: https://b/\n    value: two\n",
-			wantErr: "keys that differ only in case",
+			wantErr: "invalid object keys",
 		},
 		{
 			name: "entry keys that differ only in case", mode: 0o600,
 			body: "version: 1\ncredentials:\n  - resource: https://a/\n" +
 				"    RESOURCE: https://b/\n    value: one\n",
-			wantErr: "keys that differ only in case",
+			wantErr: "invalid object keys",
 		},
 		{
 			name: "a second YAML document", mode: 0o600,
@@ -183,6 +183,39 @@ func TestLoadStaticFileRefusesWhatIsNotAReadableFile(t *testing.T) {
 			t.Parallel()
 			_, err := credential.LoadStaticFile(tc.path)
 			require.ErrorContains(t, err, tc.wantErr, "LoadStaticFile")
+		})
+	}
+}
+
+func TestStaticFileParseErrorsDoNotExposeCredentials(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "YAML scalar",
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: !!int " + secret + "\n",
+		},
+		{
+			name: "case-folded keys",
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: {" + secret +
+				": {" + secret + ": 1, " + strings.ToUpper(secret) + ": 2}}\n",
+		},
+		{
+			name: "unknown JSON field",
+			body: `{"version":1,"credentials":[{"resource":"https://a/","` + secret + `":"value"}]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := write(t, tc.body, 0o600)
+			source, err := credential.LoadStaticFile(path)
+			require.ErrorContains(t, err, "invalid credential file")
+			assert.Nil(t, source)
+			assert.Contains(t, err.Error(), path)
+			assert.NotContains(t, err.Error(), secret)
 		})
 	}
 }

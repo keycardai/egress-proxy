@@ -263,8 +263,10 @@ the workload named in `Connection`. A workload cannot name the placement
 header there and have the credential dropped on the way out.
 
 No credential reaches a log line or an audit record. A record carries the
-method, the path without its query, and the host. The proxy removes the
-credential from all other text it writes.
+method, the path without its query, and the host. The proxy redacts credentials
+from request error text. It suppresses raw ReverseProxy diagnostics and reports
+incomplete responses in the audit record. Static-file parse errors name the
+file and failing stage without including raw parser diagnostics.
 
 ## Decisions and reason codes
 

@@ -189,7 +189,9 @@ func New(opts Options) (*Server, error) {
 		FlushInterval:  -1,
 		ModifyResponse: server.recordUpstreamStatus,
 		ErrorHandler:   server.upstreamError,
-		ErrorLog:       slog.NewLogLogger(opts.Logger.Handler(), slog.LevelWarn),
+		// ReverseProxy body-read errors can quote upstream response bytes.
+		// The audit record reports incomplete responses without those bytes.
+		ErrorLog: slog.NewLogLogger(slog.DiscardHandler, slog.LevelWarn),
 	}
 
 	var http1 http.Protocols
