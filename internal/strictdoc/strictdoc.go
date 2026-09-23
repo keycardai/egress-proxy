@@ -1,5 +1,5 @@
 // Package strictdoc validates document boundaries and JSON object keys before
-// a case-insensitive struct decoder reads a document.
+// a decoder that ignores key case reads a document.
 package strictdoc
 
 import (
@@ -20,8 +20,7 @@ var (
 	errSecondDocument = errors.New("the input holds more than one YAML document")
 )
 
-// RefuseSecondYAMLDocument rejects an input that carries a second YAML
-// document. The YAML-to-JSON conversion reads only the first document.
+// RefuseSecondYAMLDocument rejects input with a second YAML document.
 func RefuseSecondYAMLDocument(data []byte) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var first, second any
@@ -33,8 +32,8 @@ func RefuseSecondYAMLDocument(data []byte) error {
 	return nil
 }
 
-// RefuseCaseFoldedJSONKeys rejects keys that a JSON struct decoder would
-// match to the same field case-insensitively.
+// RefuseCaseFoldedJSONKeys rejects keys that a JSON struct decoder would match
+// to the same field when it ignores case.
 func RefuseCaseFoldedJSONKeys(jsonText []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(jsonText))
 	if err := walkValue(decoder, ""); err != nil {

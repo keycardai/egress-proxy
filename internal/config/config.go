@@ -89,18 +89,17 @@ type Document struct {
 	CA       CA        `json:"ca"`
 	TLS      TLS       `json:"tls"`
 	Limits   Limits    `json:"limits"`
-	// Credentials names the source the proxy reads a credential from.
+	// Credentials names the source from which the proxy reads credentials.
 	Credentials Credentials `json:"credentials"`
 	Policy      Policy      `json:"policy"`
 	Endpoints   []Endpoint  `json:"endpoints"`
 }
 
-// Credentials says where the proxy gets the credential an endpoint names.
-// A document that names no source denies every endpoint that names a
-// credential, with credential_unavailable.
+// Credentials names the source for endpoint credentials. A document without a
+// source denies every endpoint that names a credential.
 type Credentials struct {
-	// StaticFile holds credentials by resource, in the clear. It serves
-	// tests and development, and it is refused together with an identity.
+	// StaticFile maps resources to credentials stored as plain text. It serves
+	// tests and development and cannot appear with an identity.
 	StaticFile string `json:"static_file"`
 }
 
@@ -644,9 +643,7 @@ func (c CA) validate(found *problems) {
 	}
 }
 
-// validateCredentials refuses a static file that is not an absolute path,
-// and a document that names two credential sources at once. A record has to
-// say which source answered, so a process reads from one.
+// validateCredentials requires an absolute static-file path and one source.
 func (c *Config) validateCredentials(found *problems) {
 	if c.Credentials.StaticFile == "" {
 		return

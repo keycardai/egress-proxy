@@ -286,8 +286,7 @@ type harnessOptions struct {
 	// which an endpoint names and the test learns only once the upstream is
 	// listening.
 	endpoints func(port int) []policy.Endpoint
-	// credentials is the source the proxy reads an endpoint credential
-	// from. Nil is a process with no source.
+	// credentials is the source for endpoint credentials. Nil means no source.
 	credentials credential.Source
 }
 
@@ -691,9 +690,8 @@ func TestDeniedRequestsInsideAnAllowedTunnel(t *testing.T) {
 			wantStatus: http.StatusForbidden, wantReason: policy.ReasonNoMatchingEndpoint,
 		},
 		{
-			// The reverse proxy re-encodes a query it cannot parse and
-			// drops the pairs it could not read, so forwarding this would
-			// send the upstream a request the workload did not write.
+			// The reverse proxy drops pairs from a query it cannot parse.
+			// Refuse the request before it sends different bytes upstream.
 			name:       "a query with an invalid escape",
 			request:    "GET /ok/x?q=here&bad=%zz HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
 			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
@@ -778,7 +776,7 @@ func TestHandshakeRefusals(t *testing.T) {
 			assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
 			assert.Equal(t, upstreamHost, record.Destination.Host, "record host")
 			assert.Equal(t, h.upstream.port, record.Destination.Port, "record port")
-			// The allow lands only once the handshake establishes the
+			// The allow appears only after the handshake establishes the
 			// tunnel. A refused handshake leaves none behind, so a query
 			// for allowed connections does not count this one. Any allow
 			// emitted before the handshake is already in the sink by now,

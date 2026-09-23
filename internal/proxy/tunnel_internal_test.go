@@ -483,11 +483,9 @@ func (t *countingRoundTripper) RoundTrip(r *http.Request) (*http.Response, error
 	}, nil
 }
 
-// TestAFailedCredentialWriteDenies holds the substitution half of the
-// fail-closed rule: a write the placement writer could not make refuses the
-// request instead of forwarding it uncredentialed. The case drives the
-// reverse proxy and the record the way serveTunnelRequest does once the
-// decision has allowed the request.
+// TestAFailedCredentialWriteDenies verifies that a failed placement write
+// denies the request instead of forwarding it without a credential. The case
+// drives the reverse proxy and audit record after the request is allowed.
 func TestAFailedCredentialWriteDenies(t *testing.T) {
 	t.Parallel()
 	const secret = "query-sekrit" //nolint:gosec // G101: a test fixture, not a credential

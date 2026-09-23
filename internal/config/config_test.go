@@ -636,8 +636,7 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 	})
 }
 
-// TestParseAcceptsAnAuthorizationPlacement pins the placement most
-// endpoints name. The banned-name list must never grow to cover it.
+// TestParseAcceptsAnAuthorizationPlacement keeps the common placement allowed.
 func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
 	t.Parallel()
 	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: a.example\n    credential:\n" +

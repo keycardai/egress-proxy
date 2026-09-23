@@ -33,8 +33,8 @@ type Endpoint struct {
 	// covers itself and every path under it as a segment, so "/api" covers
 	// "/api" and "/api/v1" but not "/apis".
 	PathPrefix string
-	// Resource is the resource identifier the exchange sends for this
-	// endpoint, and the key the credential source answers on.
+	// Resource is the resource identifier sent for this endpoint. The
+	// credential source uses it to find the credential.
 	Resource string
 	// Credential is where a credential goes in a request to this endpoint.
 	// Nil means the endpoint names none.

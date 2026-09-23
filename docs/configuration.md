@@ -7,24 +7,24 @@ process after a change. The repository root has a complete example in
 
 ## Sources and precedence
 
-Settings come from three sources. Latter sources override earlier sources in
+Settings come from three sources. Later sources override earlier sources in
 this order: the document, the environment, and flags.
 
 Only settings for this instance and process support a flag and an environment
 variable: `sandbox.*`, `identity.*`, `listen.*`, `ca.*`, `tls.*`,
-`credentials.*`, and `limits.*`. A manifest renderer may set them from the pod
+`credentials.*`, and `limits.*`. A manifest renderer can set them from the pod
 metadata. For example, `sandbox.id` from the pod name and
 `identity.impersonate.user` from `spec.serviceAccountName` through the
 Kubernetes Downward API.
 
 The document alone defines the `endpoints` and `policy` sections. These values
 decide what the proxy allows. Each audit record attributes that decision to the
-document digest. An override could hide a decision-affecting value from that
+document digest. An override can hide a decision-affecting value from that
 attribution, so these values cannot come from another source.
 
 Every record also carries `config.digest`, which covers the settings after an
-override applies. The two digests answer different questions. See "What the
-digests identify" below.
+override applies. Read it with `document.digest` to distinguish the mounted
+file from the settings in force. See "What the digests identify" below.
 
 Every environment variable starts with `EGRESS_PROXY_`. The tables below list
 the variable for each setting that supports one. The start-up log and `/info`
@@ -54,7 +54,7 @@ Two sidecars that answer every request alike write the same value, whatever
 document, flag or variable each one was given.
 
 Reading the two together tells you what happened. The same `document.digest`
-with different `config.digest` values means an override, a default or a build
+with different `config.digest` values means an override, a default, or a build
 changed what the sidecars enforce. Settings that decide nothing stay out of
 `config.digest`, so `sandbox.id`, the listen addresses, the CA paths and the
 limits never move it. The digest is one way and this proxy publishes no
@@ -77,8 +77,8 @@ Every earlier example document continues to parse from
 
 The whole section is optional. When it exists, every key is required. The
 proxy applies these requirements and uses the values during token exchange.
-This section and `credentials.static_file` both name a credential source, so
-the proxy refuses a document that contains both.
+Both this section and `credentials.static_file` name a credential source. The
+proxy refuses a document that contains both.
 
 | Key | Variable | Description |
 |---|---|---|
@@ -134,17 +134,17 @@ itself.
 
 ### `credentials`
 
-This section names the source that the proxy reads an endpoint credential
-from. A document that names no source denies every endpoint that names a
-credential with `credential_unavailable`. The process reports its source at
-every start, and `/info` reports it as `credential_source`.
+This section names the source from which the proxy reads endpoint credentials.
+If a document names no source, every endpoint that names a credential is
+denied with `credential_unavailable`. The process reports its source at every
+start, and `/info` reports it as `credential_source`.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `static_file` | unset | `--credential-static-file`, `EGRESS_PROXY_CREDENTIAL_STATIC_FILE` | A file of credentials by resource, for tests and development. Use an absolute path. The file holds credentials in the clear, so it must be readable by its owner alone: the proxy refuses a file with any group or other permission bit. The proxy refuses this key together with an `identity`. |
+| `static_file` | unset | `--credential-static-file`, `EGRESS_PROXY_CREDENTIAL_STATIC_FILE` | A plain-text file that maps resources to credentials for tests and development. Use an absolute path that only its owner can read. The proxy refuses any group or other permission bit and refuses this setting with `identity`. |
 
 The proxy reads the file once at start-up. Restart the process after a
-change. The file uses this shape:
+change. The file uses this format:
 
 ```yaml
 version: 1
@@ -153,11 +153,10 @@ credentials:
     value: "<the credential>"
 ```
 
-Each `resource` matches an endpoint `resource`. A request to an endpoint
+Each entry uses the same resource URL as an endpoint. A request to an endpoint
 whose resource the file omits is denied with `credential_unavailable`. The
-proxy refuses a file that repeats a resource, that holds an empty
-credential, or that holds a credential with a control character, which would
-split the request head.
+proxy refuses repeated resources, empty credentials, and credentials with a
+control character. A control character would split the request head.
 
 ### `limits`
 
@@ -233,39 +232,39 @@ the proxy matches no endpoint and is rejected with `no_matching_endpoint`.
 | `placement.template` | For `header`, the value with `{credential}` where the proxy puts the credential, such as `Bearer {credential}`. |
 | `placement.user` | For `basic`, the user name. The credential becomes the password. |
 
-The placement is authoritative. The proxy replaces whatever value the
-workload sent at that place, and it writes the credential where the workload
-sent nothing. A header placement replaces every value that the workload sent
-under that header name. A query placement replaces every value under that
-parameter name and re-encodes the query, so the request leaves with its
-parameters sorted by name.
+A placement tells the proxy where to write the credential. The placement wins
+over any value that the workload sent there. The proxy also writes the
+credential when the workload sent nothing. A header placement replaces every
+value under that header name. A query placement replaces every value under
+that parameter name and re-encodes the query. The request then leaves with
+its parameters sorted by name.
 
-A header placement cannot name these headers, whatever their case. The
-document is refused at start-up, and the writer refuses the same names.
+A header placement cannot name these headers, whatever their case. The proxy
+refuses the document at start-up, and the writer refuses the same names.
 
 | Header | Why |
 |---|---|
-| `Connection`, `Proxy-Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate`, `Proxy-Authorization` | The hop-by-hop headers of RFC 9110 section 7.6.1 govern the connection the proxy owns. The proxy strips them, so the credential never leaves. |
+| `Connection`, `Proxy-Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate`, `Proxy-Authorization` | These hop-by-hop headers govern the connection that the proxy owns. The proxy strips them, so the credential never leaves. See RFC 9110 section 7.6.1. |
 | `Content-Length` | It frames a body the proxy does not write. |
-| `Host` | The proxy writes the host from the request target and leaves the header map out of it, so the credential would never reach the upstream. |
+| `Host` | The proxy writes the host from the request target, not from the header map. The credential would not reach the upstream. |
 | `Forwarded` (RFC 7239), any name starting `X-Forwarded-`, any name starting `Sec-` | An upstream can read these as the client's identity or route, and the `Sec-` names belong to the user agent. |
 
-`Authorization` is not on the list. It is the placement most endpoints name.
+The proxy allows `Authorization`, which most endpoints use.
 
-This build writes the `header` and `query` placements. A request to an
+The proxy supports the `header` and `query` placements. A request to an
 endpoint with a `basic` placement is denied with `credential_unavailable`,
 and so is a request that the credential source cannot answer. A placement
-the writer cannot write is denied with the same reason, before the proxy
-dials. The proxy never forwards the workload placeholder to a credentialed
-endpoint.
+If the writer cannot write a placement, the request is denied with the same
+reason before the proxy dials. The proxy never forwards the workload
+placeholder to a credentialed endpoint.
 
 The proxy writes the credential after it removes the hop-by-hop headers that
 the workload named in `Connection`. A workload cannot name the placement
 header there and have the credential dropped on the way out.
 
 No credential reaches a log line or an audit record. A record carries the
-method, the path without its query, and the host, and the proxy removes the
-credential from every other text it writes.
+method, the path without its query, and the host. The proxy removes the
+credential from all other text it writes.
 
 ## Decisions and reason codes
 
@@ -283,7 +282,7 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
-| `credential_unavailable` | deny | request | The proxy did not put a credential in the request: the process has no source, the source holds none for the endpoint resource, this build does not write the placement, or the writer reported an error. `decision.error` says which. |
+| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
 | `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and the tunnel carries no request. |
 

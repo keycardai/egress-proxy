@@ -120,8 +120,8 @@ func fetch(t *testing.T, h *harness, target string, header http.Header) reply {
 }
 
 // TestCredentialInjection pins the bytes that leave for the upstream. The
-// placement is authoritative: whatever the workload sent there is replaced,
-// and the credential is written where it sent nothing.
+// placement wins: the workload value is replaced, and the credential is
+// written when the workload sent nothing.
 func TestCredentialInjection(t *testing.T) {
 	t.Parallel()
 	h := start(t, harnessOptions{

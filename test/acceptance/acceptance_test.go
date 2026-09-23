@@ -93,8 +93,8 @@ func TestAcceptance(t *testing.T) {
 // for longer than a short idle timeout. Every other path answers "hello from
 // upstream <path>".
 //
-// The log line carries the target with its query and the Authorization
-// header, so a scenario can prove what the proxy wrote into the request.
+// The log line includes the target with its query and the Authorization
+// header. A scenario can then verify what the proxy wrote into the request.
 func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 1 {
 		ts.Fatalf("usage: upstream DIR")

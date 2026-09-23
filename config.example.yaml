@@ -33,8 +33,9 @@ identity:
 
 # credentials:
 #   static_file: "/run/egress/credentials.yaml"  # EGRESS_PROXY_CREDENTIAL_STATIC_FILE
-# A file of credentials by resource, for tests and development. It is
-# refused together with an identity, so a process reads from one source.
+# The file maps resources to credentials for tests and development. The proxy
+# refuses this setting when identity is present, so one process has one
+# credential source.
 
 policy:
   cluster_cidrs: ["10.42.0.0/16", "10.43.0.0/16"]   # joined to the platform deny list

@@ -1,11 +1,10 @@
 // Package credential writes a credential into an outbound request at the
 // place an endpoint names, and supplies the credential to write.
 //
-// The placement is authoritative. The proxy replaces whatever value the
-// workload sent at that place, and writes the credential where the workload
-// sent nothing.
+// The placement wins. The proxy replaces whatever value the workload sent at
+// that place and writes the credential where the workload sent nothing.
 //
-// A credential NEVER reaches a log line or an audit record. The proxy
+// A credential never reaches a log line or an audit record. The proxy
 // records a method, a path without its query, and a host, and it passes
 // every other text through Redact before it writes it.
 package credential
@@ -31,7 +30,7 @@ const Marker = "[redacted]"
 // Kind is where in a request a credential goes.
 type Kind string
 
-// The placement kinds.
+// Placement kinds.
 const (
 	KindHeader Kind = "header"
 	KindQuery  Kind = "query"
@@ -68,13 +67,13 @@ type Source interface {
 	// Implementations must not leak the secret in the error contents.
 	Credential(ctx context.Context, resource string) (string, error)
 	// Describe names the source for the start-up announcement and the admin
-	// socket. It NEVER includes a credential.
+	// socket. It never includes a credential.
 	Describe() string
 }
 
 // Writer puts a credential into an outbound request at one placement. A
 // writer that reports an error leaves the request as it found it, and the
-// proxy denies the request with credential_unavailable. NEVER forward a
+// proxy denies the request with credential_unavailable. Never forward a
 // request whose write failed.
 //
 // Implementations must not leak the secret in the error contents.
@@ -82,21 +81,9 @@ type Writer interface {
 	Write(out *http.Request, credential string) error
 }
 
-// BannedHeaderName reports whether a header placement is forbidden to name
-// this header. The comparison ignores case. A banned name falls in one of
-// four groups.
-//
-//   - The hop-by-hop headers of RFC 9110 section 7.6.1. They govern the
-//     connection the proxy owns, and the reverse proxy strips them, so the
-//     credential never leaves.
-//   - Content-Length, which frames a body the proxy does not write.
-//   - Host, which net/http writes from the request target and leaves out of
-//     the header map, so the request would go upstream uncredentialed.
-//   - The names an upstream can trust for routing or identity: Forwarded
-//     (RFC 7239), the x-forwarded- family, and the sec- family the Fetch
-//     standard reserves for the user agent.
-//
-// Authorization is NOT banned. It is the placement most endpoints name.
+// BannedHeaderName reports whether a header placement cannot use name. The
+// comparison ignores case. It bans hop-by-hop headers, Content-Length, Host,
+// Forwarded, and the x-forwarded- and sec- families. Authorization is allowed.
 func BannedHeaderName(name string) bool {
 	switch lower := strings.ToLower(name); lower {
 	case "connection", "proxy-connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",

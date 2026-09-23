@@ -255,8 +255,8 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 // certificates prepares the authority the proxy terminates tunnels with and
 // writes its certificate where the workload reads it.
 func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.Store, error) {
-	// Before the key exists: a state directory that resolves inside the
-	// output directory is a key the workload can read.
+	// A state directory inside the output directory would expose the key to the
+	// workload.
 	if err := ca.PrepareDirectories(cfg.CA.StateDir, cfg.CA.OutDir); err != nil {
 		return nil, nil, fmt.Errorf("certificate authority: %w", err)
 	}
@@ -302,7 +302,7 @@ func (p *process) announce() {
 	p.logger.Warn("credential source", slog.String("source", p.credentials.Describe()))
 }
 
-// credentialSource builds the configured source, if specified.
+// credentialSource builds the configured source. It returns nil when none is set.
 //
 //nolint:ireturn // delegating the constructor to the configured source is intentional
 func credentialSource(cfg *config.Config) (credential.Source, error) {

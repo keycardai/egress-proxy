@@ -79,8 +79,8 @@ func LoadStaticFile(path string) (*StaticFile, error) {
 	return source, nil
 }
 
-// parseStatic decodes the document and refuses a key it does not define, so
-// a misspelled key never leaves an endpoint without its credential.
+// parseStatic decodes the document and refuses unknown keys. A misspelled key
+// cannot leave an endpoint without its credential.
 func parseStatic(path string, data []byte) (*staticDocument, error) {
 	if err := strictdoc.RefuseSecondYAMLDocument(data); err != nil {
 		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
@@ -108,8 +108,8 @@ func parseStatic(path string, data []byte) (*staticDocument, error) {
 	return &doc, nil
 }
 
-// validate refuses an entry that names no resource, repeats one, or holds a
-// credential the proxy cannot write. The message NEVER quotes the value.
+// validate refuses an entry without a resource, a repeated resource, or a
+// credential the proxy cannot write. The message never quotes the value.
 func (e staticEntry) validate(path string, i int, seen map[string]string) error {
 	switch _, repeated := seen[e.Resource]; {
 	case strings.TrimSpace(e.Resource) == "":

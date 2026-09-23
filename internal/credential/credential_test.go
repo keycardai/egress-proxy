@@ -35,8 +35,8 @@ func request(t *testing.T, target string, header http.Header) *http.Request {
 }
 
 // TestWriterReplacesWhatTheWorkloadSent pins the outbound request for each
-// placement. The placement is authoritative: a value the workload sent
-// there is replaced, and one it did not send is written.
+// placement. The placement wins: a value the workload sent there is replaced,
+// and one it did not send is written.
 func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 	t.Parallel()
 	header := credential.Placement{
@@ -192,9 +192,8 @@ func TestNewWriterRefusals(t *testing.T) {
 }
 
 // TestNewWriterRefusesABannedHeaderName pins the names a header placement
-// cannot use. The refusal is in NewWriter, so it holds for an endpoint
-// assembled outside the document parser. Every name here is one
-// httpguts.ValidHeaderFieldName accepts, so the ban is what refuses it.
+// cannot use. NewWriter applies the rule to endpoints built in code as well
+// as to endpoints read from a document.
 func TestNewWriterRefusesABannedHeaderName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -236,9 +235,9 @@ func TestNewWriterRefusesABannedHeaderName(t *testing.T) {
 	}
 }
 
-// TestNewWriterAcceptsAHeaderName pins the names the ban leaves alone.
-// Authorization is the placement most endpoints name, and a banned name
-// bans only an exact match or a whole family by prefix.
+// TestNewWriterAcceptsAHeaderName pins allowed names. Authorization is the
+// placement most endpoints name. A ban applies only to an exact name or a
+// complete family prefix.
 func TestNewWriterAcceptsAHeaderName(t *testing.T) {
 	t.Parallel()
 	names := []string{
@@ -246,9 +245,9 @@ func TestNewWriterAcceptsAHeaderName(t *testing.T) {
 		"authorization",
 		"X-Api-Key",
 		"Private-Token",
-		// A banned prefix inside the name is not a banned prefix.
+		// A banned prefix inside a name is allowed.
 		"My-X-Forwarded-Marker",
-		// A banned name as a prefix of a longer name is not banned.
+		// A banned name as a prefix of a longer name is allowed.
 		"Second-Factor",
 		"Host-Key",
 		"Connection-Id",
@@ -277,11 +276,11 @@ func TestValidate(t *testing.T) {
 	}{
 		{name: "an ordinary token", value: "ghp_1234"},
 		{name: "a token with spaces and punctuation", value: "Basic dXNlcjpwYXNz=="},
-		{name: "empty", value: "", wantErr: "it is empty"},
-		{name: "a newline", value: "one\ntwo", wantErr: "control character at byte 3"},
-		{name: "a carriage return", value: "one\r\nX-Injected: 1", wantErr: "control character at byte 3"},
-		{name: "a null byte", value: "one\x00", wantErr: "control character at byte 3"},
-		{name: "a delete byte", value: "\x7f", wantErr: "control character at byte 0"},
+		{name: "empty", value: "", wantErr: "empty value"},
+		{name: "a newline", value: "one\ntwo", wantErr: "invalid character"},
+		{name: "a carriage return", value: "one\r\nX-Injected: 1", wantErr: "invalid character"},
+		{name: "a null byte", value: "one\x00", wantErr: "invalid character"},
+		{name: "a delete byte", value: "\x7f", wantErr: "invalid character"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,8 +306,7 @@ func TestRedact(t *testing.T) {
 		{
 			name: "a credential whose escaped form is itself",
 			text: `Get "https://maps.example/geocode?key=` + secret + `": refused`,
-			// url.QueryEscape leaves secret alone, so this case says
-			// nothing about escaping. The cases below carry that weight.
+			// This case covers a credential that needs no escaping.
 			credential: secret, want: `Get "https://maps.example/geocode?key=[redacted]": refused`,
 		},
 		{

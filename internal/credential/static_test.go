@@ -22,8 +22,7 @@ func write(t *testing.T, body string, mode fs.FileMode) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "credentials.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(body), mode), "write the credential file")
-	// WriteFile applies the umask, so the mode the case asks for is set
-	// again.
+	// Set the mode again because WriteFile applies the process umask.
 	require.NoError(t, os.Chmod(path, mode), "chmod the credential file")
 	return path
 }
@@ -133,12 +132,12 @@ func TestLoadStaticFileRefusals(t *testing.T) {
 		{
 			name: "an entry without a value", mode: 0o600,
 			body:    "version: 1\ncredentials:\n  - resource: https://a/\n",
-			wantErr: "credentials[0]: resource \"https://a/\": invalid credential: it is empty",
+			wantErr: "credentials[0]: resource \"https://a/\": invalid credential: empty value",
 		},
 		{
 			name: "a credential that would split the request head", mode: 0o600,
 			body:    "version: 1\ncredentials:\n  - resource: https://a/\n    value: \"one\\r\\ntwo\"\n",
-			wantErr: "control character",
+			wantErr: "invalid character",
 		},
 		{
 			name: "a resource named twice", mode: 0o600,

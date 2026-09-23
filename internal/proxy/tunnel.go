@@ -134,9 +134,8 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 		s.closeConn(tlsConn, state, "handshake")
 		return
 	}
-	// The tunnel is established, so the allow is now true of a connection
-	// that carried traffic. It lands before any request-scoped record,
-	// because the tunnel server reads this connection only after push.
+	// The tunnel is established, so the allow describes a connection that
+	// carried traffic. Emit it before the tunnel server reads any request.
 	s.opts.Audit.Emit(audit.Record{
 		ConnectionID: state.connectionID,
 		Scope:        audit.ScopeConnection,
@@ -336,8 +335,8 @@ func (s *Server) emitForwarded(
 	// of the decision. The endpoint the allow named stays on the record, so
 	// an audit query can find which rule covered the traffic.
 	//
-	// Every text this switch puts on the record comes from the upstream leg,
-	// which carries the credential. NEVER set one without Redact.
+	// These fields can contain upstream text, which can contain the credential.
+	// Redact every such field.
 	switch {
 	case fwd.denied:
 		record.Decision.Verdict = policy.VerdictDeny
@@ -394,16 +393,13 @@ func (s *Server) decideRequest(
 	return decision
 }
 
-// refuseRequestShape refuses a request the proxy cannot forward as the
-// workload wrote it, and reports whether it did.
+// refuseRequestShape refuses a request the proxy cannot forward unchanged.
 func refuseRequestShape(state *tunnel, r *http.Request) (policy.Decision, bool) {
 	if r.RequestURI == "*" || !strings.HasPrefix(r.URL.Path, "/") {
 		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}, true
 	}
-	// The query must parse, because the reverse proxy re-encodes one that
-	// does not and drops the pairs it could not read. The upstream would
-	// receive a request the workload did not send, and the record would
-	// describe the request the proxy was given.
+	// The query must parse. The reverse proxy re-encodes an invalid query and
+	// drops pairs it cannot read.
 	if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
 		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest, Err: err}, true
 	}
@@ -414,9 +410,8 @@ func refuseRequestShape(state *tunnel, r *http.Request) (policy.Decision, bool) 
 	return policy.Decision{}, false
 }
 
-// resolveCredential reads the endpoint's credential and prepares the writer
-// that puts it into the outbound request. Every failure denies, so a
-// request never leaves carrying whatever the workload had at the placement.
+// resolveCredential reads the endpoint credential and prepares its writer.
+// Any failure denies the request before it leaves with the workload value.
 func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint, fwd *forward) error {
 	if s.opts.Credentials == nil {
 		return errNoSource
@@ -441,10 +436,8 @@ func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint
 // workload sent it, because the request decision already checked that the
 // header is the SNI.
 //
-// The credential goes in here because the reverse proxy has already removed
-// the hop-by-hop headers that the workload's Connection header names. A
-// workload therefore cannot name the placement header in Connection and
-// have the credential dropped on the way out.
+// Write the credential here because the reverse proxy has already removed the
+// hop-by-hop headers named by Connection.
 func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 	fwd := forwardFrom(proxied.In.Context())
 	proxied.Out.URL.Scheme = "https"
@@ -454,8 +447,8 @@ func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 		return
 	}
 	if err := fwd.writer.Write(proxied.Out, fwd.secret); err != nil {
-		// Rewrite cannot abort a forward. The failure goes on the forward,
-		// and the round trip refuses it before it reaches the upstream.
+		// Rewrite cannot abort a forward. The round trip rejects this forward
+		// before it reaches the upstream.
 		fwd.writeErr = err
 		s.logger.Warn("the credential was not written, so the request is refused",
 			slog.String("request_id", fwd.requestID),
@@ -471,9 +464,8 @@ func (e *credentialNotWrittenError) Error() string { return e.err.Error() }
 
 func (e *credentialNotWrittenError) Unwrap() error { return e.err }
 
-// refuseUnwritten is the transport the reverse proxy uses. It opens nothing
-// for a forward whose credential writer failed, so a request NEVER reaches
-// an upstream without the credential its endpoint names.
+// refuseUnwritten is the transport the reverse proxy uses. It opens no
+// connection when the credential writer fails.
 type refuseUnwritten struct{ next http.RoundTripper }
 
 func (t refuseUnwritten) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -494,8 +486,8 @@ func (s *Server) recordUpstreamStatus(res *http.Response) error {
 }
 
 // upstreamError answers an allowed request that produced no response. A dial
-// the deny list refused and a credential the writer could not write are both
-// policy answers. Anything else is an upstream failure.
+// refused by the deny list and a failed credential write are policy denials.
+// Anything else is an upstream failure.
 func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	fwd := forwardFrom(r.Context())
 	fwd.err = err
