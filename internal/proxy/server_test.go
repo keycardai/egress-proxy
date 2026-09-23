@@ -690,6 +690,19 @@ func TestDeniedRequestsInsideAnAllowedTunnel(t *testing.T) {
 			request:    "GET /ok%2Fx HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
 			wantStatus: http.StatusForbidden, wantReason: policy.ReasonNoMatchingEndpoint,
 		},
+		{
+			// The reverse proxy re-encodes a query it cannot parse and
+			// drops the pairs it could not read, so forwarding this would
+			// send the upstream a request the workload did not write.
+			name:       "a query with an invalid escape",
+			request:    "GET /ok/x?q=here&bad=%zz HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
+		},
+		{
+			name:       "a query separated by semicolons, which are not separators",
+			request:    "GET /ok/x?a=1;b=2 HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

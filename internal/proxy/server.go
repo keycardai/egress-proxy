@@ -182,7 +182,7 @@ func New(opts Options) (*Server, error) {
 	server := &Server{opts: opts, logger: opts.Logger, intake: newIntake()}
 	server.transport = server.newTransport()
 	server.reverse = &httputil.ReverseProxy{
-		Rewrite:   rewrite,
+		Rewrite:   server.rewrite,
 		Transport: server.transport,
 		// Responses stream: LLM traffic is server-sent events, and a
 		// buffered proxy stalls it.

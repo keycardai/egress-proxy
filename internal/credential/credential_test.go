@@ -44,6 +44,9 @@ func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 		// name, or under checkHeader when the placement writes no header.
 		checkHeader string
 		wantHeader  []string
+		// wantErr is what Write reports when it cannot write the
+		// credential. The request then goes on unchanged.
+		wantErr string
 	}{
 		{
 			name: "a header the workload did not send", placement: header, target: "/repos",
@@ -91,6 +94,16 @@ func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 			wantQuery:   "key=" + secret,
 			checkHeader: "Authorization", wantHeader: []string{"Bearer placeholder"},
 		},
+		{
+			name:      "a query that does not parse keeps the bytes the workload sent",
+			placement: query, target: "/geocode?q=here&bad=%zz",
+			wantQuery: "q=here&bad=%zz", wantErr: "the request query does not parse",
+		},
+		{
+			name:      "a query with a semicolon separator, which is not a separator",
+			placement: query, target: "/geocode?a=1;b=2",
+			wantQuery: "a=1;b=2", wantErr: "the request query does not parse",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,7 +111,13 @@ func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 			writer, err := credential.NewWriter(tc.placement)
 			require.NoError(t, err, "NewWriter")
 			out := request(t, tc.target, tc.header)
-			writer.Write(out, secret)
+			err = writer.Write(out, secret)
+			if tc.wantErr == "" {
+				require.NoError(t, err, "Write")
+			} else {
+				require.ErrorContains(t, err, tc.wantErr, "Write")
+				assert.NotContains(t, err.Error(), secret, "the message quotes the credential")
+			}
 			assert.Equal(t, tc.wantQuery, out.URL.RawQuery, "the outbound query")
 			name := tc.checkHeader
 			if name == "" {

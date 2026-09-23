@@ -268,7 +268,7 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. The proxy also uses this reason for every cleartext request. |
 | `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
-| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, or a CONNECT authority with a bad port. |
+| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy has no credential for the endpoint: the process has no source, the source holds none for the endpoint resource, or this build does not write the placement. `decision.error` says which. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |

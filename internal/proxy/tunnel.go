@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -328,6 +329,9 @@ func (s *Server) emitForwarded(
 	// A refusal on the upstream leg overturns the verdict and keeps the rest
 	// of the decision. The endpoint the allow named stays on the record, so
 	// an audit query can find which rule covered the traffic.
+	//
+	// A query placement puts the credential in the outbound URL, so text
+	// from the upstream leg is redacted before it becomes a record.
 	switch {
 	case fwd.denied:
 		record.Decision.Verdict = policy.VerdictDeny
@@ -359,19 +363,15 @@ func panicOutcome(recovered any, requestErr error) string {
 	}
 }
 
-// decideRequest is the per-request decision: the target is well formed, the
-// Host header agrees with the SNI, an endpoint covers the path, and the
-// credential that endpoint names is in hand. It fills fwd with the
-// credential and where it goes.
+// decideRequest is the per-request decision: the request is one the proxy
+// can forward as written, an endpoint covers the path, and the credential
+// that endpoint names is in hand. It fills fwd with the credential and
+// where it goes.
 func (s *Server) decideRequest(
 	ctx context.Context, state *tunnel, r *http.Request, fwd *forward,
 ) policy.Decision {
-	if r.RequestURI == "*" || !strings.HasPrefix(r.URL.Path, "/") {
-		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}
-	}
-	hostname, port, ok := splitAuthority(r.Host)
-	if !ok || hostname != state.sni || port != state.port {
-		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonHostMismatch}
+	if refusal, refused := refuseRequestShape(state, r); refused {
+		return refusal
 	}
 	decision := s.opts.Matcher.Request(state.sni, state.port, r.URL.EscapedPath())
 	if !decision.Allowed() || decision.Endpoint == nil || decision.Endpoint.Credential == nil {
@@ -386,6 +386,26 @@ func (s *Server) decideRequest(
 		}
 	}
 	return decision
+}
+
+// refuseRequestShape refuses a request the proxy cannot forward as the
+// workload wrote it, and reports whether it did.
+func refuseRequestShape(state *tunnel, r *http.Request) (policy.Decision, bool) {
+	if r.RequestURI == "*" || !strings.HasPrefix(r.URL.Path, "/") {
+		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}, true
+	}
+	// The query must parse, because the reverse proxy re-encodes one that
+	// does not and drops the pairs it could not read. The upstream would
+	// receive a request the workload did not send, and the record would
+	// describe the request the proxy was given.
+	if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
+		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest, Err: err}, true
+	}
+	hostname, port, ok := splitAuthority(r.Host)
+	if !ok || hostname != state.sni || port != state.port {
+		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonHostMismatch}, true
+	}
+	return policy.Decision{}, false
 }
 
 // resolveCredential reads the endpoint's credential and prepares the writer
@@ -419,13 +439,18 @@ func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint
 // the hop-by-hop headers that the workload's Connection header names. A
 // workload therefore cannot name the placement header in Connection and
 // have the credential dropped on the way out.
-func rewrite(proxied *httputil.ProxyRequest) {
+func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 	fwd := forwardFrom(proxied.In.Context())
 	proxied.Out.URL.Scheme = "https"
 	proxied.Out.URL.Host = net.JoinHostPort(fwd.host, strconv.Itoa(fwd.port))
 	proxied.Out.Host = proxied.In.Host
-	if fwd.writer != nil {
-		fwd.writer.Write(proxied.Out, fwd.secret)
+	if fwd.writer == nil {
+		return
+	}
+	if err := fwd.writer.Write(proxied.Out, fwd.secret); err != nil {
+		s.logger.Warn("the credential was not written; the request goes upstream without it",
+			slog.String("request_id", fwd.requestID),
+			slog.String("error", credential.Redact(err.Error(), fwd.secret)))
 	}
 }
 

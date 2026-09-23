@@ -40,6 +40,7 @@ const (
 
 var (
 	errPlacement = errors.New("placement")
+	errQuery     = errors.New("query placement")
 	errInvalid   = errors.New("invalid credential")
 )
 
@@ -69,9 +70,11 @@ type Source interface {
 	Describe() string
 }
 
-// Writer puts a credential into an outbound request at one placement.
+// Writer puts a credential into an outbound request at one placement. A
+// writer that reports an error leaves the request as it found it, so the
+// request goes upstream carrying no credential.
 type Writer interface {
-	Write(out *http.Request, credential string)
+	Write(out *http.Request, credential string) error
 }
 
 // NewWriter returns the writer for a placement. It refuses a placement this
@@ -107,8 +110,9 @@ type headerWriter struct {
 }
 
 // Write replaces every value the workload sent under the header name.
-func (w headerWriter) Write(out *http.Request, credential string) {
+func (w headerWriter) Write(out *http.Request, credential string) error {
 	out.Header.Set(w.name, strings.ReplaceAll(w.template, Token, credential))
+	return nil
 }
 
 // queryWriter sets one query parameter to the credential.
@@ -118,12 +122,19 @@ type queryWriter struct {
 
 // Write replaces every value the workload sent under the parameter name.
 // The query is re-encoded, so the request leaves with its parameters sorted
-// by name. ParseQuery returns the pairs it read along with any error, and a
-// pair it cannot read is one the request cannot carry.
-func (w queryWriter) Write(out *http.Request, credential string) {
-	values, _ := url.ParseQuery(out.URL.RawQuery)
+// by name.
+//
+// A query that does not parse is left as the workload sent it. Re-encoding
+// one would drop the pairs that did not parse, and the request would reach
+// the upstream shorter than it was written.
+func (w queryWriter) Write(out *http.Request, credential string) error {
+	values, err := url.ParseQuery(out.URL.RawQuery)
+	if err != nil {
+		return fmt.Errorf("%w: the request query does not parse: %w", errQuery, err)
+	}
 	values.Set(w.name, credential)
 	out.URL.RawQuery = values.Encode()
+	return nil
 }
 
 // Validate refuses a credential the proxy cannot put into a request. A
