@@ -140,6 +140,15 @@ func upstreamHandler(requests io.Writer) http.HandlerFunc {
 			r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		switch {
+		case r.URL.Path == "/header/bad-trailer":
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				panic(err)
+			}
+			defer func() { _ = conn.Close() }()
+			fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"+
+				"Trailer: X-End\r\n\r\n1\r\nx\r\n0\r\n%s\r\n\r\n",
+				r.Header.Get("Authorization"))
 		case strings.HasPrefix(r.URL.Path, "/truncated"):
 			w.Header().Set("Content-Length", truncatedLength)
 			fmt.Fprint(w, "short")

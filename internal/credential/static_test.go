@@ -186,3 +186,36 @@ func TestLoadStaticFileRefusesWhatIsNotAReadableFile(t *testing.T) {
 		})
 	}
 }
+
+func TestStaticFileParseErrorsDoNotExposeCredentials(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "YAML scalar",
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: !!int " + secret + "\n",
+		},
+		{
+			name: "case-folded keys",
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: {" + secret +
+				": {" + secret + ": 1, " + strings.ToUpper(secret) + ": 2}}\n",
+		},
+		{
+			name: "unknown JSON field",
+			body: `{"version":1,"credentials":[{"resource":"https://a/","` + secret + `":"value"}]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := write(t, tc.body, 0o600)
+			source, err := credential.LoadStaticFile(path)
+			require.ErrorContains(t, err, "invalid credential file")
+			assert.Nil(t, source)
+			assert.Contains(t, err.Error(), path)
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
