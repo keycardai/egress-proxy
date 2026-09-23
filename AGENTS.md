@@ -15,6 +15,9 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   `cmd/` for binaries, `internal/` for everything else,
   `test/acceptance/` for the acceptance tests, Go behind the `acceptance`
   build tag with one testscript per scenario under `testdata/`,
+  `test/acceptance/netfixture/` the HTTPS upstream and the Go client the
+  Docker lab runs, the client reading no proxy variable so that a request
+  crossing the proxy proves the capture put it there,
   `test/e2e/` for the cluster lanes,
   `test/fakeas/` for the fake authorization server that unit and acceptance
   tests use for token exchange,

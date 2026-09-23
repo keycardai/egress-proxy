@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"syscall"
 	"time"
 
@@ -29,8 +30,10 @@ import (
 	"github.com/keycardai/egress-proxy/internal/config"
 	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/exchange"
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/proxy"
+	"github.com/keycardai/egress-proxy/internal/transparent"
 )
 
 // shutdownGrace bounds how long a stop waits for in-flight requests.
@@ -60,7 +63,9 @@ type flags struct {
 	workloadTokenFile     string
 	impersonateUser       string
 	connect               string
+	transparent           string
 	admin                 string
+	netsetupReceipt       string
 	caOutDir              string
 	caStateDir            string
 	clientSecretFile      string
@@ -83,7 +88,9 @@ func (f flags) overrides() config.Overrides {
 		WorkloadTokenFile:     f.workloadTokenFile,
 		ImpersonateUser:       f.impersonateUser,
 		Connect:               f.connect,
+		Transparent:           f.transparent,
 		Admin:                 f.admin,
+		NetsetupReceipt:       f.netsetupReceipt,
 		CAOutDir:              f.caOutDir,
 		CAStateDir:            f.caStateDir,
 		ClientSecretFile:      f.clientSecretFile,
@@ -101,7 +108,7 @@ func (f flags) overrides() config.Overrides {
 // flagSet defines the configurable command line options and environment
 // variables.
 func flagSet(opts *flags) []cli.Flag {
-	return []cli.Flag{
+	return slices.Concat([]cli.Flag{
 		stringFlag("config", "CONFIG", &opts.configPath, "path to the configuration document", true),
 		stringFlag("sandbox-id", "SANDBOX_ID", &opts.sandboxID, "the sandbox on every audit record (sandbox.id)", false),
 		stringFlag("zone-url", "ZONE_URL", &opts.zoneURL, "the Keycard zone (identity.zone_url)", false),
@@ -110,14 +117,7 @@ func flagSet(opts *flags) []cli.Flag {
 			"path of the projected ServiceAccount token (identity.workload_token_file)", false),
 		stringFlag("impersonate-user", "IMPERSONATE_USER", &opts.impersonateUser,
 			"the user every exchange acts for (identity.impersonate.user)", false),
-		stringFlag(
-			"connect",
-			"CONNECT",
-			&opts.connect,
-			"address of the CONNECT frontend, host:port (listen.connect)",
-			false,
-		),
-		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)", false),
+	}, listenFlags(opts), []cli.Flag{
 		stringFlag("ca-out-dir", "CA_OUT_DIR", &opts.caOutDir,
 			"directory the CA certificate is written to (ca.out_dir)", false),
 		stringFlag("ca-state-dir", "CA_STATE_DIR", &opts.caStateDir,
@@ -156,6 +156,26 @@ func flagSet(opts *flags) []cli.Flag {
 			Name: "exchange-timeout", Destination: &opts.exchangeTimeout, Sources: env("EXCHANGE_TIMEOUT"),
 			Usage: "budget for one token exchange, discovery included (limits.exchange_timeout)",
 		},
+	})
+}
+
+// listenFlags are where the process accepts connections and what it checks
+// its own containment against.
+func listenFlags(opts *flags) []cli.Flag {
+	return []cli.Flag{
+		stringFlag(
+			"connect",
+			"CONNECT",
+			&opts.connect,
+			"address of the CONNECT frontend, host:port (listen.connect)",
+			false,
+		),
+		stringFlag("transparent", "TRANSPARENT", &opts.transparent,
+			"address of the transparent frontend the netsetup rules redirect to, host:port "+
+				"(listen.transparent); empty runs none", false),
+		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)", false),
+		stringFlag("netsetup-receipt", "NETSETUP_RECEIPT", &opts.netsetupReceipt,
+			"file the init container recorded what it programmed in (netsetup.receipt)", false),
 	}
 }
 
@@ -198,6 +218,7 @@ type process struct {
 	credentials credential.Source
 	server      *proxy.Server
 	admin       *admin.Server
+	transparent *transparent.Frontend
 }
 
 func run(ctx context.Context, opts flags, stdout, stderr io.Writer) error {
@@ -256,6 +277,9 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	proc := &process{
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
 		credentials: credentials, server: server,
+	}
+	if proc.transparent, err = capture(cfg, server, logger); err != nil {
+		return nil, err
 	}
 	proc.admin, err = admin.New(ctx, cfg.Listen.Admin, proc.info, logger)
 	if err != nil {
@@ -383,10 +407,81 @@ func (p *process) info() any {
 		"ca":                   map[string]any{"out_dir": p.cfg.CA.OutDir, "not_after": p.authority.NotAfter()},
 		"limits":               p.cfg.Limits,
 		"credential_source":    source,
+		"netsetup_receipt":     p.cfg.Netsetup.Receipt,
 		"endpoint_hosts":       p.matcher.Hosts(),
 		"cluster_cidrs":        deny.ClusterCIDRs(),
 		"deny_list_exceptions": deny.Exceptions(),
 	}
+}
+
+// capture builds the transparent frontend, after the netsetup receipt shows
+// that the rules redirect to it and that this process cannot change them. A
+// configuration with no listen.transparent runs no frontend and checks no
+// receipt: there is nothing captured to contain.
+//
+// The check runs here rather than at first connection, so a sidecar whose
+// containment does not hold never serves.
+func capture(cfg *config.Config, server *proxy.Server, logger *slog.Logger) (*transparent.Frontend, error) {
+	if cfg.Listen.Transparent == "" {
+		return nil, nil //nolint:nilnil // no transparent frontend is a posture, not a failure
+	}
+	if !transparent.Supported {
+		return nil, fmt.Errorf("%w: listen.transparent is set and this platform has no SO_ORIGINAL_DST",
+			transparent.ErrNotSupported)
+	}
+	request := netsetup.ContainmentRequest{
+		Path:            cfg.Netsetup.Receipt,
+		TransparentPort: cfg.TransparentPort(),
+		UID:             os.Getuid(),
+	}
+	if err := netsetup.Containment(request); err != nil {
+		return nil, fmt.Errorf("network capture: %w", err)
+	}
+	receipt, err := netsetup.ReadReceipt(cfg.Netsetup.Receipt)
+	if err != nil {
+		return nil, fmt.Errorf("network capture: %w", err)
+	}
+	logger.Info("network capture in force",
+		slog.String("receipt", cfg.Netsetup.Receipt),
+		slog.String("ruleset_digest", receipt.RulesetDigest),
+		slog.Int("proxy_uid", receipt.ProxyUID),
+		slog.Int("redirect_port", receipt.RedirectPort),
+		slog.Any("capture_ports", receipt.CapturePorts),
+		slog.Any("families", receipt.Families),
+		slog.Any("cleartext_ports", cfg.Listen.CleartextPorts))
+	for _, port := range uncaptured(receipt.CapturePorts, cfg.Listen.CleartextPorts) {
+		logger.Warn("listen.cleartext_ports names a port the redirect does not cover, "+
+			"so nothing reaches this frontend on it",
+			slog.Int("port", port))
+	}
+	frontend, err := transparent.New(transparent.Options{
+		Handler:        server.ServeRedirected,
+		Logger:         logger,
+		CleartextPorts: cfg.Listen.CleartextPorts,
+		MaxConnections: cfg.Limits.MaxConnections,
+		IdleTimeout:    cfg.Limits.IdleTimeout.Duration(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("transparent frontend: %w", err)
+	}
+	return frontend, nil
+}
+
+// uncaptured names the cleartext ports the redirect does not cover. The two
+// settings live in different containers' arguments, and the receipt is what
+// reconciles them.
+func uncaptured(captured, cleartext []int) []int {
+	covered := make(map[int]bool, len(captured))
+	for _, port := range captured {
+		covered[port] = true
+	}
+	var out []int
+	for _, port := range cleartext {
+		if !covered[port] {
+			out = append(out, port)
+		}
+	}
+	return out
 }
 
 // serve runs the proxy service until a signal arrives or a component
@@ -402,9 +497,16 @@ func (p *process) serve(ctx context.Context) error {
 		slog.String("connect", listener.Addr().String()),
 		slog.String("admin", p.admin.Path()))
 
+	captured, err := p.captureListeners(ctx)
+	if err != nil {
+		return err
+	}
 	group, ctx := errgroup.WithContext(ctx)
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	for _, captured := range captured {
+		group.Go(func() error { return p.transparent.Serve(ctx, captured) })
+	}
 	group.Go(func() error { return p.server.Run(ctx, listener) })
 	group.Go(func() error { return p.admin.Run(ctx) })
 	group.Go(func() error {
@@ -426,4 +528,21 @@ func version() string {
 		return "devel"
 	}
 	return info.Main.Version
+}
+
+// captureListeners binds the transparent frontend, one socket per address
+// family, each carrying the same connection cap and idle bound as the
+// CONNECT frontend. It returns nothing when no transparent frontend is
+// configured.
+func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
+	if p.transparent == nil {
+		return nil, nil
+	}
+	listeners, err := transparent.Listen(ctx, p.cfg.Listen.Transparent)
+	if err != nil {
+		return nil, fmt.Errorf("transparent frontend: %w", err)
+	}
+	p.logger.Info("capturing redirected connections",
+		slog.String("transparent", transparent.Addresses(listeners)))
+	return listeners, nil
 }

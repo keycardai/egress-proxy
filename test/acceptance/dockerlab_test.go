@@ -4,7 +4,10 @@ package acceptance_test
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +16,8 @@ import (
 	"strings"
 
 	"github.com/rogpeppe/go-internal/testscript"
+
+	"github.com/keycardai/egress-proxy/internal/ca"
 )
 
 // errUnknownCondition is a bracketed condition no scenario defines.
@@ -51,6 +56,9 @@ const (
 	// binaries to a container. The build cache is keyed by layer content,
 	// so the package layers are still built once.
 	labImageRepo = "egress-proxy-acceptance"
+	// certificatePEMSize is a generous guess at one PEM certificate, used
+	// to size the buffer the leaf chain is written into.
+	certificatePEMSize = 1024
 )
 
 // cmdDockerLab creates the network the lab containers share and exports the
@@ -119,7 +127,8 @@ func dockerClientEnv(ts *testscript.TestScript) {
 	ts.Setenv("DOCKER_CONFIG", config)
 }
 
-// cmdLinuxBin cross-compiles egress-netsetup and netfixture into DIR:
+// cmdLinuxBin cross-compiles egress-proxy, egress-netsetup and netfixture
+// into DIR:
 //
 //	linuxbin DIR
 //
@@ -134,10 +143,43 @@ func cmdLinuxBin(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Check(os.MkdirAll(dir, 0o750))
 	arch, err := exec.CommandContext(context.Background(), "docker", "version", "--format", "{{.Server.Arch}}").Output()
 	ts.Check(err)
-	for _, pkg := range []string{"../../cmd/egress-netsetup", "./netfixture"} {
+	for _, pkg := range []string{"../../cmd/egress-proxy", "../../cmd/egress-netsetup", "./netfixture"} {
 		build := exec.CommandContext(context.Background(), "go", "build", "-o", filepath.Join(dir, filepath.Base(pkg)), pkg)
 		build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+strings.TrimSpace(string(arch)))
 		build.Stderr = os.Stderr
 		ts.Check(build.Run())
 	}
+}
+
+// cmdTLSCert writes a CA certificate and a leaf for HOST into DIR:
+//
+//	tlscert DIR HOST
+//
+// DIR/ca.crt is what the proxy verifies the upstream against and
+// DIR/leaf.crt with DIR/leaf.key is what the upstream serves.
+func cmdTLSCert(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 2 {
+		ts.Fatalf("usage: tlscert DIR HOST")
+	}
+	dir := ts.MkAbs(args[0])
+	ts.Check(os.MkdirAll(dir, 0o750))
+	authority, err := ca.New(ca.Options{CommonName: "acceptance lab upstream CA"})
+	ts.Check(err)
+	_, err = authority.WriteCertificate(dir)
+	ts.Check(err)
+	leaf, err := authority.Leaf(args[1])
+	ts.Check(err)
+	certPEM := make([]byte, 0, len(leaf.Certificate)*certificatePEMSize)
+	for _, der := range leaf.Certificate {
+		certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	}
+	key, ok := leaf.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		ts.Fatalf("tlscert: the leaf key is %T, not an ECDSA key", leaf.PrivateKey)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	ts.Check(err)
+	ts.Check(os.WriteFile(filepath.Join(dir, "leaf.crt"), certPEM, 0o644))
+	ts.Check(os.WriteFile(filepath.Join(dir, "leaf.key"),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600))
 }

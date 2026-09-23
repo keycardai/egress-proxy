@@ -1,0 +1,15 @@
+# A sidecar behind the netsetup redirect: the transparent frontend, the
+# ports it reads as cleartext, and the receipt it checks its own containment
+# against.
+version: 1
+sandbox:
+  id: sbx-transparent
+listen:
+  connect: "127.0.0.1:3128"
+  transparent: "0.0.0.0:1015"
+  cleartext_ports: [80, 8080]
+  admin: "/run/egress/admin.sock"
+netsetup:
+  receipt: "/run/egress/netsetup.json"
+endpoints:
+  - host: api.github.com

@@ -1,6 +1,6 @@
-// Command netfixture is the network fixture the netsetup ruleset scenario
-// runs on both sides of the rules. It is a test fixture and ships in no image
-// the product publishes.
+// Command netfixture is the network fixture the netsetup ruleset and
+// transparent capture scenarios run on both sides of the rules. It is a test
+// fixture and ships in no image the product publishes.
 //
 // Every probe prints one line and exits 0, so the script asserts on what the
 // line says:
@@ -11,15 +11,22 @@
 //	netfixture udp HOST:PORT               send one datagram and print the reply
 //	netfixture ping HOST                   send one ICMP echo request and print the result
 //	netfixture ndp HOST                    send one neighbour solicitation from a raw socket
+//	netfixture https ADDRESS CERT KEY      answer HTTPS with the request path, logging each request
+//	netfixture get URL                     fetch URL with no proxy configured and print the status and body
+//
+// get reads no proxy variable, so a request it makes goes through the proxy
+// only when the capture put it there.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"syscall"
@@ -51,10 +58,14 @@ const (
 	// solicitReserved is the reserved field that opens a neighbour
 	// solicitation body.
 	solicitReserved = 4
+	// httpsArgs is the argument count of https ADDRESS CERT KEY.
+	httpsArgs         = 4
+	requestTimeout    = 30 * time.Second
+	readHeaderTimeout = 10 * time.Second
 )
 
 var errUsage = errors.New("usage: netfixture serve SPEC... | capture ADDRESS | dial ADDRESS | " +
-	"udp ADDRESS | ping HOST | ndp HOST")
+	"udp ADDRESS | ping HOST | ndp HOST | https ADDRESS CERT KEY | get URL")
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -80,6 +91,13 @@ func run(args []string, out io.Writer) error {
 		fmt.Fprintln(out, ping(args[1]))
 	case "ndp":
 		fmt.Fprintln(out, solicit(args[1]))
+	case "https":
+		if len(args) != httpsArgs {
+			return errUsage
+		}
+		return serveHTTPS(args[1], args[2], args[3])
+	case "get":
+		return get(args[1], out)
 	default:
 		return errUsage
 	}
@@ -155,6 +173,44 @@ func answerDatagrams(conn net.PacketConn, reply string) error {
 		}
 		_, _ = conn.WriteTo([]byte(reply), peer)
 	}
+}
+
+// serveHTTPS answers every path with the path it was asked for, so a
+// client's output says which request reached the upstream.
+func serveHTTPS(address, certFile, keyFile string) error {
+	server := &http.Server{
+		Addr:              address,
+		ReadHeaderTimeout: readHeaderTimeout,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(os.Stderr, "request %s %s host=%s\n", r.Method, r.URL.RequestURI(), r.Host)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			//nolint:gosec // G705: a fixture echoing as text/plain
+			fmt.Fprintf(w, "hello from upstream %s\n", r.URL.Path)
+		}),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	return server.ListenAndServeTLS(certFile, keyFile) //nolint:wrapcheck // the command prints it as it is
+}
+
+// get makes one request with Transport.Proxy nil, so no HTTPS_PROXY in the
+// environment can route it.
+func get(url string, out io.Writer) error {
+	client := &http.Client{
+		Timeout:   requestTimeout,
+		Transport: &http.Transport{Proxy: nil},
+	}
+	//nolint:noctx,gosec // the client's own timeout bounds the request, and G704: the URL is this fixture's argument
+	resp, err := client.Get(url)
+	if err != nil {
+		return err //nolint:wrapcheck // the command prints it as it is
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err //nolint:wrapcheck // the command prints it as it is
+	}
+	fmt.Fprintf(out, "%d %s", resp.StatusCode, body)
+	return nil
 }
 
 // dial connects over TCP and prints the first line the peer sends. A SYN

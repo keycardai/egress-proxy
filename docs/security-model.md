@@ -130,6 +130,24 @@ nothing about whether the port was checked.
 | Re-running the init container replaces the filter chain while the OUTPUT jump an earlier run installed still points at it. An empty chain under that jump lets the OUTPUT policy, ACCEPT in a pod, allow every protocol and port. | The flush and the refill are one table replacement in one `iptables-restore` run. Apply makes no other write. The chain holds its old rules or its new ones and is never empty under a live jump. | `TestApply`, `netsetup_ruleset.txtar` |
 | The init container talks to the nft backend, whose rules the sandbox runtimes this proxy targets never apply. | The backend of the iptables binary and of the restore binary beside it is read from each version string, not from the name, and a version that names no backend is refused. With no override the legacy-specific name is tried before the generic one. | `TestOpenAssertsTheLegacyBackend`, `TestOpenSearchesPathForTheLegacyName` |
 
+### Transparent frontend
+
+The workload's outbound TCP reaches `listen.transparent` through the
+netsetup ruleset, and carries no proxy variable. `internal/transparent`
+accepts what the ruleset redirects, and the proxy decides each connection
+through the same pipeline a CONNECT tunnel takes. The sidecar holds
+NET_BIND_SERVICE and nothing else.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| A workload binds the redirect port during a sidecar restart and stands in for the proxy, deciding its own traffic. | The redirect target is port 1015, below 1024. Only a process holding CAP_NET_BIND_SERVICE can bind it, and the proxy holds that capability as a file capability on its binary. The mitigation rests on `net.ipv4.ip_unprivileged_port_start`, so the sidecar reads the sysctl at start-up rather than trusting the manifest, and refuses to start when it is at or below the redirect port. A Kubernetes pod gets the kernel default of 1024. Docker lowers it to 0, so the scenario sets it back. | `transparent_capture.txtar` (`bind EACCES`), `TestContainment` |
+| The sidecar starts against rules that were never applied, applied for another uid, or applied for another redirect port, or while it could change them itself. | The sidecar reads the netsetup receipt at start-up and refuses to start when the receipt says the rules were not verified, when the capability was kept, when the proxy uid or the redirect port disagree, when the receipt names no family, when this process still holds CAP_NET_ADMIN, or when any other uid can write the receipt or its directory. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the refusal naming uid 1000) |
+| A workload opens a connection straight to the transparent listener rather than being redirected into it, so the destination the proxy recovers is the proxy itself. | The frontend compares the recovered destination with the address it accepted on and denies a match with `not_redirected`. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused` |
+| A redirected TLS connection offers no server name, so there is no host to evaluate a policy against. Every connection opened straight to an address is one, because RFC 6066 section 3 forbids an IP literal in `server_name`. | The connection is denied with `no_sni` and closed. The refusal is recorded with the pre-redirect address, so an audit reader sees where it was going. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused`, `transparent_capture.txtar` |
+| A redirected connection names a destination the address contradicts, so the proxy decides one host and reaches another. | The name must carry the port the connection was opened to, and a name that is an address literal must be that address. A mismatch is denied with `host_mismatch`. The proxy re-resolves the name on the dial rather than dialling the recovered address, so a permitted name that resolves into a denied range is still caught by the dial guard. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` |
+| A client sends nothing, or sends a partial ClientHello, and holds a goroutine and a connection slot against nothing. | The peek carries a ten-second read deadline, and the connection then denies with `no_sni`, or with `cleartext_not_forwarded` on a cleartext port. The transparent listener carries a connection cap and an idle bound, both required options rather than defaults. The peek waits for one byte past what it has served and hands over what has arrived, so a client that sent its whole ClientHello waits for nothing. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` (the silent and partial clients), `TestTheConnectionCapHoldsUntilAConnectionCloses`, `TestNewRefusals`, `TestCapturedConnectionsAreServedOneAfterAnother` |
+| A captured cleartext connection carries a credential to a destination in cleartext. | Endpoints name HTTPS destinations. The frontend reads the `Host` header on a cleartext port so the refusal names the destination, and the connection is then denied with `cleartext_not_forwarded`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. Nothing cleartext is forwarded, including to a host and port the endpoint list covers. | `TestRedirectedConnectionsAreRefused` (a cleartext connection to a name and port an endpoint covers), `transparent_capture.txtar` (the `http://` request) |
+
 ### Decision process
 
 | Threat | Mitigation | Test |
@@ -240,6 +258,16 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
   (capabilities(7), prctl(2)). The other threads the Go runtime started keep
   the capability in their permitted and bounding sets. The process runs no
   code of its own on them and exits once it has written the receipt.
+- The connection cap is per frontend. `limits.max_connections` bounds the
+  CONNECT frontend and the transparent frontend separately, so a process
+  configured for 1024 can hold 2048.
+- The transparent frontend forwards no cleartext. A captured connection on a
+  cleartext port is read for its `Host` and then refused, because every
+  endpoint names an HTTPS destination.
+- The proxy checks the netsetup receipt once, at start-up. It cannot see a
+  rule changed afterwards, which is why the init container gives up
+  CAP_NET_ADMIN before it writes the receipt and why the sidecar refuses to
+  start holding that capability.
 - The proxy mints a credential for each request which is not cached. A busy
   resource receives one exchange per request.
 - A rotated client secret takes effect on the next start because the proxy

@@ -127,6 +127,8 @@ that the endpoint list denies.
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
 | `connect` | `127.0.0.1:3128` | `--connect`, `EGRESS_PROXY_CONNECT` | The CONNECT frontend in `host:port` form. A workload that honors `HTTPS_PROXY` reaches the proxy through this address. |
+| `transparent` | unset | `--transparent`, `EGRESS_PROXY_TRANSPARENT` | The redirect target in `host:port` form. The netsetup init container sends the workload's captured TCP here, so the workload reaches the proxy with no proxy variable set. A wildcard address binds one socket per address family. An unset value runs no transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start`, which is 1024 by default, so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when the port is not below it. The proxy needs `NET_BIND_SERVICE` to bind it. Linux only. |
+| `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP, where the destination comes from the `Host` header. Every other captured port is read as TLS and its destination comes from the ClientHello. Endpoints name HTTPS destinations, so a cleartext connection is read for its host and then refused. |
 | `admin` | `/run/egress/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
 
 The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
@@ -138,6 +140,26 @@ has mode 0600 in a directory with mode 0700. The proxy sets that directory
 mode on every start and refuses to start when the directory does not end up
 at mode 0700, so no other uid in the pod can reach the socket. Keep
 `ca.out_dir` out of that directory: the workload cannot traverse it.
+
+### `netsetup`
+
+| Key | Default | Flag and variable | Description |
+|---|---|---|---|
+| `receipt` | `/run/egress/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file the init container recorded what it programmed in. It is read only when `listen.transparent` is set. Put it on an `emptyDir` with `medium: Memory` that the init container and the sidecar share and the workload does not mount. |
+
+The proxy reads the receipt before it serves anything and refuses to start
+when the ruleset in force disagrees with what it is about to do: the rules
+were not verified, the init container kept `CAP_NET_ADMIN`, the proxy uid or
+the redirect port differ, the receipt names no address family, this process
+holds `CAP_NET_ADMIN`, another uid can write the receipt or its directory,
+or `net.ipv4.ip_unprivileged_port_start` is at or below the redirect port.
+Each refusal names the two values that disagree and the setting that changes
+each.
+
+The init container is `egress-netsetup`. Its settings are its arguments and
+it reads no environment variable, so a manifest review reads the whole
+ruleset off the pod spec. `--dry-run` prints the rules it would apply and
+applies nothing.
 
 ### `ca`
 
@@ -196,7 +218,7 @@ control character. A control character would split the request head.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections that the CONNECT listener accepts. Further accepts wait until a connection ends. |
+| `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections one listener accepts. Further accepts wait until a connection ends. The limit is per frontend: the CONNECT listener and the transparent listener each count their own, so a process configured for 1024 with both frontends running can hold 2048. |
 | `idle_timeout` | `5m` | `--idle-timeout`, `EGRESS_PROXY_IDLE_TIMEOUT` | The time before the proxy closes a connection that neither reads nor writes. The proxy applies this limit on the frontend, inside a tunnel, and on the upstream connection. It refuses a request head that has not arrived after 10 seconds. |
 | `response_header_timeout` | `30s` | `--response-header-timeout`, `EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT` | The time an upstream has to send a response head once the proxy writes the request. A slower upstream gets `upstream_failed`. This limit does not bound a body, so a server-sent event stream runs as long as it stays active. |
 | `exchange_timeout` | `10s` | `--exchange-timeout`, `EGRESS_PROXY_EXCHANGE_TIMEOUT` | The upper bound for one token exchange, including discovery. The dial and TLS handshake to the zone each have five seconds inside this budget, and discovery has at most ten seconds whatever the budget, because the SDK caps its own metadata fetch there. A request that spends the budget gets `exchange_failed`. This setting limits a call but does not decide the answer, so `config.digest` excludes it. |
@@ -307,8 +329,12 @@ file and failing stage without including raw parser diagnostics.
 ## Decisions and reason codes
 
 The proxy writes one JSON line to stdout for every decision. `scope` is
-`connection` for the decision made when a CONNECT arrives. It is `request` for
-each request inside the tunnel. `connection_id` joins the two records.
+`connection` for the decision made when a CONNECT arrives, or when the
+transparent frontend recovers a captured connection's destination. It is
+`request` for each request inside the tunnel. `connection_id` joins the two
+records. A captured connection also carries `destination.original_address`,
+the address the client opened the connection to before the redirect rewrote
+it, which is what tells it apart from a CONNECT tunnel.
 `decision.reason` has one of these values:
 
 | Reason | Verdict | Scope | Meaning |
@@ -317,8 +343,9 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. |
 | `cleartext_not_forwarded` | deny | both | The connection or request carries cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
-| `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
-| `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
+| `no_sni` | deny | connection | The TLS handshake named no server: inside a tunnel, or on a captured connection whose ClientHello carried no `server_name`. RFC 6066 section 3 forbids an IP literal there, so a client connecting straight to an address sends none. |
+| `not_redirected` | deny | connection | The destination recovered from a connection on the transparent listener is that listener's own address, so the connection was opened to the proxy rather than redirected into it. |
+| `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection named a destination the address it was opened to contradicts. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |

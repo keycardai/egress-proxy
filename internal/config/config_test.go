@@ -28,6 +28,11 @@ func TestParseAppliesDefaults(t *testing.T) {
 	}{
 		{"listen.connect", cfg.Listen.Connect, "127.0.0.1:3128"},
 		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin.sock"},
+		// Empty runs no transparent frontend, so nothing is captured and no
+		// receipt is read.
+		{"listen.transparent", cfg.Listen.Transparent, ""},
+		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
+		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup.json"},
 		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca"},
 		{"ca.state_dir", cfg.CA.StateDir, ""},
 		{"ca.leaf_ttl", cfg.CA.LeafTTL.Duration(), 24 * time.Hour},
@@ -164,7 +169,8 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			name: "settings that decide nothing",
 			doc:  minimal + identityDoc,
 			overrides: config.Overrides{
-				Connect: "127.0.0.1:9", Admin: "/other/admin.sock", CAOutDir: "/other/ca",
+				Connect: "127.0.0.1:9", Transparent: "0.0.0.0:1015", Admin: "/other/admin.sock",
+				NetsetupReceipt: "/other/netsetup.json", CAOutDir: "/other/ca",
 				CacheSize: 7, MaxConnections: 3, SandboxID: "another-sandbox",
 			},
 			wantSame: true,
@@ -192,6 +198,17 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 				"- host: pypi.org\n    path_prefix: /pypi/\n  - host: pypi.org\n    path_prefix: /simple/", 1) +
 				identityDoc,
 			wantSame: true,
+		},
+		{
+			name:     "the same cleartext ports in either order",
+			doc:      minimal + identityDoc + "listen:\n  cleartext_ports: [80, 8080]\n",
+			against:  minimal + identityDoc + "listen:\n  cleartext_ports: [8080, 80, 80]\n",
+			wantSame: true,
+		},
+		{
+			name:    "another cleartext port, which decides what a captured connection is read as",
+			doc:     minimal + identityDoc + "listen:\n  cleartext_ports: [8080]\n",
+			against: minimal + identityDoc,
 		},
 		{
 			name:    "the same two upstream roots in either order",
@@ -395,6 +412,24 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 			wantErr: "sandbox.id",
 		},
 		{name: "relative admin socket", doc: minimal + "listen:\n  admin: admin.sock\n", wantErr: "listen.admin"},
+		{
+			name: "transparent without a port",
+			doc:  minimal + "listen:\n  transparent: \"0.0.0.0\"\n", wantErr: "listen.transparent",
+		},
+		{
+			name:    "transparent naming a port outside 1-65535",
+			doc:     minimal + "listen:\n  transparent: \"0.0.0.0:0\"\n",
+			wantErr: "does not name a port in 1-65535",
+		},
+		{
+			name: "a cleartext port outside 1-65535",
+			doc:  minimal + "listen:\n  cleartext_ports: [0]\n", wantErr: "listen.cleartext_ports[0] is 0",
+		},
+		{
+			name:    "a transparent frontend with a relative receipt path",
+			doc:     minimal + "listen:\n  transparent: \"0.0.0.0:1015\"\nnetsetup:\n  receipt: netsetup.json\n",
+			wantErr: "netsetup.receipt",
+		},
 		{name: "connect without a port", doc: minimal + "listen:\n  connect: 127.0.0.1\n", wantErr: "listen.connect"},
 		{
 			name:    "state dir under out dir",
@@ -561,12 +596,88 @@ func TestParseRefusesInvalidEndpoints(t *testing.T) {
 			doc:     endpoint("host: pypi.org\n    resource: https://u@pypi.org/"),
 			wantErr: "no userinfo",
 		},
-		{
-			name:    "repeated endpoint",
-			doc:     endpoint("host: pypi.org\n  - host: PYPI.ORG."),
-			wantErr: `host "pypi.org" with path_prefix "/" repeats endpoints[0]`,
-		},
 	})
+}
+
+// TestParseEndpointIdentity pins what makes two entries one endpoint. The
+// key is the host, the port and the path prefix together, which is the key
+// policy.Compile uses. A host reachable on two ports is two endpoints.
+func TestParseEndpointIdentity(t *testing.T) {
+	t.Parallel()
+	doc := func(entries string) string {
+		return "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n" + entries
+	}
+	type key struct {
+		host   string
+		port   int
+		prefix string
+	}
+	tests := []struct {
+		name    string
+		doc     string
+		wantErr string
+		want    []key
+	}{
+		{
+			name:    "same host and prefix on the default port",
+			doc:     doc("  - host: pypi.org\n  - host: PYPI.ORG.\n"),
+			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/" repeats endpoints[0]`,
+		},
+		{
+			name: "same host, port and prefix written out",
+			doc: doc("  - host: pypi.org\n    port: 8443\n    path_prefix: /simple/\n" +
+				"  - host: pypi.org\n    port: 8443\n    path_prefix: /simple/\n"),
+			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/simple/" repeats endpoints[0]`,
+		},
+		{
+			// The default fills the port the first entry leaves out, so
+			// the two name the same endpoint.
+			name: "one entry naming the default port and one leaving it out",
+			doc: doc("  - host: pypi.org\n    path_prefix: /simple/\n" +
+				"  - host: pypi.org\n    port: 443\n    path_prefix: /simple/\n"),
+			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/simple/" repeats endpoints[0]`,
+		},
+		{
+			name: "same host and prefix on two ports",
+			doc: doc("  - host: upstream.test\n    path_prefix: /allowed/\n" +
+				"  - host: upstream.test\n    port: 80\n    path_prefix: /allowed/\n"),
+			want: []key{
+				{host: "upstream.test", port: 443, prefix: "/allowed/"},
+				{host: "upstream.test", port: 80, prefix: "/allowed/"},
+			},
+		},
+		{
+			name: "same host and port on two prefixes",
+			doc: doc("  - host: upstream.test\n    path_prefix: /allowed/\n" +
+				"  - host: upstream.test\n    path_prefix: /other/\n"),
+			want: []key{
+				{host: "upstream.test", port: 443, prefix: "/allowed/"},
+				{host: "upstream.test", port: 443, prefix: "/other/"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr, "Parse:\n%s", tc.doc)
+				return
+			}
+			require.NoError(t, err, "Parse:\n%s", tc.doc)
+			got := make([]key, 0, len(cfg.Endpoints))
+			for _, endpoint := range cfg.Endpoints {
+				got = append(got, key{endpoint.Host, endpoint.Port, endpoint.PathPrefix})
+			}
+			assert.Equal(t, tc.want, got, "endpoints")
+			// The matcher applies the same rule, so a document the parser
+			// accepts must compile.
+			deny, denyErr := policy.NewDenyList(nil, nil)
+			require.NoError(t, denyErr, "policy.NewDenyList")
+			_, compileErr := policy.Compile(cfg.PolicyEndpoints(), deny)
+			assert.NoError(t, compileErr, "policy.Compile")
+		})
+	}
 }
 
 // TestParseRefusesInvalidCredentials covers the credential source and the
