@@ -65,17 +65,17 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// run executes a command in the repository root and returns its combined
-// output, failing the test on a non-zero exit.
-func run(t *testing.T, timeout time.Duration, env []string, name string, args ...string) string {
+// docker runs one docker command in the repository root and returns its
+// combined output, failing the test on a non-zero exit. runStdout is the
+// one that takes an environment and runs a build tool.
+func docker(t *testing.T, timeout time.Duration, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = repoRoot(t)
-	cmd.Env = append(os.Environ(), env...)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "%s %s:\n%s", name, strings.Join(args, " "), out)
+	require.NoError(t, err, "docker %s:\n%s", strings.Join(args, " "), out)
 	return string(out)
 }
 
@@ -158,11 +158,11 @@ func TestNetsetupImage(t *testing.T) {
 	t.Parallel()
 	image := "egress-netsetup:" + tag
 	removeImage(t, image)
-	run(t, buildTimeout, nil, "docker", "build", "-f", "images/netsetup/Dockerfile", "-t", image, ".")
+	docker(t, buildTimeout, "build", "-f", "images/netsetup/Dockerfile", "-t", image, ".")
 
 	// --dry-run prints the ruleset and applies nothing, so this needs no
 	// capability and no network namespace of its own.
-	out := run(t, runTimeout, nil, "docker", "run", "--rm", image,
+	out := docker(t, runTimeout, "run", "--rm", image,
 		"--dry-run", "--dns-servers=10.96.0.10", "--ipv6=off")
 	assert.Contains(t, out, ":EGRESS_PROXY_NAT_OUTPUT - [0:0]", "the dry run prints the nat chain")
 	assert.Contains(t, out, "--uid-owner 1337", "the ruleset excludes the proxy uid")
@@ -171,7 +171,7 @@ func TestNetsetupImage(t *testing.T) {
 	// The image resolves the binary through PATH, the way egress-netsetup
 	// does, and it has to be the legacy backend: the sandbox runtimes this
 	// proxy targets never apply an nf_tables ruleset.
-	version := run(t, runTimeout, nil, "docker", "run", "--rm", "--entrypoint", "/bin/sh",
+	version := docker(t, runTimeout, "run", "--rm", "--entrypoint", "/bin/sh",
 		image, "-c", "iptables-legacy --version && ip6tables-legacy --version")
 	assert.Contains(t, version, "(legacy)", "the image resolves the legacy backend, not nf_tables")
 	assert.NotContains(t, version, "nf_tables", "no binary the lane resolves uses the nf_tables backend")
@@ -179,12 +179,14 @@ func TestNetsetupImage(t *testing.T) {
 
 // TestSandboxBaseImage builds the base image and drives its entrypoint
 // against a fake /shared-ca, which is what the sidecar mounts in a pod. The
-// two cases share one image, so they run one after the other.
+// cases share one image, so they run one after the other.
+//
+//nolint:paralleltest,tparallel // the subtests share one image and run in sequence
 func TestSandboxBaseImage(t *testing.T) {
 	t.Parallel()
 	image := "sandbox-base:" + tag
 	removeImage(t, image)
-	run(t, buildTimeout, nil, "docker", "build", "-t", image, "images/sandbox-base")
+	docker(t, buildTimeout, "build", "-t", image, "images/sandbox-base")
 
 	t.Run("the agent starts with the proxy CA in its trust store", func(t *testing.T) {
 		shared, _ := sharedCA(t)
@@ -192,7 +194,7 @@ func TestSandboxBaseImage(t *testing.T) {
 		// and a read-only root, the way the pod runs it. openssl verify
 		// against the rebuilt bundle is what proves the entrypoint installed
 		// the certificate.
-		out := run(t, runTimeout, nil, "docker", "run", "--rm",
+		out := docker(t, runTimeout, "run", "--rm",
 			"--user", "1000:1000", "--cap-drop", "ALL", "--read-only",
 			"--tmpfs", "/tmp", "--tmpfs", "/etc/ssl/certs:uid=1000,gid=1000",
 			"--tmpfs", "/usr/local/share/ca-certificates:uid=1000,gid=1000",
@@ -260,7 +262,7 @@ func TestSandboxBaseImage(t *testing.T) {
 
 func goarch(t *testing.T) string {
 	t.Helper()
-	out := run(t, time.Minute, nil, "docker", "version", "--format", "{{.Server.Arch}}")
+	out := docker(t, time.Minute, "version", "--format", "{{.Server.Arch}}")
 	return strings.TrimSpace(out)
 }
 
@@ -324,7 +326,6 @@ func httpsFixture(t *testing.T) (string, string) {
 
 func writeFile(t *testing.T, path string, data []byte) {
 	t.Helper()
-	//nolint:gosec // a throwaway leaf the lane serves to itself
 	require.NoError(t, os.WriteFile(path, data, 0o644), "write %s", path)
 }
 
