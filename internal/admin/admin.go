@@ -101,9 +101,12 @@ func New(ctx context.Context, path string, info func() any, logger *slog.Logger)
 
 // Run answers requests until ctx is cancelled, then shuts down and unlinks
 // the socket. It returns a serve failure, or nil after a shutdown the
-// context asked for.
+// context asked for. A request carries the run context's values and not its
+// cancellation, so cancelling ctx starts the drain rather than ending the
+// requests in flight.
 func (s *Server) Run(ctx context.Context) error {
-	s.server.BaseContext = func(net.Listener) context.Context { return ctx }
+	requestCtx := context.WithoutCancel(ctx)
+	s.server.BaseContext = func(net.Listener) context.Context { return requestCtx }
 	served := make(chan error, 1)
 	go func() { served <- s.server.Serve(s.listener) }()
 	var failure error

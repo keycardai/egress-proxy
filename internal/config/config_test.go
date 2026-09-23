@@ -256,16 +256,33 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 	}
 }
 
-func TestParseRefusals(t *testing.T) {
-	t.Parallel()
-	endpoint := func(fields string) string {
-		return "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - " + fields + "\n"
+// parseRefusal is one document Parse must refuse and the text that names the
+// reason. The cases are grouped by what they refuse, so a failure names the
+// part of the schema that changed.
+type parseRefusal struct {
+	name    string
+	doc     string
+	wantErr string
+}
+
+// runParseRefusals asserts Parse refuses every document and says why.
+func runParseRefusals(t *testing.T, tests []parseRefusal) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := config.Parse([]byte(tc.doc), config.Overrides{})
+			require.ErrorContains(t, err, tc.wantErr, "Parse:\n%s", tc.doc)
+		})
 	}
-	tests := []struct {
-		name    string
-		doc     string
-		wantErr string
-	}{
+}
+
+// TestParseRefusesMalformedDocuments covers the refusals the parser makes
+// before any setting is read: a key that names no setting, a key given
+// twice, two keys that name one setting, and a second document.
+func TestParseRefusesMalformedDocuments(t *testing.T) {
+	t.Parallel()
+	runParseRefusals(t, []parseRefusal{
 		{name: "unknown key", doc: minimal + "bogus: 1\n", wantErr: `unknown field "bogus"`},
 		{name: "unknown nested key", doc: minimal + "listen:\n  port: 1\n", wantErr: `unknown field "port"`},
 		{name: "repeated key", doc: minimal + "sandbox:\n  id: sbx-2\n", wantErr: `key "sandbox" already set`},
@@ -284,6 +301,51 @@ func TestParseRefusals(t *testing.T) {
 			doc:     "--- actually broken\n" + minimal,
 			wantErr: "invalid configuration",
 		},
+		{
+			name:    "a second YAML document",
+			doc:     minimal + "---\npolicy:\n  cluster_cidrs: [8.8.8.0/24]\n",
+			wantErr: "invalid configuration",
+		},
+		{
+			name:    "a trailing document separator",
+			doc:     minimal + "---\n",
+			wantErr: "the input holds more than one YAML document",
+		},
+	})
+}
+
+// TestParseAcceptsSeparatorLikeText pins the inputs that stay one document.
+// A document end marker closes the only document, and "---" inside a scalar
+// is text. The refusal of a second document must not widen to either.
+func TestParseAcceptsSeparatorLikeText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{name: "a trailing document end marker", doc: minimal + "...\n"},
+		{
+			name: "a separator inside a scalar",
+			doc: "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: pypi.org\n" +
+				"    credential:\n      env: TOKEN\n      placement:\n        kind: header\n" +
+				"        name: Authorization\n        template: \"--- {credential}\"\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := config.Parse([]byte(tc.doc), config.Overrides{})
+			require.NoError(t, err, "Parse:\n%s", tc.doc)
+		})
+	}
+}
+
+// TestParseRefusesInvalidSettings covers the process and per-instance
+// settings, including the directory rules that keep the CA key off the
+// shared mount.
+func TestParseRefusesInvalidSettings(t *testing.T) {
+	t.Parallel()
+	runParseRefusals(t, []parseRefusal{
 		{name: "wrong version", doc: strings.Replace(minimal, "version: 1", "version: 2", 1), wantErr: "version is 2"},
 		{name: "no sandbox id", doc: strings.Replace(minimal, "id: sbx-1", `id: ""`, 1), wantErr: "sandbox.id"},
 		{
@@ -345,6 +407,33 @@ func TestParseRefusals(t *testing.T) {
 			doc:     minimal + "policy:\n  deny_list_exceptions: [x]\n",
 			wantErr: "policy.deny_list_exceptions[0]",
 		},
+		{
+			name:    "a relative upstream CA file",
+			doc:     minimal + "tls:\n  upstream_ca_files: [\"upstream/ca.crt\"]\n",
+			wantErr: `tls.upstream_ca_files[0] "upstream/ca.crt" must be an absolute path`,
+		},
+		{
+			name:    "an upstream CA file that is only a dot segment",
+			doc:     minimal + "tls:\n  upstream_ca_files: [\"./ca.crt\"]\n",
+			wantErr: "must be an absolute path",
+		},
+		{
+			name:    "an empty upstream CA file",
+			doc:     minimal + "tls:\n  upstream_ca_files: [\"\"]\n",
+			wantErr: "tls.upstream_ca_files[0] is empty",
+		},
+	})
+}
+
+// TestParseRefusesInvalidEndpoints covers the host forms, ports and path
+// prefixes an endpoint can carry. A host must be a DNS name, so every
+// spelling of an address is refused here.
+func TestParseRefusesInvalidEndpoints(t *testing.T) {
+	t.Parallel()
+	endpoint := func(fields string) string {
+		return "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - " + fields + "\n"
+	}
+	runParseRefusals(t, []parseRefusal{
 		{name: "endpoint without host", doc: endpoint("path_prefix: /"), wantErr: "host is empty"},
 		{name: "endpoint host with port", doc: endpoint("host: pypi.org:443"), wantErr: "must be a DNS name"},
 		{name: "endpoint host with scheme", doc: endpoint("host: https://pypi.org"), wantErr: "must be a DNS name"},
@@ -436,6 +525,17 @@ func TestParseRefusals(t *testing.T) {
 			doc:     endpoint("host: pypi.org\n  - host: PYPI.ORG."),
 			wantErr: `host "pypi.org" with path_prefix "/" repeats endpoints[0]`,
 		},
+	})
+}
+
+// TestParseRefusesInvalidCredentials covers the credential source and the
+// placement that carries it.
+func TestParseRefusesInvalidCredentials(t *testing.T) {
+	t.Parallel()
+	endpoint := func(fields string) string {
+		return "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - " + fields + "\n"
+	}
+	runParseRefusals(t, []parseRefusal{
 		{
 			name: "credential without env",
 			doc: endpoint(
@@ -478,21 +578,13 @@ func TestParseRefusals(t *testing.T) {
 			doc:     endpoint("host: a.example\n    credential:\n      env: T\n      placement: {kind: cookie, name: x}"),
 			wantErr: `placement.kind "cookie"`,
 		},
-		{
-			name:    "a relative upstream CA file",
-			doc:     minimal + "tls:\n  upstream_ca_files: [\"upstream/ca.crt\"]\n",
-			wantErr: `tls.upstream_ca_files[0] "upstream/ca.crt" must be an absolute path`,
-		},
-		{
-			name:    "an upstream CA file that is only a dot segment",
-			doc:     minimal + "tls:\n  upstream_ca_files: [\"./ca.crt\"]\n",
-			wantErr: "must be an absolute path",
-		},
-		{
-			name:    "an empty upstream CA file",
-			doc:     minimal + "tls:\n  upstream_ca_files: [\"\"]\n",
-			wantErr: "tls.upstream_ca_files[0] is empty",
-		},
+	})
+}
+
+// TestParseRefusesInvalidIdentity covers the exchange settings.
+func TestParseRefusesInvalidIdentity(t *testing.T) {
+	t.Parallel()
+	runParseRefusals(t, []parseRefusal{
 		{
 			name: "identity with an http zone",
 			doc: minimal + "identity:\n  zone_url: http://z\n  client_id: c\n  workload_token_file: /t\n" +
@@ -510,14 +602,7 @@ func TestParseRefusals(t *testing.T) {
 			doc:     minimal + "identity:\n  zone_url: https://z\n  client_id: c\n  workload_token_file: /t\n",
 			wantErr: "identity.impersonate.user is empty",
 		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := config.Parse([]byte(tc.doc), config.Overrides{})
-			require.ErrorContains(t, err, tc.wantErr, "Parse:\n%s", tc.doc)
-		})
-	}
+	})
 }
 
 func TestParseReportsEveryProblem(t *testing.T) {

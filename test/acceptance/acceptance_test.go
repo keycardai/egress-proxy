@@ -15,6 +15,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -84,8 +85,13 @@ func TestAcceptance(t *testing.T) {
 //	upstream DIR
 //
 // It writes its CA certificate to DIR/ca.crt, appends one line per request
-// to DIR/requests.log, answers "hello from upstream <path>", and exports its
-// port as $UPSTREAM_PORT. It stops when the script ends.
+// to DIR/requests.log, and exports its port as $UPSTREAM_PORT. It stops when
+// the script ends.
+//
+// A path under /truncated answers a body shorter than the Content-Length it
+// declares. A path under /stream answers an event stream that keeps sending
+// for longer than a short idle timeout. Every other path answers "hello from
+// upstream <path>".
 func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 1 {
 		ts.Fatalf("usage: upstream DIR")
@@ -100,11 +106,7 @@ func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	requests, err := os.OpenFile(filepath.Join(dir, "requests.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	ts.Check(err)
 
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(requests, "request %s %s host=%s\n", r.Method, r.URL.Path, r.Host)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "hello from upstream %s\n", r.URL.Path) //nolint:gosec // G705: a fixture echoing as text/plain
-	}))
+	server := httptest.NewUnstartedServer(upstreamHandler(requests))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
 	server.StartTLS()
 	ts.Defer(func() {
@@ -114,6 +116,54 @@ func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
 	ts.Check(err)
 	ts.Setenv("UPSTREAM_PORT", port)
+}
+
+// streamEvents and streamInterval shape the event stream: the stream runs
+// for longer than the idle timeout a scenario sets, and no gap in it comes
+// close to that timeout.
+const (
+	streamEvents   = 20
+	streamInterval = 100 * time.Millisecond
+	// truncatedLength is the Content-Length the truncated path declares over
+	// the body it writes.
+	truncatedLength = "100"
+)
+
+// upstreamHandler answers the paths cmdUpstream documents and logs every
+// request to requests.
+func upstreamHandler(requests io.Writer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(requests, "request %s %s host=%s\n", r.Method, r.URL.Path, r.Host)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/truncated"):
+			w.Header().Set("Content-Length", truncatedLength)
+			fmt.Fprint(w, "short")
+		case strings.HasPrefix(r.URL.Path, "/stream"):
+			w.Header().Set("Content-Type", "text/event-stream")
+			writeStream(w, r)
+		default:
+			//nolint:gosec // G705: a fixture echoing as text/plain
+			fmt.Fprintf(w, "hello from upstream %s\n", r.URL.Path)
+		}
+	}
+}
+
+// writeStream sends streamEvents events, one every streamInterval, and stops
+// early when the request ends.
+func writeStream(w http.ResponseWriter, r *http.Request) {
+	controller := http.NewResponseController(w)
+	for range streamEvents {
+		fmt.Fprint(w, "data: active\n\n")
+		if err := controller.Flush(); err != nil {
+			return
+		}
+		select {
+		case <-time.After(streamInterval):
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 // cmdFreePort exports a free TCP port on loopback:

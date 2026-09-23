@@ -32,7 +32,8 @@ func (l *idleListener) Accept() (net.Conn, error) {
 }
 
 // idleConn bounds every blocked Read and Write by the idle timeout, without
-// extending a deadline a caller set explicitly.
+// extending a deadline a caller set explicitly. A write pushes out a blocked
+// read's deadline as well, so a connection that only writes is not idle.
 type idleConn struct {
 	net.Conn
 
@@ -76,28 +77,34 @@ func (c *idleConn) SetWriteDeadline(t time.Time) error {
 }
 
 // arm sets the deadline for the next blocked call to the sooner of the idle
-// bound and the caller's deadline. Setting a deadline fails only on a closed
-// connection. arm returns that error, so the call fails the way the read or
-// write itself fails.
+// bound and the caller's deadline. A write also rearms the read deadline,
+// because a transferring connection is not idle. Setting a deadline fails
+// only on a closed connection. arm returns that error, so the call fails the
+// way the read or write itself fails.
 //
 // arm holds the mutex from reading the caller's deadline to setting the
 // underlying one. net/http aborts a pending read by setting a past deadline
 // from another goroutine, and the lock keeps that abort in force.
 func (c *idleConn) arm(read bool) error {
-	bound := time.Now().Add(c.timeout)
+	idle := time.Now().Add(c.timeout)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	explicit := c.writeDeadline
 	if read {
-		explicit = c.readDeadline
+		return c.Conn.SetReadDeadline(sooner(idle, c.readDeadline)) //nolint:wrapcheck // net.Conn errors are read by type
 	}
-	if !explicit.IsZero() && explicit.Before(bound) {
-		bound = explicit
+	return errors.Join(
+		c.Conn.SetWriteDeadline(sooner(idle, c.writeDeadline)),
+		c.Conn.SetReadDeadline(sooner(idle, c.readDeadline)),
+	)
+}
+
+// sooner is the earlier of the idle bound and a caller's explicit deadline.
+// A zero explicit deadline means the caller set none.
+func sooner(idle, explicit time.Time) time.Time {
+	if !explicit.IsZero() && explicit.Before(idle) {
+		return explicit
 	}
-	if read {
-		return c.Conn.SetReadDeadline(bound) //nolint:wrapcheck // net.Conn errors are read by type
-	}
-	return c.Conn.SetWriteDeadline(bound) //nolint:wrapcheck // net.Conn errors are read by type
+	return idle
 }
 
 // intake is the listener the tunnel server accepts from. The frontend pushes
