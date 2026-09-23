@@ -53,3 +53,6 @@ endpoints:
       env: OPENROUTER_API_KEY
   - host: "pypi.org"                                # allowed, no credential
   - host: "files.pythonhosted.org"
+  - host: "registry.internal"                       # a second port is a second endpoint
+    port: 5000
+    path_prefix: "/v2/"

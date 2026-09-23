@@ -3,19 +3,28 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 var errEndpoint = errors.New("invalid endpoint")
+
+// maxPort is the highest TCP port an endpoint can name.
+const maxPort = 65535
 
 // Endpoint is one entry of the document's endpoint list, reduced to what the
 // matcher needs.
 type Endpoint struct {
 	// Host is a DNS name, lowercase, without a port.
 	Host string
+	// Port is the one port this endpoint covers on that host. An endpoint
+	// names a service, not a machine, so a host reachable on two ports is
+	// two endpoints.
+	Port int
 	// PathPrefix is an absolute path. "/" covers every path on the host. A
 	// prefix that ends in "/" covers everything under it. Any other prefix
 	// covers itself and every path under it as a segment, so "/api" covers
@@ -28,9 +37,10 @@ type Endpoint struct {
 	HasCredential bool
 }
 
-// ID names the endpoint on an audit record: the host and the prefix.
+// ID names the endpoint on an audit record: the authority and the prefix.
+// The port is always written, so one shape parses every id.
 func (e Endpoint) ID() string {
-	return e.Host + e.PathPrefix
+	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port)) + e.PathPrefix
 }
 
 // covers reports whether the endpoint's prefix covers a normalized path.
@@ -45,8 +55,8 @@ func (e Endpoint) covers(requestPath string) bool {
 type Decision struct {
 	Verdict Verdict
 	Reason  Reason
-	// Endpoint is the endpoint that matched. Request sets it on an allow;
-	// Host leaves it nil, because a host-scoped decision matches no path.
+	// Endpoint is the endpoint that matched. Request sets it on an allow.
+	// Connection leaves it nil, because that decision matches no path.
 	Endpoint *Endpoint
 }
 
@@ -101,10 +111,16 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 			))
 			continue
 		}
+		if endpoint.Port < 1 || endpoint.Port > maxPort {
+			problems = append(problems, fmt.Sprintf(
+				"endpoints[%d]: port %d is outside 1 to %d", i, endpoint.Port, maxPort,
+			))
+			continue
+		}
 		if previous, ok := seen[endpoint.ID()]; ok {
 			problems = append(problems, fmt.Sprintf(
-				"endpoints[%d]: host %q with path_prefix %q repeats endpoints[%d]",
-				i, endpoint.Host, endpoint.PathPrefix, previous,
+				"endpoints[%d]: host %q on port %d with path_prefix %q repeats endpoints[%d]",
+				i, endpoint.Host, endpoint.Port, endpoint.PathPrefix, previous,
 			))
 			continue
 		}
@@ -124,13 +140,19 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 	return &Matcher{byHost: byHost, deny: deny}, nil
 }
 
-// Host makes the connection-scoped decision: whether the sandbox can reach this
-// host at all. The deny list answers first, then the endpoint list.
+// Connection makes the connection-scoped decision: whether the sandbox can
+// reach this host on this port at all. The deny list answers first, then the
+// endpoint list.
 //
 // An allow here names no endpoint. The question has no path in it, so no
 // endpoint has matched, and naming one would put a path prefix on a record
 // that no path took part in. Request names the endpoint that matched.
-func (m *Matcher) Host(host string) Decision {
+//
+// A port no endpoint covers reads as no_matching_endpoint, the same code a
+// host no endpoint names reads as. The endpoint is the unit a document
+// declares, and a destination it does not declare is absent whichever part
+// of the destination differs.
+func (m *Matcher) Connection(host string, port int) Decision {
 	host = NormalizeHost(host)
 	if host == "" {
 		return deny(ReasonNoSNI)
@@ -138,10 +160,12 @@ func (m *Matcher) Host(host string) Decision {
 	if m.deny.DeniesHost(host) {
 		return deny(ReasonDenyAlways)
 	}
-	if len(m.byHost[host]) == 0 {
-		return deny(ReasonNoMatchingEndpoint)
+	for _, endpoint := range m.byHost[host] {
+		if endpoint.Port == port {
+			return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed}
+		}
 	}
-	return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed}
+	return deny(ReasonNoMatchingEndpoint)
 }
 
 // Request makes the request-scoped decision for a path on a host.
@@ -149,8 +173,8 @@ func (m *Matcher) Host(host string) Decision {
 // The path must be absolute and already in its shortest form. A path that
 // carries dot segments matches one endpoint here and reaches another
 // upstream, so Request refuses it.
-func (m *Matcher) Request(host, requestPath string) Decision {
-	connection := m.Host(host)
+func (m *Matcher) Request(host string, port int, requestPath string) Decision {
+	connection := m.Connection(host, port)
 	if !connection.Allowed() {
 		return connection
 	}
@@ -158,7 +182,7 @@ func (m *Matcher) Request(host, requestPath string) Decision {
 		return deny(ReasonMalformedRequest)
 	}
 	for _, endpoint := range m.byHost[NormalizeHost(host)] {
-		if endpoint.covers(requestPath) {
+		if endpoint.Port == port && endpoint.covers(requestPath) {
 			return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed, Endpoint: &endpoint}
 		}
 	}

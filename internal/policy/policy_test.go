@@ -1,6 +1,7 @@
 package policy_test
 
 import (
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -83,25 +84,25 @@ func TestCompileRefusals(t *testing.T) {
 	}{
 		{
 			name:      "a host on the deny list",
-			endpoints: []policy.Endpoint{{Host: "metadata.google.internal", PathPrefix: "/"}},
+			endpoints: []policy.Endpoint{{Host: "metadata.google.internal", Port: 443, PathPrefix: "/"}},
 			wantErr:   "is on the platform deny list",
 		},
 		{
 			name:      "an IP literal",
-			endpoints: []policy.Endpoint{{Host: "93.184.216.34", PathPrefix: "/"}},
+			endpoints: []policy.Endpoint{{Host: "93.184.216.34", Port: 443, PathPrefix: "/"}},
 			wantErr:   "is an IP literal",
 		},
 		{
 			name: "a repeated host and prefix",
 			endpoints: []policy.Endpoint{
-				{Host: "api.github.com", PathPrefix: "/"},
-				{Host: "API.GITHUB.COM.", PathPrefix: "/"},
+				{Host: "api.github.com", Port: 443, PathPrefix: "/"},
+				{Host: "API.GITHUB.COM.", Port: 443, PathPrefix: "/"},
 			},
 			wantErr: "repeats endpoints[0]",
 		},
 		{
 			name:      "a host the deny list covers by suffix",
-			endpoints: []policy.Endpoint{{Host: "abc123.dns.nextdns.io", PathPrefix: "/"}},
+			endpoints: []policy.Endpoint{{Host: "abc123.dns.nextdns.io", Port: 443, PathPrefix: "/"}},
 			wantErr:   "is on the platform deny list",
 		},
 		// An empty prefix covers every path on its host, so Compile refuses
@@ -109,23 +110,41 @@ func TestCompileRefusals(t *testing.T) {
 		// list.
 		{
 			name:      "an empty path prefix",
-			endpoints: []policy.Endpoint{{Host: "api.github.com"}},
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443}},
 			wantErr:   `path_prefix "" must be an absolute path`,
 		},
 		{
 			name:      "a relative path prefix",
-			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "repos"}},
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "repos"}},
 			wantErr:   `path_prefix "repos" must be an absolute path`,
 		},
 		{
 			name:      "a path prefix carrying dot segments",
-			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "/repos/../admin"}},
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos/../admin"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
 		{
 			name:      "a path prefix carrying a query",
-			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "/repos?all=1"}},
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos?all=1"}},
 			wantErr:   "must be an absolute path in its shortest form",
+		},
+		// Compile validates the port itself, so a list assembled outside
+		// the document parser cannot carry the zero value and match a
+		// destination on no port at all.
+		{
+			name:      "no port",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", PathPrefix: "/"}},
+			wantErr:   "port 0 is outside 1 to 65535",
+		},
+		{
+			name:      "a port above the range",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 70000, PathPrefix: "/"}},
+			wantErr:   "port 70000 is outside 1 to 65535",
+		},
+		{
+			name:      "a negative port",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: -1, PathPrefix: "/"}},
+			wantErr:   "port -1 is outside 1 to 65535",
 		},
 	}
 	for _, tc := range tests {
@@ -138,6 +157,26 @@ func TestCompileRefusals(t *testing.T) {
 	}
 }
 
+// TestCompileAcceptsOnePrefixOnTwoPorts pins that the port is part of an
+// endpoint's identity. The same host and prefix on two ports are two
+// endpoints, so neither reads as a repeat of the other.
+func TestCompileAcceptsOnePrefixOnTwoPorts(t *testing.T) {
+	t.Parallel()
+	deny, err := policy.NewDenyList(nil, nil)
+	require.NoError(t, err, "NewDenyList")
+	matcher, err := policy.Compile([]policy.Endpoint{
+		{Host: "registry.internal", Port: 443, PathPrefix: "/v2/"},
+		{Host: "registry.internal", Port: 5000, PathPrefix: "/v2/"},
+	}, deny)
+	require.NoError(t, err, "Compile")
+	for _, port := range []int{443, 5000} {
+		decision := matcher.Request("registry.internal", port, "/v2/manifest")
+		require.True(t, decision.Allowed(), "port %d", port)
+		require.NotNil(t, decision.Endpoint, "port %d names its endpoint", port)
+		assert.Equal(t, fmt.Sprintf("registry.internal:%d/v2/", port), decision.Endpoint.ID(), "endpoint id")
+	}
+}
+
 // TestCompileReportsEveryProblem pins what the doc comment promises: one run
 // names everything wrong with the list, so an operator does not fix a
 // document one error per restart.
@@ -146,9 +185,9 @@ func TestCompileReportsEveryProblem(t *testing.T) {
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
 	_, err = policy.Compile([]policy.Endpoint{
-		{Host: "metadata.google.internal", PathPrefix: "/"},
-		{Host: "93.184.216.34", PathPrefix: "/"},
-		{Host: "api.github.com", PathPrefix: "repos"},
+		{Host: "metadata.google.internal", Port: 443, PathPrefix: "/"},
+		{Host: "93.184.216.34", Port: 443, PathPrefix: "/"},
+		{Host: "api.github.com", Port: 443, PathPrefix: "repos"},
 	}, deny)
 	require.Error(t, err, "Compile")
 	for _, want := range []string{
@@ -168,16 +207,21 @@ func TestMatcherDecisions(t *testing.T) {
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
 	matcher, err := policy.Compile([]policy.Endpoint{
-		{Host: "api.github.com", PathPrefix: "/", HasCredential: true},
-		{Host: "openrouter.ai", PathPrefix: "/api/v1/"},
-		{Host: "openrouter.ai", PathPrefix: "/api/v1/models"},
-		{Host: "pypi.org", PathPrefix: "/simple"},
+		{Host: "api.github.com", Port: 443, PathPrefix: "/", HasCredential: true},
+		{Host: "openrouter.ai", Port: 443, PathPrefix: "/api/v1/"},
+		{Host: "openrouter.ai", Port: 443, PathPrefix: "/api/v1/models"},
+		{Host: "pypi.org", Port: 443, PathPrefix: "/simple"},
+		{Host: "registry.internal", Port: 443, PathPrefix: "/"},
+		{Host: "registry.internal", Port: 5000, PathPrefix: "/v2/"},
 	}, deny)
 	require.NoError(t, err, "Compile")
 
 	tests := []struct {
-		name         string
-		host         string
+		name string
+		host string
+		// port is the port the destination names. Zero means 443, the port
+		// an endpoint covers when it names none.
+		port         int
 		path         string
 		wantVerdict  policy.Verdict
 		wantReason   policy.Reason
@@ -209,11 +253,11 @@ func TestMatcherDecisions(t *testing.T) {
 		},
 		{
 			name: "request under a slash prefix", host: "openrouter.ai", path: "/api/v1/chat/completions",
-			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "openrouter.ai/api/v1/",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "openrouter.ai:443/api/v1/",
 		},
 		{
 			name: "request matching the longer prefix", host: "openrouter.ai", path: "/api/v1/models",
-			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "openrouter.ai/api/v1/models",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "openrouter.ai:443/api/v1/models",
 		},
 		{
 			name: "request outside every prefix", host: "openrouter.ai", path: "/api/v2/",
@@ -225,11 +269,11 @@ func TestMatcherDecisions(t *testing.T) {
 		},
 		{
 			name: "a prefix without a slash covers itself", host: "pypi.org", path: "/simple",
-			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "pypi.org/simple",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "pypi.org:443/simple",
 		},
 		{
 			name: "a prefix without a slash covers a segment under it", host: "pypi.org", path: "/simple/requests/",
-			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "pypi.org/simple",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "pypi.org:443/simple",
 		},
 		{
 			name: "a prefix without a slash does not cover a longer segment", host: "pypi.org", path: "/simpler",
@@ -237,7 +281,7 @@ func TestMatcherDecisions(t *testing.T) {
 		},
 		{
 			name: "host is case-insensitive with the root label", host: "PyPI.org.", path: "/simple",
-			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "pypi.org/simple",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "pypi.org:443/simple",
 		},
 		{
 			name: "dot segments are refused", host: "openrouter.ai", path: "/api/v1/../v2/",
@@ -264,6 +308,31 @@ func TestMatcherDecisions(t *testing.T) {
 			wantVerdict: "deny", wantReason: "no_matching_endpoint",
 		},
 		{
+			name: "connection to a listed host on a port no endpoint names",
+			host: "api.github.com", port: 8443,
+			wantVerdict: "deny", wantReason: "no_matching_endpoint",
+		},
+		{
+			name: "connection to a listed host on its second port",
+			host: "registry.internal", port: 5000,
+			wantVerdict: "allow", wantReason: "endpoint_allowed",
+		},
+		{
+			name: "a port decides alongside the path", host: "registry.internal", port: 5000, path: "/v2/manifest",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "registry.internal:5000/v2/",
+		},
+		{
+			// The prefix that covers this path belongs to the endpoint on
+			// port 5000, so the same path on 443 falls to the "/" endpoint.
+			name: "one host's ports carry their own prefixes",
+			host: "registry.internal", path: "/v2/manifest",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "registry.internal:443/",
+		},
+		{
+			name: "a request on a port no endpoint names", host: "registry.internal", port: 9000, path: "/v2/",
+			wantVerdict: "deny", wantReason: "no_matching_endpoint",
+		},
+		{
 			name: "request to a denied name", host: "metadata.google.internal", path: "/",
 			wantVerdict: "deny", wantReason: "deny_always",
 		},
@@ -271,11 +340,15 @@ func TestMatcherDecisions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			port := tc.port
+			if port == 0 {
+				port = 443
+			}
 			var got policy.Decision
 			if tc.path == "" {
-				got = matcher.Host(tc.host)
+				got = matcher.Connection(tc.host, port)
 			} else {
-				got = matcher.Request(tc.host, tc.path)
+				got = matcher.Request(tc.host, port, tc.path)
 			}
 			assert.Equal(t, tc.wantVerdict, got.Verdict, "verdict")
 			assert.Equal(t, tc.wantReason, got.Reason, "reason")
@@ -293,9 +366,9 @@ func TestMatcherHosts(t *testing.T) {
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
 	matcher, err := policy.Compile([]policy.Endpoint{
-		{Host: "pypi.org", PathPrefix: "/"},
-		{Host: "api.github.com", PathPrefix: "/"},
-		{Host: "api.github.com", PathPrefix: "/repos/"},
+		{Host: "pypi.org", Port: 443, PathPrefix: "/"},
+		{Host: "api.github.com", Port: 443, PathPrefix: "/"},
+		{Host: "api.github.com", Port: 443, PathPrefix: "/repos/"},
 	}, deny)
 	require.NoError(t, err, "Compile")
 	assert.Equal(t, []string{"api.github.com", "pypi.org"}, matcher.Hosts(), "Hosts, sorted and deduplicated")

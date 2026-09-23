@@ -46,7 +46,7 @@ func TestGetCertificateRecordsAMintFailure(t *testing.T) {
 	t.Parallel()
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
-	matcher, err := policy.Compile([]policy.Endpoint{{Host: unmintableHost, PathPrefix: "/"}}, deny)
+	matcher, err := policy.Compile([]policy.Endpoint{{Host: unmintableHost, Port: 443, PathPrefix: "/"}}, deny)
 	require.NoError(t, err, "Compile")
 	authority, err := ca.New(ca.Options{})
 	require.NoError(t, err, "ca.New")

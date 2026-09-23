@@ -37,6 +37,9 @@ const (
 	DefaultCacheSize      = 1024
 	DefaultMaxConnections = 1024
 	DefaultIdleTimeout    = 5 * time.Minute
+	// DefaultEndpointPort is the port an endpoint covers when it names none.
+	// Endpoints name HTTPS destinations.
+	DefaultEndpointPort = 443
 	// DefaultResponseHeaderTimeout bounds the wait for an upstream response
 	// head. It does not bound a body, so a streamed response is unaffected.
 	DefaultResponseHeaderTimeout = 30 * time.Second
@@ -75,6 +78,9 @@ const (
 	maxDNSNameLength  = 253
 	maxDNSLabelLength = 63
 )
+
+// maxPort is the highest TCP port an endpoint can name.
+const maxPort = 65535
 
 // Document is the configuration document as written.
 type Document struct {
@@ -158,7 +164,10 @@ type Policy struct {
 
 // Endpoint is one destination the sandbox can reach.
 type Endpoint struct {
-	Host       string      `json:"host"`
+	Host string `json:"host"`
+	// Port is the port this endpoint covers on that host. It defaults to
+	// 443. A host reachable on two ports is two endpoints.
+	Port       int         `json:"port"`
 	PathPrefix string      `json:"path_prefix"`
 	Resource   string      `json:"resource"`
 	Credential *Credential `json:"credential,omitempty"`
@@ -357,6 +366,9 @@ func canonicalEndpoints(endpoints []Endpoint) []Endpoint {
 		if out[i].Host != out[j].Host {
 			return out[i].Host < out[j].Host
 		}
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
 		return out[i].PathPrefix < out[j].PathPrefix
 	})
 	return out
@@ -384,6 +396,7 @@ func (c *Config) PolicyEndpoints() []policy.Endpoint {
 	for _, endpoint := range c.Endpoints {
 		out = append(out, policy.Endpoint{
 			Host:          endpoint.Host,
+			Port:          endpoint.Port,
 			PathPrefix:    endpoint.PathPrefix,
 			Resource:      endpoint.Resource,
 			HasCredential: endpoint.Credential != nil,
@@ -458,14 +471,23 @@ func (c *Config) applyDefaults() {
 		c.Limits.ResponseHeaderTimeout = Duration(DefaultResponseHeaderTimeout)
 	}
 	for i := range c.Endpoints {
-		endpoint := &c.Endpoints[i]
-		endpoint.Host = policy.NormalizeHost(endpoint.Host)
-		if endpoint.PathPrefix == "" {
-			endpoint.PathPrefix = "/"
-		}
-		if endpoint.Resource == "" && endpoint.Host != "" {
-			endpoint.Resource = "https://" + endpoint.Host + "/"
-		}
+		applyEndpointDefaults(&c.Endpoints[i])
+	}
+}
+
+// applyEndpointDefaults normalizes the host and fills the settings the entry
+// leaves out. Zero means the document named no port, as it does for the
+// limits and the cache size, so a document cannot ask for port 0.
+func applyEndpointDefaults(endpoint *Endpoint) {
+	endpoint.Host = policy.NormalizeHost(endpoint.Host)
+	if endpoint.Port == 0 {
+		endpoint.Port = DefaultEndpointPort
+	}
+	if endpoint.PathPrefix == "" {
+		endpoint.PathPrefix = "/"
+	}
+	if endpoint.Resource == "" && endpoint.Host != "" {
+		endpoint.Resource = "https://" + endpoint.Host + "/"
 	}
 }
 
@@ -655,6 +677,9 @@ func (e Endpoint) validate(i int, found *problems) {
 	case !validDNSName(e.Host):
 		found.addf("endpoints[%d]: host %q must be a DNS name of ASCII labels, "+
 			"with no scheme, port, path or wildcard", i, e.Host)
+	}
+	if e.Port < 1 || e.Port > maxPort {
+		found.addf("endpoints[%d]: port %d must be between 1 and %d", i, e.Port, maxPort)
 	}
 	if !normalizedPrefix(e.PathPrefix) {
 		found.addf("endpoints[%d]: path_prefix %q must be an absolute path in its shortest form", i, e.PathPrefix)

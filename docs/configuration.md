@@ -168,13 +168,15 @@ connections and requests.
 | Key | Default | Description |
 |---|---|---|
 | `host` | required | A DNS name without a scheme, port, path, or wildcard. Labels hold ASCII letters, digits and hyphens, and the last label is not all digits. The proxy matches the name case-insensitively against the SNI. It rejects an IP literal, because a TLS client sends no SNI for one, and it rejects an address written another way, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. Write an internationalized name as its A-label, the `xn--` punycode form. RFC 6066 section 3 requires the SNI to be ASCII, so a host holding non-ASCII characters never matches what a client sends. |
+| `port` | `443` | The one port this endpoint covers on that host. A host reachable on two ports is two endpoints, which also gives each one its own prefix and credential. A CONNECT to any other port on the host is rejected with `no_matching_endpoint`, the same reason an unlisted host gets, because a destination the document does not declare is absent whichever part of it differs. |
 | `path_prefix` | `/` | An absolute path in its shortest form. `/` covers every path. A prefix that ends in `/` covers everything below it. Any other prefix covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching prefix decides. |
 | `resource` | `https://<host>/` | The resource identifier that the proxy sends to token exchange. Use an absolute `https` URL without user information, a query, or a fragment. Two endpoints can share one resource. |
 | `credential` | unset | Defines where the proxy puts a credential and which placeholder the workload holds. See `endpoints[].credential`. |
 
-Two endpoints with the same `host` and `path_prefix` are rejected. Endpoints
-name HTTPS destinations, so a cleartext `http://` request through the proxy
-matches no endpoint and is rejected with `no_matching_endpoint`.
+Two endpoints with the same `host`, `port` and `path_prefix` are rejected.
+The same host and prefix on two ports are two endpoints, not a repeat.
+Endpoints name HTTPS destinations, so a cleartext `http://` request through
+the proxy matches no endpoint and is rejected with `no_matching_endpoint`.
 
 #### `endpoints[].credential`
 
@@ -199,9 +201,9 @@ each request inside the tunnel. `connection_id` joins the two records.
 
 | Reason | Verdict | Scope | Meaning |
 |---|---|---|---|
-| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host` plus `path_prefix`. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never carries an allow. |
+| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never carries an allow. |
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
-| `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, or one does and none covers the path. Read `scope` to tell those apart. The proxy also uses this reason for every cleartext request. |
+| `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. The proxy also uses this reason for every cleartext request. |
 | `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path with dot segments, or a CONNECT authority with a bad port. |

@@ -211,10 +211,10 @@ func start(t *testing.T, opts harnessOptions) *harness {
 	deny, err := policy.NewDenyList(nil, exceptions)
 	require.NoError(t, err)
 	matcher, err := policy.Compile([]policy.Endpoint{
-		{Host: upstreamHost, PathPrefix: "/ok/"},
-		{Host: upstreamHost, PathPrefix: "/stream/"},
-		{Host: upstreamHost, PathPrefix: "/cred/", HasCredential: true},
-		{Host: upstreamHost, PathPrefix: "/stall/"},
+		{Host: upstreamHost, Port: up.port, PathPrefix: "/ok/"},
+		{Host: upstreamHost, Port: up.port, PathPrefix: "/stream/"},
+		{Host: upstreamHost, Port: up.port, PathPrefix: "/cred/", HasCredential: true},
+		{Host: upstreamHost, Port: up.port, PathPrefix: "/stall/"},
 	}, deny)
 	require.NoError(t, err)
 	authority, err := ca.New(ca.Options{})
@@ -420,7 +420,9 @@ func TestAllowedRequestReachesTheUpstream(t *testing.T) {
 		Destination: audit.Destination{Host: upstreamHost, Port: h.upstream.port, SNI: upstreamHost},
 		Request:     &audit.RequestInfo{Method: http.MethodGet, Path: "/ok/echo", Host: h.upstreamAuthority()},
 		Decision: audit.Decision{
-			Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed, Endpoint: "localhost/ok/",
+			Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed,
+			// The endpoint id names the authority, so it carries the port.
+			Endpoint: fmt.Sprintf("%s:%d/ok/", upstreamHost, h.upstream.port),
 		},
 		Outcome: &audit.Outcome{Status: http.StatusOK},
 	}
@@ -452,6 +454,17 @@ func TestDeniedConnections(t *testing.T) {
 		{
 			name: "a bad port", authority: "denied.invalid:99999",
 			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
+		},
+		{
+			// The endpoint names one port on this host. Another port on
+			// the same host is a destination the document does not
+			// declare, so it reads the same as an unlisted host.
+			name: "a listed host on a port no endpoint names", authority: upstreamHost + ":9",
+			wantStatus: http.StatusForbidden, wantReason: policy.ReasonNoMatchingEndpoint,
+		},
+		{
+			name: "a listed host with no port, which defaults to 443", authority: upstreamHost,
+			wantStatus: http.StatusForbidden, wantReason: policy.ReasonNoMatchingEndpoint,
 		},
 	}
 	for _, tc := range tests {
@@ -805,7 +818,7 @@ func completeOptions(t *testing.T) proxy.Options {
 	t.Helper()
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
-	matcher, err := policy.Compile([]policy.Endpoint{{Host: "api.github.com", PathPrefix: "/"}}, deny)
+	matcher, err := policy.Compile([]policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/"}}, deny)
 	require.NoError(t, err, "Compile")
 	authority, err := ca.New(ca.Options{})
 	require.NoError(t, err, "ca.New")

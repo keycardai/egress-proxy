@@ -77,7 +77,7 @@ func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goprox
 	host, port, ok := splitAuthority(authority)
 	if ok {
 		state.host, state.port = host, port
-		decision = s.opts.Matcher.Host(host)
+		decision = s.opts.Matcher.Connection(host, port)
 	} else {
 		state.host = authority
 		decision = policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}
@@ -287,7 +287,7 @@ func (s *Server) decideRequest(state *tunnel, r *http.Request) policy.Decision {
 	if !ok || hostname != state.sni || port != state.port {
 		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonHostMismatch}
 	}
-	decision := s.opts.Matcher.Request(state.sni, r.URL.Path)
+	decision := s.opts.Matcher.Request(state.sni, state.port, r.URL.Path)
 	if decision.Allowed() && decision.Endpoint != nil && decision.Endpoint.HasCredential {
 		return policy.Decision{
 			Verdict: policy.VerdictDeny, Reason: policy.ReasonCredentialUnavailable, Endpoint: decision.Endpoint,
@@ -326,7 +326,7 @@ func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error
 func (s *Server) handlePlain(r *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	requestID := newID()
 	host, port, _ := splitAuthority(r.URL.Host)
-	decision := s.opts.Matcher.Host(host)
+	decision := s.opts.Matcher.Connection(host, port)
 	reason := decision.Reason
 	if decision.Allowed() {
 		reason = policy.ReasonNoMatchingEndpoint

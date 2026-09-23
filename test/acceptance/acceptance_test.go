@@ -68,6 +68,7 @@ func TestAcceptance(t *testing.T) {
 		},
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"upstream": cmdUpstream,
+			"expand":   cmdExpand,
 			"freeport": cmdFreePort,
 			"shortdir": cmdShortDir,
 			"waitfile": cmdWaitFile,
@@ -128,6 +129,33 @@ func cmdFreePort(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Check(listener.Close())
 	ts.Check(err)
 	ts.Setenv(args[0], port)
+}
+
+// cmdExpand rewrites a file in place, replacing every $NAME with the script
+// variable of that name:
+//
+//	expand FILE
+//
+// testscript expands a variable in a script line and in an archive file's
+// name, never in its data. A document that must name a value the script
+// chose, such as the upstream's port, is written with $NAME and expanded
+// before the proxy reads it.
+func cmdExpand(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 1 {
+		ts.Fatalf("usage: expand FILE")
+	}
+	path := ts.MkAbs(args[0])
+	data, err := os.ReadFile(path)
+	ts.Check(err)
+	expanded := os.Expand(string(data), func(name string) string {
+		value := ts.Getenv(name)
+		if value == "" {
+			ts.Fatalf("expand %s: $%s is not set", args[0], name)
+		}
+		return value
+	})
+	//nolint:gosec // G703: the path is inside the script's work directory
+	ts.Check(os.WriteFile(path, []byte(expanded), 0o600))
 }
 
 // cmdShortDir exports a fresh directory under the system temporary

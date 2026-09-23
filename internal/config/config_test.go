@@ -34,6 +34,9 @@ func TestParseAppliesDefaults(t *testing.T) {
 		{"limits.max_connections", cfg.Limits.MaxConnections, 1024},
 		{"limits.idle_timeout", cfg.Limits.IdleTimeout.Duration(), 5 * time.Minute},
 		{"limits.response_header_timeout", cfg.Limits.ResponseHeaderTimeout.Duration(), 30 * time.Second},
+		// Zero means the setting was not named, as it does for the limits
+		// and the cache size. A document cannot ask for port 0.
+		{"endpoint port", cfg.Endpoints[0].Port, 443},
 		{"endpoint path_prefix", cfg.Endpoints[0].PathPrefix, "/"},
 		{"endpoint resource", cfg.Endpoints[0].Resource, "https://pypi.org/"},
 		{"identity absent", cfg.Identity == nil, true},
@@ -160,6 +163,15 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			doc:      minimal + identityDoc + "tls:\n  upstream_ca_files: [\"/a.pem\"]\n",
 			against:  minimal + identityDoc + "tls:\n  upstream_ca_files: [\"/a.pem\", \"/a.pem\"]\n",
 			wantSame: true,
+		},
+		{
+			name:     "the default port written out explicitly",
+			doc:      strings.Replace(minimal, "- host: pypi.org", "- host: pypi.org\n    port: 443", 1) + identityDoc,
+			wantSame: true,
+		},
+		{
+			name: "another port on the same host",
+			doc:  strings.Replace(minimal, "- host: pypi.org", "- host: pypi.org\n    port: 8443", 1) + identityDoc,
 		},
 		{name: "another endpoint", doc: minimal + "  - host: files.pythonhosted.org\n" + identityDoc},
 		{
@@ -296,6 +308,16 @@ func TestParseRefusals(t *testing.T) {
 		{name: "endpoint host with scheme", doc: endpoint("host: https://pypi.org"), wantErr: "must be a DNS name"},
 		{name: "endpoint wildcard", doc: endpoint("host: \"*.pypi.org\""), wantErr: "must be a DNS name"},
 		{name: "endpoint IP literal", doc: endpoint("host: 93.184.216.34"), wantErr: "is an IP literal"},
+		{
+			name:    "endpoint port above the range",
+			doc:     endpoint("host: a.example\n    port: 70000"),
+			wantErr: "port 70000 must be between",
+		},
+		{
+			name:    "endpoint negative port",
+			doc:     endpoint("host: a.example\n    port: -1"),
+			wantErr: "port -1 must be between",
+		},
 		{name: "endpoint IPv6 literal", doc: endpoint("host: \"::1\""), wantErr: "is an IP literal"},
 		// An address netip does not read as one still resolves as an
 		// address. The deny list never sees these as addresses either, so
@@ -449,7 +471,8 @@ func TestPolicyEndpoints(t *testing.T) {
 	endpoints := cfg.PolicyEndpoints()
 	require.Len(t, endpoints, 2)
 	assert.Equal(t, policy.Endpoint{
-		Host: "a.example", PathPrefix: "/api", Resource: "https://a.example/", HasCredential: true,
+		Host: "a.example", Port: config.DefaultEndpointPort, PathPrefix: "/api",
+		Resource: "https://a.example/", HasCredential: true,
 	}, endpoints[1], "the second endpoint, normalized and defaulted")
 	assert.False(t, endpoints[0].HasCredential, "pypi.org names no credential")
 }
