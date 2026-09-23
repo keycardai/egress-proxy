@@ -1,5 +1,6 @@
 # The admin surface through the built binary, the way the kubelet and a
-# chart lint drive it.
+# chart lint drive it. Three things are under test: the probe subcommand,
+# the readyz answer over the life of the process, and the settings report.
 #
 # The admin socket is in the proxy's mount namespace and never a port, so
 # the probe subcommand is the only way in. readyz fails while the process
@@ -28,15 +29,23 @@ stderr '"metrics" is not a route'
 stderr 'name one route: healthz, readyz, info'
 
 # settings answers with no document and no socket. A variable the flag set
-# reads is in it with the default the parser applies, the endpoints are
-# not, and the netsetup values a pod has to match are there too.
+# reads is in it with the default the parser applies, and the netsetup
+# values a pod has to match are there too.
 exec egress-proxy settings
 stdout '"env": "EGRESS_PROXY_ADMIN"'
 stdout '"default": "/run/egress/admin.sock"'
-! stdout 'EGRESS_PROXY_ENDPOINTS'
 stdout '"proxy_uid": 1337'
 stdout '"redirect_port": 1015'
 stdout '"subcommand": "probe"'
+
+# One entry per flag and no more. The endpoints and the policy section come
+# from the document alone, so a variable for either would raise this count
+# and fail here. Raise it with the flag when the binary gains a setting.
+stdout -count=21 '"env": "EGRESS_PROXY_'
+
+# A duration default is a whole number of seconds, so a chart lint compares
+# it arithmetically rather than parsing Go's 24h0m0s.
+stdout '"flag": "leaf-ttl",\n *"usage": [^\n]*\n *"default": 86400'
 
 env EGRESS_PROXY_CONFIG=config.yaml
 env EGRESS_PROXY_SANDBOX_ID=acceptance

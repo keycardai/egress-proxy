@@ -42,9 +42,11 @@ that wants the proxy on the uid the capture exempts sets `runAsUser`
 itself.
 
 **Capabilities.** `NET_BIND_SERVICE`, and only when `listen.transparent`
-names a port below 1024, which the default 1015 is. That port is below 1024
-so an unprivileged workload cannot bind it during a sidecar restart and
-stand in for the proxy, and the capability is what lets the proxy bind it.
+names a port below 1024. `listen.transparent` has no default, and the
+redirect port the init container programs is 1015. A port below 1024 is one
+an unprivileged workload cannot bind during a sidecar restart to stand in
+for the proxy, and the capability is what lets the proxy bind it. The pod
+grants it: the binary has no file capability.
 Nothing else is needed: the proxy programs no rule and reads no other
 process.
 
@@ -122,7 +124,8 @@ A variable is set only for a client the image installs. The image installs
 no AWS client, so it sets no `AWS_CA_BUNDLE`. An image built on this one
 that adds a client sets that client's variable itself.
 
-The image mounts `/shared-ca` read-only and needs no capability. `AGENT_UID`
+The pod mounts `/shared-ca` read-only and the image needs no capability.
+`AGENT_UID`
 is a build argument, and an image that changes it is built for a pod that
 runs the workload as that uid.
 

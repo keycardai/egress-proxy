@@ -46,5 +46,5 @@ chmod 0644 "$anchor"
 # REQUESTS_CA_BUNDLE and GIT_SSL_CAINFO all name.
 update-ca-certificates >&2
 
-log "the proxy CA is trusted; starting $1"
+log "the proxy CA is trusted. Starting $1"
 exec "$@"
