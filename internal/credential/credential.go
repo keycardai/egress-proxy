@@ -64,6 +64,8 @@ type Source interface {
 	// Credential returns the credential for the resource identifier an
 	// endpoint names. It returns an error when it has none, which denies
 	// the request with credential_unavailable.
+	//
+	// Implementations must not leak the secret in the error contents.
 	Credential(ctx context.Context, resource string) (string, error)
 	// Describe names the source for the start-up announcement and the admin
 	// socket. It NEVER includes a credential.
@@ -74,6 +76,8 @@ type Source interface {
 // writer that reports an error leaves the request as it found it, and the
 // proxy denies the request with credential_unavailable. NEVER forward a
 // request whose write failed.
+//
+// Implementations must not leak the secret in the error contents.
 type Writer interface {
 	Write(out *http.Request, credential string) error
 }
@@ -171,10 +175,10 @@ func (w queryWriter) Write(out *http.Request, credential string) error {
 // credential authenticates nothing.
 func Validate(credential string) error {
 	if credential == "" {
-		return fmt.Errorf("%w: it is empty", errInvalid)
+		return fmt.Errorf("%w: empty value", errInvalid)
 	}
 	if i := strings.IndexFunc(credential, isControl); i >= 0 {
-		return fmt.Errorf("%w: it holds a control character at byte %d", errInvalid, i)
+		return fmt.Errorf("%w: contains an invalid character", errInvalid)
 	}
 	return nil
 }
