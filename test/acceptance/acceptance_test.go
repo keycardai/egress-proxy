@@ -92,6 +92,9 @@ func TestAcceptance(t *testing.T) {
 // declares. A path under /stream answers an event stream that keeps sending
 // for longer than a short idle timeout. Every other path answers "hello from
 // upstream <path>".
+//
+// The log line carries the target with its query and the Authorization
+// header, so a scenario can prove what the proxy wrote into the request.
 func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 1 {
 		ts.Fatalf("usage: upstream DIR")
@@ -133,7 +136,8 @@ const (
 // request to requests.
 func upstreamHandler(requests io.Writer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(requests, "request %s %s host=%s\n", r.Method, r.URL.Path, r.Host)
+		fmt.Fprintf(requests, "request %s %s host=%s authorization=%q\n",
+			r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/truncated"):

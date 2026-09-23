@@ -18,6 +18,7 @@ import (
 	"github.com/elazarl/goproxy"
 
 	"github.com/keycardai/egress-proxy/internal/audit"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -31,6 +32,7 @@ const (
 var (
 	errNoSNI        = errors.New("the handshake named no server")
 	errHostMismatch = errors.New("the server name is not the CONNECT authority")
+	errNoSource     = errors.New("this process has no credential source")
 )
 
 // tunnel is what the connection decision hands to the requests inside the
@@ -249,8 +251,12 @@ type forward struct {
 	// requestID is the id on the record for this request. A refusal the
 	// reverse proxy answers carries it, so every deny names a record.
 	requestID string
-	denied    bool
-	err       error
+	// writer and secret are the endpoint's credential and where it goes.
+	// Both are empty for an endpoint that names none.
+	writer credential.Writer
+	secret string
+	denied bool
+	err    error
 	// status is the status the upstream answered, set before the response
 	// is written.
 	status int
@@ -285,7 +291,8 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 		Destination:  audit.Destination{Host: state.sni, Port: state.port, SNI: state.sni},
 		Request:      &audit.RequestInfo{Method: r.Method, Path: r.URL.EscapedPath(), Host: r.Host},
 	}
-	decision := s.decideRequest(state, r)
+	fwd := &forward{host: state.sni, port: state.port, requestID: requestID}
+	decision := s.decideRequest(r.Context(), state, r, fwd)
 	record.Decision = auditDecision(decision)
 	if !decision.Allowed() {
 		s.opts.Audit.Emit(record)
@@ -296,7 +303,6 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fwd := &forward{host: state.sni, port: state.port, requestID: requestID}
 	recorder := &statusRecorder{ResponseWriter: w}
 	// ReverseProxy panics with http.ErrAbortHandler when it cannot finish
 	// copying a body, so the record is emitted from a deferred call and the
@@ -326,11 +332,11 @@ func (s *Server) emitForwarded(
 	case fwd.denied:
 		record.Decision.Verdict = policy.VerdictDeny
 		record.Decision.Reason = policy.ReasonDenyAlways
-		record.Decision.Error = fwd.err.Error()
+		record.Decision.Error = credential.Redact(fwd.err.Error(), fwd.secret)
 	case fwd.err != nil:
 		record.Decision.Verdict = policy.VerdictDeny
 		record.Decision.Reason = policy.ReasonUpstreamFailed
-		record.Outcome.Error = fwd.err.Error()
+		record.Outcome.Error = credential.Redact(fwd.err.Error(), fwd.secret)
 	case recovered != nil:
 		record.Outcome.Error = panicOutcome(recovered, r.Context().Err())
 	}
@@ -354,9 +360,12 @@ func panicOutcome(recovered any, requestErr error) string {
 }
 
 // decideRequest is the per-request decision: the target is well formed, the
-// Host header agrees with the SNI, and an endpoint covers the path. An
-// endpoint naming a credential denies until a credential source exists.
-func (s *Server) decideRequest(state *tunnel, r *http.Request) policy.Decision {
+// Host header agrees with the SNI, an endpoint covers the path, and the
+// credential that endpoint names is in hand. It fills fwd with the
+// credential and where it goes.
+func (s *Server) decideRequest(
+	ctx context.Context, state *tunnel, r *http.Request, fwd *forward,
+) policy.Decision {
 	if r.RequestURI == "*" || !strings.HasPrefix(r.URL.Path, "/") {
 		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}
 	}
@@ -365,22 +374,59 @@ func (s *Server) decideRequest(state *tunnel, r *http.Request) policy.Decision {
 		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonHostMismatch}
 	}
 	decision := s.opts.Matcher.Request(state.sni, state.port, r.URL.EscapedPath())
-	if decision.Allowed() && decision.Endpoint != nil && decision.Endpoint.HasCredential {
+	if !decision.Allowed() || decision.Endpoint == nil || decision.Endpoint.Credential == nil {
+		return decision
+	}
+	if err := s.resolveCredential(ctx, *decision.Endpoint, fwd); err != nil {
 		return policy.Decision{
-			Verdict: policy.VerdictDeny, Reason: policy.ReasonCredentialUnavailable, Endpoint: decision.Endpoint,
+			Verdict:  policy.VerdictDeny,
+			Reason:   policy.ReasonCredentialUnavailable,
+			Endpoint: decision.Endpoint,
+			Err:      err,
 		}
 	}
 	return decision
 }
 
-// rewrite points the outbound request at the SNI on the CONNECT port. It
-// keeps the Host header as the workload sent it, because the request
-// decision already checked that the header is the SNI.
-func rewrite(pr *httputil.ProxyRequest) {
-	fwd := forwardFrom(pr.In.Context())
-	pr.Out.URL.Scheme = "https"
-	pr.Out.URL.Host = net.JoinHostPort(fwd.host, strconv.Itoa(fwd.port))
-	pr.Out.Host = pr.In.Host
+// resolveCredential reads the endpoint's credential and prepares the writer
+// that puts it into the outbound request. Every failure denies, so a
+// request never leaves carrying whatever the workload had at the placement.
+func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint, fwd *forward) error {
+	if s.opts.Credentials == nil {
+		return errNoSource
+	}
+	writer, err := credential.NewWriter(*endpoint.Credential)
+	if err != nil {
+		return err //nolint:wrapcheck // the message already names the placement
+	}
+	secret, err := s.opts.Credentials.Credential(ctx, endpoint.Resource)
+	if err != nil {
+		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
+	}
+	if err := credential.Validate(secret); err != nil {
+		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
+	}
+	fwd.writer, fwd.secret = writer, secret
+	return nil
+}
+
+// rewrite points the outbound request at the SNI on the CONNECT port and
+// writes the endpoint's credential into it. It keeps the Host header as the
+// workload sent it, because the request decision already checked that the
+// header is the SNI.
+//
+// The credential goes in here because the reverse proxy has already removed
+// the hop-by-hop headers that the workload's Connection header names. A
+// workload therefore cannot name the placement header in Connection and
+// have the credential dropped on the way out.
+func rewrite(proxied *httputil.ProxyRequest) {
+	fwd := forwardFrom(proxied.In.Context())
+	proxied.Out.URL.Scheme = "https"
+	proxied.Out.URL.Host = net.JoinHostPort(fwd.host, strconv.Itoa(fwd.port))
+	proxied.Out.Host = proxied.In.Host
+	if fwd.writer != nil {
+		fwd.writer.Write(proxied.Out, fwd.secret)
+	}
 }
 
 // recordUpstreamStatus keeps the upstream's status on the forward. The
@@ -461,6 +507,9 @@ func auditDecision(decision policy.Decision) audit.Decision {
 	out := audit.Decision{Verdict: decision.Verdict, Reason: decision.Reason}
 	if decision.Endpoint != nil {
 		out.Endpoint = decision.Endpoint.ID()
+	}
+	if decision.Err != nil {
+		out.Error = decision.Err.Error()
 	}
 	return out
 }

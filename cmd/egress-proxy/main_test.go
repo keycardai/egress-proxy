@@ -28,6 +28,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		"ADMIN":                   "/env/admin.sock",
 		"CA_OUT_DIR":              "/env/ca",
 		"CA_STATE_DIR":            "/env/state",
+		"CREDENTIAL_STATIC_FILE":  "/env/credentials.yaml",
 		"LEAF_TTL":                "2h",
 		"CACHE_SIZE":              "5",
 		"UPSTREAM_CA_FILES":       "/env/a.pem,/env/b.pem",
@@ -50,7 +51,8 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		WorkloadTokenFile: "/env/token", ImpersonateUser: "env-user",
 		// The flag wins over EGRESS_PROXY_CONNECT.
 		Connect: "127.0.0.1:2", Admin: "/env/admin.sock", CAOutDir: "/env/ca", CAStateDir: "/env/state",
-		LeafTTL: 2 * time.Hour, CacheSize: 5, UpstreamCAFiles: []string{"/env/a.pem", "/env/b.pem"},
+		CredentialStaticFile: "/env/credentials.yaml",
+		LeafTTL:              2 * time.Hour, CacheSize: 5, UpstreamCAFiles: []string{"/env/a.pem", "/env/b.pem"},
 		MaxConnections: 9, IdleTimeout: 90 * time.Second, ResponseHeaderTimeout: 45 * time.Second,
 	}
 	assert.Equal(t, "/env/config.yaml", got.configPath, "the config path comes from the variable")

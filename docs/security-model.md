@@ -24,9 +24,9 @@ unprivileged workload.
 - The proxy fails closed. Every path that cannot produce a decision denies
   with a named reason. Examples include a CONNECT to an unlisted host, a
   handshake without an SNI, a `Host` header that differs from the SNI, a path
-  that no endpoint covers, an endpoint without a credential source, and a name
-  that resolves into a denied range. Tests in `internal/proxy` pin each
-  reason.
+  that no endpoint covers, an endpoint whose credential the proxy cannot
+  supply, and a name that resolves into a denied range. Tests in
+  `internal/proxy` pin each reason.
 - The proxy makes the decision before it spends resources. It refuses a
   denied host at CONNECT time, before it mints a leaf or dials an upstream.
   The test asserts zero minted leaves and zero upstream connections for a
@@ -59,6 +59,8 @@ unprivileged workload.
   proxy.
 - The proxy streams responses without adding a buffer between the upstream
   and the workload.
+- The proxy writes a credential into a request only at the placement the
+  endpoint names, and the credential reaches no log line and no audit record.
 - The audit stream cannot be turned off. It is the process stdout, with one
   JSON object per decision and the `sandbox_id` and document digest.
 
@@ -92,7 +94,22 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 | An endpoint names an address in a spelling that is not an IP literal, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. | A host must be a DNS name of ASCII labels whose last label is not all digits. The endpoint list refuses the rest at start-up, and the dial guard refuses the address whatever the name. | `TestParseRefusesInvalidEndpoints`, `TestANameResolvingIntoADeniedRangeIsRefusedAtTheDial` |
 | An endpoint carries a path prefix that covers more than it names, such as an empty prefix or one with dot segments. | Compile validates every prefix itself, so a list assembled outside the document parser gets the same refusal. | `TestCompileRefusals` |
 | A listed host runs another service on another port, and the workload reaches it because the document named only the host. | An endpoint covers one port, 443 unless it names another. The connection decision matches the CONNECT port against the endpoint list, and a port no endpoint names is refused with `no_matching_endpoint` before any leaf is minted. | `TestDeniedConnections`, `TestMatcherDecisions`, `connect_allow_deny.txtar` |
-| A request reaches an endpoint with a credential before a credential source exists. The request could carry the workload placeholder upstream. | The proxy rejects the request with `credential_unavailable`. | `TestDeniedRequestsInsideAnAllowedTunnel` |
+| A request reaches an endpoint with a credential that the proxy cannot supply. The request could carry the workload placeholder upstream. | The proxy rejects the request with `credential_unavailable` when the process has no source, when the source holds no credential for the endpoint resource, and when this build does not write the placement. Nothing is dialed. | `TestCredentialRefusals`, `TestDeniedRequestsInsideAnAllowedTunnel` |
+
+### Credential injection
+
+The proxy writes the credential into a request at the place the endpoint
+names.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| A workload sends its own value at the placement and reaches the upstream with it, or keeps a value the proxy was meant to replace. | The placement is authoritative. A header placement replaces every value under that header name, and a query placement replaces every value under that parameter name. | `TestWriterReplacesWhatTheWorkloadSent`, `TestCredentialInjection` |
+| A workload names the placement header in `Connection`, so the proxy writes a credential that the reverse proxy then drops as hop-by-hop. | The proxy writes the credential in the rewrite, which runs after the reverse proxy has removed the headers `Connection` names. | `TestCredentialInjection` |
+| A credential holding a carriage return or newline splits the outbound request head and injects a header. | The proxy refuses a credential with a control character, at load and again when a source returns one, and denies the request with `credential_unavailable`. | `TestValidate`, `TestLoadStaticFileRefusals` |
+| A header placement names `Host` and sends the credential to another peer, or names a header that would split the request head. | The document is refused at start-up for a `Host` placement, and the writer refuses a name that is not a valid header name, which denies the request. | config `a header placement naming Host`, `TestNewWriterRefusals` |
+| A credential reaches the audit stream or the log, where it outlives the request. | A record carries the method, the path without its query, and the host. Every other text the proxy writes passes through `credential.Redact`. | `TestNoCredentialReachesARecordOrALogLine`, `TestRedact` |
+| The static credential file is readable by another user of the node or by the workload. | The loader refuses a file with any group or other permission bit, and refuses anything that is not a regular file. | `TestLoadStaticFileRefusals` |
+| Two credential sources answer, and a record cannot say which one did. | The document is refused when it names both a static file and an identity. | config `a static credential file together with an identity` |
 
 ### Certificate authority
 

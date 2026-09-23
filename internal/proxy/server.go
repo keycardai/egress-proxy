@@ -42,6 +42,7 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -94,6 +95,9 @@ type Options struct {
 	Audit audit.Sink
 	// UpstreamRoots verifies upstream certificates.
 	UpstreamRoots *x509.CertPool
+	// Credentials supplies the credential an endpoint names. A nil source
+	// denies every such endpoint with credential_unavailable.
+	Credentials credential.Source
 	// Logger records the request path. A nil logger discards.
 	Logger *slog.Logger
 	// MaxConnections caps simultaneous connections on the listener. Zero

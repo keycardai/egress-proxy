@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -210,12 +211,18 @@ func TestCompileReportsEveryProblem(t *testing.T) {
 	}
 }
 
+// headerPlacement is a credential an endpoint can name. The matcher carries
+// it to the caller and reads nothing in it.
+var headerPlacement = credential.Placement{ //nolint:gochecknoglobals // a fixture the table shares
+	Kind: credential.KindHeader, Name: "Authorization", Template: "Bearer " + credential.Token,
+}
+
 func TestMatcherDecisions(t *testing.T) {
 	t.Parallel()
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
 	matcher, err := policy.Compile([]policy.Endpoint{
-		{Host: "api.github.com", Port: 443, PathPrefix: "/", HasCredential: true},
+		{Host: "api.github.com", Port: 443, PathPrefix: "/", Credential: &headerPlacement},
 		{Host: "openrouter.ai", Port: 443, PathPrefix: "/api/v1/"},
 		{Host: "openrouter.ai", Port: 443, PathPrefix: "/api/v1/models"},
 		{Host: "pypi.org", Port: 443, PathPrefix: "/simple"},
@@ -234,6 +241,8 @@ func TestMatcherDecisions(t *testing.T) {
 		wantVerdict  policy.Verdict
 		wantReason   policy.Reason
 		wantEndpoint string
+		// wantCredential is the placement the matched endpoint names.
+		wantCredential *credential.Placement
 	}{
 		{
 			name: "connection to a listed host", host: "api.github.com",
@@ -320,6 +329,11 @@ func TestMatcherDecisions(t *testing.T) {
 			wantVerdict: "deny", wantReason: "no_matching_endpoint",
 		},
 		{
+			name: "the matched endpoint carries its credential placement", host: "api.github.com", path: "/repos",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "api.github.com:443/",
+			wantCredential: &headerPlacement,
+		},
+		{
 			name: "request to an unlisted host", host: "example.com", path: "/",
 			wantVerdict: "deny", wantReason: "no_matching_endpoint",
 		},
@@ -369,10 +383,13 @@ func TestMatcherDecisions(t *testing.T) {
 			assert.Equal(t, tc.wantVerdict, got.Verdict, "verdict")
 			assert.Equal(t, tc.wantReason, got.Reason, "reason")
 			var gotEndpoint string
+			var gotCredential *credential.Placement
 			if got.Endpoint != nil {
 				gotEndpoint = got.Endpoint.ID()
+				gotCredential = got.Endpoint.Credential
 			}
 			assert.Equal(t, tc.wantEndpoint, gotEndpoint, "endpoint")
+			assert.Equal(t, tc.wantCredential, gotCredential, "credential placement")
 		})
 	}
 }

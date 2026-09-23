@@ -2,11 +2,13 @@ package proxy_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/proxy"
 )
@@ -161,14 +164,17 @@ type upstream struct {
 	release chan struct{}
 }
 
-func newUpstream(t *testing.T) (*upstream, *ca.Authority) {
+// newUpstream serves handler over TLS for upstreamHost. A nil handler
+// echoes the request line and serves the stall and stream paths the timeout
+// tests need.
+func newUpstream(t *testing.T, handler http.Handler) (*upstream, *ca.Authority) {
 	t.Helper()
 	authority, err := ca.New(ca.Options{CommonName: "upstream test CA"})
 	require.NoError(t, err)
 	leaf, err := authority.Leaf(upstreamHost)
 	require.NoError(t, err)
 	up := &upstream{release: make(chan struct{})}
-	up.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if strings.HasPrefix(r.URL.Path, "/stall/") {
 			// Never write a head. The handler returns once the proxy gives
@@ -186,7 +192,11 @@ func newUpstream(t *testing.T) (*upstream, *ca.Authority) {
 		}
 		//nolint:gosec // G705: a fixture echoing as text/plain
 		fmt.Fprintf(w, "%s %s host=%s", r.Method, r.URL.RequestURI(), r.Host)
-	}))
+	})
+	if handler == nil {
+		handler = echo
+	}
+	up.server = httptest.NewUnstartedServer(handler)
 	up.server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		if state == http.StateNew {
 			up.connections.Add(1)
@@ -231,8 +241,33 @@ type harness struct {
 	store     *ca.Store
 	sink      *memorySink
 	upstream  *upstream
+	logs      *syncBuffer
 	addr      string
 	server    *proxy.Server
+}
+
+// syncBuffer collects the proxy log so a test can read it while the proxy
+// is still running.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p) //nolint:wrapcheck // a buffer write never fails
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// headerPlacement is the credential placement the harness document names.
+var headerPlacement = credential.Placement{ //nolint:gochecknoglobals // a fixture the tests share
+	Kind: credential.KindHeader, Name: "Authorization", Template: "Bearer " + credential.Token,
 }
 
 type harnessOptions struct {
@@ -244,32 +279,49 @@ type harnessOptions struct {
 	responseHeaderTimeout time.Duration
 	// unstarted leaves Run to the test.
 	unstarted bool
+	// upstream serves the requests inside a tunnel. Nil is the echo
+	// fixture.
+	upstream http.Handler
+	// endpoints replaces the harness document. It takes the upstream port,
+	// which an endpoint names and the test learns only once the upstream is
+	// listening.
+	endpoints func(port int) []policy.Endpoint
+	// credentials is the source the proxy reads an endpoint credential
+	// from. Nil is a process with no source.
+	credentials credential.Source
 }
 
 func start(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
-	up, upstreamCA := newUpstream(t)
+	up, upstreamCA := newUpstream(t, opts.upstream)
 	var exceptions []netip.Prefix
 	if !opts.loopbackDenied {
 		exceptions = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
 	}
 	deny, err := policy.NewDenyList(nil, exceptions)
 	require.NoError(t, err)
-	matcher, err := policy.Compile([]policy.Endpoint{
+	endpoints := []policy.Endpoint{
 		{Host: upstreamHost, Port: up.port, PathPrefix: "/ok/"},
 		{Host: upstreamHost, Port: up.port, PathPrefix: "/stream/"},
-		{Host: upstreamHost, Port: up.port, PathPrefix: "/cred/", HasCredential: true},
+		{Host: upstreamHost, Port: up.port, PathPrefix: "/cred/", Credential: &headerPlacement},
 		{Host: upstreamHost, Port: up.port, PathPrefix: "/stall/"},
-	}, deny)
+	}
+	if opts.endpoints != nil {
+		endpoints = opts.endpoints(up.port)
+	}
+	matcher, err := policy.Compile(endpoints, deny)
 	require.NoError(t, err)
 	authority, err := ca.New(ca.Options{})
 	require.NoError(t, err)
 	store, err := ca.NewStore(authority, 16)
 	require.NoError(t, err)
 	sink := newMemorySink()
+	logs := &syncBuffer{}
 	server, err := proxy.New(proxy.Options{
 		Matcher:      matcher,
 		Certificates: store,
+		Credentials:  opts.credentials,
+		Logger:       slog.New(slog.NewJSONHandler(logs, nil)),
 		Audit: audit.NewStamped(sink, audit.Stamp{
 			SandboxID: "sbx-test", DocumentDigest: "sha256:doc", ConfigDigest: "sha256:cfg",
 		}, nil),
@@ -296,7 +348,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		})
 	}
 	return &harness{
-		authority: authority, store: store, sink: sink, upstream: up,
+		authority: authority, store: store, sink: sink, upstream: up, logs: logs,
 		addr: listener.Addr().String(), server: server,
 	}
 }
