@@ -308,6 +308,67 @@ func startingProcess(t *testing.T, connectAddr string, transparentPort int, fami
 const bindDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 	"listen:\n  connect: 127.0.0.1:0\nendpoints:\n  - host: example.com\n"
 
+// TestCaptureFamiliesFollowTheSocketsThatBound reads the families off real
+// listeners, because that is what the receipt is compared against.
+// transparent.Listen leaves the IPv6 socket out on a kernel with no IPv6,
+// so the rows bind each shape it can hand the comparison.
+func TestCaptureFamiliesFollowTheSocketsThatBound(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// addresses are the sockets the capture bound.
+		addresses []string
+		// programmed is what the netsetup receipt records.
+		programmed  []string
+		wantBound   []string
+		wantMissing []string
+	}{
+		{
+			name: "both families bound", addresses: []string{"127.0.0.1:0", "[::1]:0"},
+			programmed: []string{"ipv4", "ipv6"}, wantBound: []string{"ipv4", "ipv6"},
+		},
+		{
+			name: "ipv4 alone against a receipt that names ipv4", addresses: []string{"127.0.0.1:0"},
+			programmed: []string{"ipv4"}, wantBound: []string{"ipv4"},
+		},
+		{
+			name: "ipv4 alone against a receipt that names both", addresses: []string{"127.0.0.1:0"},
+			programmed: []string{"ipv4", "ipv6"}, wantBound: []string{"ipv4"},
+			wantMissing: []string{"ipv6"},
+		},
+		{
+			name: "ipv6 alone against a receipt that names both", addresses: []string{"[::1]:0"},
+			programmed: []string{"ipv4", "ipv6"}, wantBound: []string{"ipv6"},
+			wantMissing: []string{"ipv4"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			listeners := boundListeners(t, tc.addresses)
+			t.Cleanup(func() { _ = closeAll(listeners) })
+
+			bound := boundFamilies(listeners)
+			assert.Equal(t, tc.wantBound, bound, "the families the sockets cover")
+			assert.Equal(t, tc.wantMissing, missingFamilies(tc.programmed, bound),
+				"the families the receipt names with no socket")
+		})
+	}
+}
+
+// boundListeners opens one socket per address, the shape transparent.Listen
+// hands the bind.
+func boundListeners(t *testing.T, addresses []string) []net.Listener {
+	t.Helper()
+	listeners := make([]net.Listener, 0, len(addresses))
+	for _, address := range addresses {
+		listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", address)
+		require.NoError(t, err, "listen on %s", address)
+		listeners = append(listeners, listener)
+	}
+	return listeners
+}
+
 // TestServeStopsReportingReadyWhileItDrains covers the other end of the
 // readiness contract. Each server drains for its grace period after the
 // signal, and /readyz answering 200 through that window would have the
