@@ -520,6 +520,21 @@ func TestDeniedRequestsInsideAnAllowedTunnel(t *testing.T) {
 			request:    "GET /ok/../cred/x HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
 			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
 		},
+		{
+			// Cleaning these bytes changes nothing. Only the decoded form
+			// shows the dot segments, and an upstream that decodes first
+			// reads this as /cred/x.
+			name:       "escaped dot segments",
+			request:    "GET /ok/%2e%2e/cred/x HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
+		},
+		{
+			// An escaped slash is not a separator, so these bytes are one
+			// segment named "ok/x" and no prefix covers them.
+			name:       "an escaped slash does not open the prefix",
+			request:    "GET /ok%2Fx HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			wantStatus: http.StatusForbidden, wantReason: policy.ReasonNoMatchingEndpoint,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -548,6 +563,24 @@ func TestDeniedRequestsInsideAnAllowedTunnel(t *testing.T) {
 	t.Cleanup(func() {
 		assert.Zero(t, h.upstream.connections.Load(), "a denied request reached the upstream")
 	})
+}
+
+// TestAnEscapedPathReachesTheUpstreamUnchanged pins that the decision and
+// the forwarded request read the same bytes. An escaped character that is
+// not a separator stays a path character on both legs, so the workload
+// reaches the resource it asked for and the matcher judged.
+func TestAnEscapedPathReachesTheUpstreamUnchanged(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{})
+	conn, err := h.tlsTunnel(t, upstreamHost)
+	require.NoError(t, err)
+	answer := h.roundTrip(t, conn, bufio.NewReader(conn),
+		"GET /ok/a%3Fb HTTP/1.1\r\nHost: "+h.upstreamAuthority()+"\r\n\r\n")
+	assert.Equal(t, http.StatusOK, answer.status, "an escaped question mark is a path character")
+	assert.Contains(t, answer.body, "GET /ok/a%3Fb ", "the upstream receives the bytes the matcher judged")
+	record := h.sink.find(t, "the escaped path", byReason(audit.ScopeRequest, policy.ReasonEndpointAllowed))
+	require.NotNil(t, record.Request, "the record names the request")
+	assert.Equal(t, "/ok/a%3Fb", record.Request.Path, "the record names the path the proxy sent")
 }
 
 func TestHandshakeRefusals(t *testing.T) {

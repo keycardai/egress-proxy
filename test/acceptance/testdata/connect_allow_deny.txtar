@@ -71,6 +71,13 @@ stdout '^403$'
 exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null https://localhost:$UPSTREAM_PORT/needs-credential
 stdout 'X-Keycard-Deny-Reason: credential_unavailable'
 
+# The decision reads the escaped path, the bytes the upstream receives.
+# Escaped dot segments are refused, because an upstream that decodes first
+# would read them as a path outside the prefix. curl sends the target as
+# written with --path-as-is.
+exec curl -sS -o /dev/null -w '%{http_code}' --path-as-is --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello/%2e%2e/secret
+stdout '^400$'
+
 # The admin socket answers.
 exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/healthz
 stdout '^ok$'
@@ -102,6 +109,7 @@ audit stdout scope=connection destination.host=localhost destination.port=443 de
 # A request refused inside a tunnel is recorded at request scope, with the
 # connection that carried it and the reason the workload was told.
 audit stdout scope=request request.path=/secret decision.verdict=deny decision.reason=no_matching_endpoint
+audit stdout scope=request request.path=/hello/%2e%2e/secret decision.verdict=deny decision.reason=malformed_request
 audit stdout scope=request request.path=/hello request.host=other.example decision.verdict=deny decision.reason=host_mismatch
 audit stdout scope=request request.path=/needs-credential decision.verdict=deny decision.reason=credential_unavailable decision.endpoint=localhost:$UPSTREAM_PORT/needs-credential
 audit -all stdout sandbox_id=acceptance

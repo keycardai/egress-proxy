@@ -330,6 +330,31 @@ func TestParseRefusals(t *testing.T) {
 			wantErr: "must be a DNS name",
 		},
 		{name: "endpoint host with an underscore", doc: endpoint("host: pypi_org"), wantErr: "must be a DNS name"},
+		// The matcher compares a prefix against the escaped path, so a
+		// prefix holding a character a client always escapes could never
+		// match.
+		{
+			name:    "path prefix with a space",
+			doc:     endpoint("host: a.example\n    path_prefix: \"/my files/\""),
+			wantErr: "path_prefix \"/my files/\" must be an absolute path",
+		},
+		{
+			name:    "path prefix with a non-ASCII character",
+			doc:     endpoint("host: a.example\n    path_prefix: /caf\u00e9/"),
+			wantErr: "must be an absolute path",
+		},
+		{
+			// Nothing unescapes a prefix, so a malformed escape would
+			// prefix match by accident: "/a%" matches "/a%25b".
+			name:    "path prefix with a malformed escape",
+			doc:     endpoint("host: a.example\n    path_prefix: /a%zz"),
+			wantErr: "must be an absolute path",
+		},
+		{
+			name:    "path prefix ending in a bare percent",
+			doc:     endpoint("host: a.example\n    path_prefix: /a%"),
+			wantErr: "must be an absolute path",
+		},
 		{name: "endpoint host with a leading hyphen", doc: endpoint("host: -pypi.org"), wantErr: "must be a DNS name"},
 		{name: "endpoint host with a trailing hyphen", doc: endpoint("host: pypi-.org"), wantErr: "must be a DNS name"},
 		{name: "endpoint host with an empty label", doc: endpoint("host: pypi..org"), wantErr: "must be a DNS name"},

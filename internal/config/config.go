@@ -725,9 +725,23 @@ func validDNSName(host string) bool {
 }
 
 // normalizedPrefix reports whether prefix is absolute, carries no query or
-// fragment, and is in its shortest form with at most a trailing slash.
+// fragment, holds only characters a path can carry unescaped, and is in its
+// shortest form with at most a trailing slash.
+//
+// The matcher compares a prefix against the escaped path a client sent. A
+// prefix that is not already in that form could never match, so the document
+// is refused rather than accepted and silently useless.
 func normalizedPrefix(prefix string) bool {
 	if !strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "?#") {
+		return false
+	}
+	// A prefix is already in wire form when parsing it and escaping it
+	// again returns the same bytes. That refuses a character a client
+	// always escapes, such as a space, and a malformed escape such as "%zz"
+	// or a trailing "%", which nothing unescapes and which would prefix
+	// match by accident.
+	parsed, err := url.Parse(prefix)
+	if err != nil || parsed.EscapedPath() != prefix {
 		return false
 	}
 	cleaned := path.Clean(prefix)

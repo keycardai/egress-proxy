@@ -123,9 +123,17 @@ func TestCompileRefusals(t *testing.T) {
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos/../admin"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
+		// A request carries neither character: the request target's query
+		// splits off before the path, and EscapedPath writes "#" as "%23".
+		// A document is the only way either reaches the matcher.
 		{
 			name:      "a path prefix carrying a query",
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos?all=1"}},
+			wantErr:   "must be an absolute path in its shortest form",
+		},
+		{
+			name:      "a path prefix carrying a fragment",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos#top"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
 		// Compile validates the port itself, so a list assembled outside
@@ -292,16 +300,24 @@ func TestMatcherDecisions(t *testing.T) {
 			wantVerdict: "deny", wantReason: "malformed_request",
 		},
 		{
-			// Request takes a decoded path, so the proxy cannot hand it a
-			// raw query. A "?" that does arrive is a path character, and
-			// Request refuses it either way rather than guessing which one
-			// the caller meant.
-			name: "a question mark in the path is refused", host: "openrouter.ai", path: "/api/v1/?x=1",
+			// An escaped question mark is an ordinary path character. The
+			// upstream receives these bytes, so the prefix covers them.
+			name: "an escaped question mark is a path character", host: "openrouter.ai", path: "/api/v1/a%3Fb",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "openrouter.ai:443/api/v1/",
+		},
+		{
+			// Cleaning these bytes changes nothing, so only the decoded
+			// form shows the dot segments. An upstream that decodes first
+			// would read this as /api/secret, outside the prefix.
+			name: "escaped dot segments are refused", host: "openrouter.ai", path: "/api/v1/%2e%2e/secret",
 			wantVerdict: "deny", wantReason: "malformed_request",
 		},
 		{
-			name: "a fragment marker in the path is refused", host: "openrouter.ai", path: "/api/v1/#top",
-			wantVerdict: "deny", wantReason: "malformed_request",
+			// An escaped slash is not a separator. The upstream reads one
+			// segment named "api/v1", which is not under /api/v1/, and the
+			// matcher does not put it there either.
+			name: "an escaped slash does not open a prefix", host: "openrouter.ai", path: "/api%2Fv1/models",
+			wantVerdict: "deny", wantReason: "no_matching_endpoint",
 		},
 		{
 			name: "request to an unlisted host", host: "example.com", path: "/",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -170,9 +171,14 @@ func (m *Matcher) Connection(host string, port int) Decision {
 
 // Request makes the request-scoped decision for a path on a host.
 //
-// The path must be absolute and already in its shortest form. A path that
-// carries dot segments matches one endpoint here and reaches another
-// upstream, so Request refuses it.
+// requestPath is the escaped path, exactly the bytes the upstream receives.
+// Matching those bytes is what makes the decision and the forwarded request
+// agree: "/a%2Fb" is one segment named "a/b" to an upstream, so it does not
+// fall under the prefix "/a/", and the matcher does not put it there either.
+//
+// The path must be absolute and already in its shortest form, decoded as
+// well as escaped. A path that carries dot segments matches one endpoint
+// here and reaches another upstream, so Request refuses it.
 func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	connection := m.Connection(host, port)
 	if !connection.Allowed() {
@@ -208,13 +214,35 @@ func (m *Matcher) Hosts() []string {
 // normalizedPath reports whether requestPath is absolute and in its shortest
 // form. It keeps a trailing slash, because "/api/" and "/api" are different
 // paths.
+//
+// requestPath is the escaped path, the bytes that go upstream. Both that
+// form and its decoded form must be in shortest form. Checking the escaped
+// form alone would accept "/api/%2e%2e/secret", which no cleaning of those
+// bytes changes and which an upstream that decodes first reads as
+// "/secret".
 func normalizedPath(requestPath string) bool {
 	if requestPath == "" || !strings.HasPrefix(requestPath, "/") {
 		return false
 	}
+	// This guards the path prefix a document declares. A request cannot
+	// carry either character: the request target's query splits off before
+	// the path, and EscapedPath writes "#" as "%23".
 	if strings.ContainsAny(requestPath, "?#") {
 		return false
 	}
+	if !shortestForm(requestPath) {
+		return false
+	}
+	decoded, err := url.PathUnescape(requestPath)
+	if err != nil {
+		return false
+	}
+	return shortestForm(decoded)
+}
+
+// shortestForm reports whether cleaning the path leaves it alone, except for
+// a trailing slash.
+func shortestForm(requestPath string) bool {
 	cleaned := path.Clean(requestPath)
 	return cleaned == requestPath || cleaned+"/" == requestPath
 }

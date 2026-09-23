@@ -248,7 +248,7 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 		RequestID:    requestID,
 		Scope:        audit.ScopeRequest,
 		Destination:  audit.Destination{Host: state.sni, Port: state.port, SNI: state.sni},
-		Request:      &audit.RequestInfo{Method: r.Method, Path: r.URL.Path, Host: r.Host},
+		Request:      &audit.RequestInfo{Method: r.Method, Path: r.URL.EscapedPath(), Host: r.Host},
 	}
 	decision := s.decideRequest(state, r)
 	record.Decision = auditDecision(decision)
@@ -287,7 +287,7 @@ func (s *Server) decideRequest(state *tunnel, r *http.Request) policy.Decision {
 	if !ok || hostname != state.sni || port != state.port {
 		return policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonHostMismatch}
 	}
-	decision := s.opts.Matcher.Request(state.sni, state.port, r.URL.Path)
+	decision := s.opts.Matcher.Request(state.sni, state.port, r.URL.EscapedPath())
 	if decision.Allowed() && decision.Endpoint != nil && decision.Endpoint.HasCredential {
 		return policy.Decision{
 			Verdict: policy.VerdictDeny, Reason: policy.ReasonCredentialUnavailable, Endpoint: decision.Endpoint,
@@ -335,7 +335,7 @@ func (s *Server) handlePlain(r *http.Request, _ *goproxy.ProxyCtx) (*http.Reques
 		RequestID:   requestID,
 		Scope:       audit.ScopeRequest,
 		Destination: audit.Destination{Host: host, Port: port},
-		Request:     &audit.RequestInfo{Method: r.Method, Path: r.URL.Path, Host: r.Host},
+		Request:     &audit.RequestInfo{Method: r.Method, Path: r.URL.EscapedPath(), Host: r.Host},
 		Decision:    audit.Decision{Verdict: policy.VerdictDeny, Reason: reason},
 	})
 	return r, denyResponse(r, statusFor(reason), reason, requestID)
@@ -349,7 +349,7 @@ func (s *Server) serveNonProxy(w http.ResponseWriter, r *http.Request) {
 		RequestID:   requestID,
 		Scope:       audit.ScopeRequest,
 		Destination: audit.Destination{},
-		Request:     &audit.RequestInfo{Method: r.Method, Path: r.URL.Path, Host: r.Host},
+		Request:     &audit.RequestInfo{Method: r.Method, Path: r.URL.EscapedPath(), Host: r.Host},
 		Decision:    audit.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonNotAProxyRequest},
 	})
 	writeDeny(w, http.StatusBadRequest, policy.ReasonNotAProxyRequest, requestID)

@@ -74,7 +74,10 @@ type Destination struct {
 // RequestInfo is the request line, without the query.
 type RequestInfo struct {
 	Method string `json:"method"`
-	Path   string `json:"path"`
+	// Path is the escaped path, the bytes the proxy sends upstream.
+	// Decoding it would lose the difference the decision turns on:
+	// "/a%2Fb" is one segment and "/a/b" is two.
+	Path string `json:"path"`
 	// Host is the Host header as the workload sent it. The request decision
 	// compares it with the SNI.
 	Host string `json:"host,omitempty"`

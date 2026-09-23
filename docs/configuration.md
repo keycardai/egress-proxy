@@ -169,9 +169,16 @@ connections and requests.
 |---|---|---|
 | `host` | required | A DNS name without a scheme, port, path, or wildcard. Labels hold ASCII letters, digits and hyphens, and the last label is not all digits. The proxy matches the name case-insensitively against the SNI. It rejects an IP literal, because a TLS client sends no SNI for one, and it rejects an address written another way, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. Write an internationalized name as its A-label, the `xn--` punycode form. RFC 6066 section 3 requires the SNI to be ASCII, so a host holding non-ASCII characters never matches what a client sends. |
 | `port` | `443` | The one port this endpoint covers on that host. A host reachable on two ports is two endpoints, which also gives each one its own prefix and credential. A CONNECT to any other port on the host is rejected with `no_matching_endpoint`, the same reason an unlisted host gets, because a destination the document does not declare is absent whichever part of it differs. |
-| `path_prefix` | `/` | An absolute path in its shortest form. `/` covers every path. A prefix that ends in `/` covers everything below it. Any other prefix covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching prefix decides. |
+| `path_prefix` | `/` | An absolute path in its shortest form. `/` covers every path. A prefix that ends in `/` covers everything below it. Any other prefix covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching prefix decides. Write the prefix as it appears on the wire: the proxy compares it against the escaped path, so a prefix holding a character a client always escapes, such as a space, is rejected because it could never match. |
 | `resource` | `https://<host>/` | The resource identifier that the proxy sends to token exchange. Use an absolute `https` URL without user information, a query, or a fragment. Two endpoints can share one resource. |
 | `credential` | unset | Defines where the proxy puts a credential and which placeholder the workload holds. See `endpoints[].credential`. |
+
+The proxy decides on the escaped path, the bytes it forwards upstream. An
+escaped character is not a separator, so `/a%2Fb` is one segment named `a/b`
+and the prefix `/a/` does not cover it. The proxy refuses a path whose
+escaped or decoded form carries dot segments, so `/api/%2e%2e/secret`, which
+an upstream that decodes first reads as `/secret`, is rejected with
+`malformed_request`.
 
 Two endpoints with the same `host`, `port` and `path_prefix` are rejected.
 The same host and prefix on two ports are two endpoints, not a repeat.
@@ -206,7 +213,7 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. The proxy also uses this reason for every cleartext request. |
 | `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
-| `malformed_request` | deny | both | The request uses an asterisk-form target, a path with dot segments, or a CONNECT authority with a bad port. |
+| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The endpoint names a credential, but this process has no credential source. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
