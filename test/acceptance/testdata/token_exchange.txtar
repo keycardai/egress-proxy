@@ -1,0 +1,167 @@
+# The impersonating token exchange end to end with the built binary: the
+# proxy mints a credential per request against the zone, writes it at the
+# placement, records a zone refusal as access_denied and an exchange that
+# did not complete as exchange_failed, and makes no exchange at all for a
+# request the endpoint list already denies.
+#
+# The zone here is the fixture in test/fakeas. The real zone is exercised by
+# the cluster lane.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+fakeas zone https://granted.example/=zone-issued-sekrit
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+# A mounted emptyDir arrives at mode 0777, and the proxy binds the admin
+# socket in it. The directory mode is what keeps another container in the
+# pod off the socket, so the proxy sets it before it binds.
+chmod 0777 $ADMIN_DIR
+
+# The proxy refuses a client secret file that anyone but its owner can read.
+chmod 0600 client-secret
+
+# The upstream and the zone each bind a port the script cannot know in
+# advance, and the document names both.
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt,$WORK/zone/ca.crt
+env EGRESS_PROXY_CLIENT_SECRET_FILE=$WORK/client-secret
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket names the exchange, the zone and the impersonated user,
+# and carries neither the client secret nor an issued credential.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"credential_source": "a Keycard token exchange at https://localhost:'
+stdout 'impersonating igmua2g0fwapl21qll7tczdw7t'
+stdout 'authenticated by a client secret'
+! stdout 'acceptance-client-secret'
+
+# An endpoint whose resource the zone grants: the exchange runs and the
+# credential it issued replaces the placeholder the workload sent.
+exec curl -sS --cacert shared-ca/ca.crt -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/granted/repos
+stdout '^hello from upstream /granted/repos$'
+
+# An endpoint whose resource no policy grants: the zone answers
+# access_denied and the request never reaches the upstream.
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
+stdout '^403$'
+
+# A path no endpoint covers is denied before any exchange, so a denied
+# request costs the zone nothing. The count below proves it.
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/unlisted/thing
+stdout '^403$'
+
+# The upstream received the granted request carrying the issued credential,
+# and nothing else.
+grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-issued-sekrit"' upstream/requests.log
+! grep '/refused/thing' upstream/requests.log
+! grep '/unlisted/thing' upstream/requests.log
+grep -count=1 '^request ' upstream/requests.log
+
+# The zone saw exactly the two exchanges the two matched endpoints made.
+grep 'exchange client=acceptance-app-credential subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
+grep 'exchange client=acceptance-app-credential subject=igmua2g0fwapl21qll7tczdw7t resource=https://refused.example/ error="access_denied"' zone/requests.log
+grep -count=2 '^exchange ' zone/requests.log
+
+sigterm
+wait proxy
+
+# The process announces the exchange on every start, without the secret.
+stderr '"msg":"credential source"'
+stderr 'a Keycard token exchange at https://localhost:'
+! stderr 'acceptance-client-secret'
+
+# Each decision has a record, and the two failure classes are two reasons.
+audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
+audit stdout scope=request request.path=/refused/thing decision.verdict=deny decision.reason=access_denied decision.endpoint=localhost:$UPSTREAM_PORT/refused/
+audit stdout scope=request request.path=/unlisted/thing decision.verdict=deny decision.reason=no_matching_endpoint
+
+# No credential and no secret reaches the audit stream or the log.
+! stdout 'zone-issued-sekrit'
+! stdout 'acceptance-client-secret'
+! stderr 'zone-issued-sekrit'
+! stderr 'acceptance-client-secret'
+
+# A zone that answers nothing is exchange_failed, not access_denied: the
+# proxy does not know what the zone would have said. A second proxy points
+# at a port nothing listens on.
+freeport DEAD_PROXY_PORT
+freeport DEAD_ZONE_PORT
+shortdir DEAD_ADMIN_DIR
+chmod 0777 $DEAD_ADMIN_DIR
+expand dead-zone.yaml
+
+env EGRESS_PROXY_CONFIG=dead-zone.yaml
+env EGRESS_PROXY_CONNECT=127.0.0.1:$DEAD_PROXY_PORT
+env EGRESS_PROXY_ADMIN=$DEAD_ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/dead-ca
+exec egress-proxy &deadproxy&
+waitfile dead-ca/ca.crt
+waitport 127.0.0.1:$DEAD_PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$DEAD_PROXY_PORT
+exec curl -sS --cacert dead-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
+stdout '^502$'
+
+sigterm
+wait deadproxy
+audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_failed
+
+-- config.yaml --
+version: 1
+identity:
+  zone_url: "https://localhost:$ZONE_PORT"
+  client_id: "$ZONE_CLIENT_ID"
+  client_secret_file: "/replaced/by/the/environment"
+  impersonate:
+    user: "igmua2g0fwapl21qll7tczdw7t"
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /granted/
+    resource: "https://granted.example/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GRANTED_TOKEN
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /refused/
+    resource: "https://refused.example/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: REFUSED_TOKEN
+-- dead-zone.yaml --
+version: 1
+identity:
+  zone_url: "https://localhost:$DEAD_ZONE_PORT"
+  client_id: "$ZONE_CLIENT_ID"
+  client_secret_file: "/replaced/by/the/environment"
+  impersonate:
+    user: "igmua2g0fwapl21qll7tczdw7t"
+limits:
+  exchange_timeout: "3s"
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /granted/
+    resource: "https://granted.example/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GRANTED_TOKEN
+-- client-secret --
+acceptance-client-secret

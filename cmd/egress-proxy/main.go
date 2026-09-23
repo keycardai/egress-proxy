@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +28,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
 	"github.com/keycardai/egress-proxy/internal/credential"
+	"github.com/keycardai/egress-proxy/internal/exchange"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/proxy"
 )
@@ -60,6 +63,7 @@ type flags struct {
 	admin                 string
 	caOutDir              string
 	caStateDir            string
+	clientSecretFile      string
 	credentialStaticFile  string
 	leafTTL               time.Duration
 	cacheSize             int
@@ -67,6 +71,7 @@ type flags struct {
 	maxConnections        int
 	idleTimeout           time.Duration
 	responseHeaderTimeout time.Duration
+	exchangeTimeout       time.Duration
 }
 
 // overrides is the flags as the document parser applies them.
@@ -81,6 +86,7 @@ func (f flags) overrides() config.Overrides {
 		Admin:                 f.admin,
 		CAOutDir:              f.caOutDir,
 		CAStateDir:            f.caStateDir,
+		ClientSecretFile:      f.clientSecretFile,
 		CredentialStaticFile:  f.credentialStaticFile,
 		LeafTTL:               f.leafTTL,
 		CacheSize:             f.cacheSize,
@@ -88,6 +94,7 @@ func (f flags) overrides() config.Overrides {
 		MaxConnections:        f.maxConnections,
 		IdleTimeout:           f.idleTimeout,
 		ResponseHeaderTimeout: f.responseHeaderTimeout,
+		ExchangeTimeout:       f.exchangeTimeout,
 	}
 }
 
@@ -115,6 +122,8 @@ func flagSet(opts *flags) []cli.Flag {
 			"directory the CA certificate is written to (ca.out_dir)", false),
 		stringFlag("ca-state-dir", "CA_STATE_DIR", &opts.caStateDir,
 			"memory-backed directory holding the CA across restarts (ca.state_dir)", false),
+		stringFlag("client-secret-file", "CLIENT_SECRET_FILE", &opts.clientSecretFile,
+			"path of the file holding the application credential secret (identity.client_secret_file)", false),
 		stringFlag("credential-static-file", "CREDENTIAL_STATIC_FILE", &opts.credentialStaticFile,
 			"file of credentials by resource, for tests and development (credentials.static_file)", false),
 		&cli.DurationFlag{
@@ -142,6 +151,10 @@ func flagSet(opts *flags) []cli.Flag {
 			Name: "response-header-timeout", Destination: &opts.responseHeaderTimeout,
 			Sources: env("RESPONSE_HEADER_TIMEOUT"),
 			Usage:   "how long an upstream has to send a response head (limits.response_header_timeout)",
+		},
+		&cli.DurationFlag{
+			Name: "exchange-timeout", Destination: &opts.exchangeTimeout, Sources: env("EXCHANGE_TIMEOUT"),
+			Usage: "budget for one token exchange, discovery included (limits.exchange_timeout)",
 		},
 	}
 }
@@ -217,7 +230,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, err
 	}
-	credentials, err := credentialSource(cfg)
+	credentials, err := credentialSource(cfg, deny, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -302,14 +315,53 @@ func (p *process) announce() {
 	p.logger.Warn("credential source", slog.String("source", p.credentials.Describe()))
 }
 
+// errCredentials names a credential source this build cannot construct.
+var errCredentials = errors.New("credentials")
+
 // credentialSource builds the configured source. It returns nil when none is set.
 //
 //nolint:ireturn // delegating the constructor to the configured source is intentional
-func credentialSource(cfg *config.Config) (credential.Source, error) {
-	if cfg.Credentials.StaticFile == "" {
+func credentialSource(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (credential.Source, error) {
+	switch kind := cfg.CredentialSource(); kind {
+	case config.SourceNone:
 		return nil, nil //nolint:nilnil // no source is a posture, not a failure
+	case config.SourceStaticFile:
+		source, err := credential.LoadStaticFile(cfg.Credentials.StaticFile)
+		if err != nil {
+			return nil, fmt.Errorf("credentials: %w", err)
+		}
+		return source, nil
+	case config.SourceExchange:
+		return tokenExchange(cfg, deny, roots)
+	default:
+		return nil, fmt.Errorf("%w: %q is not a source this build reads", errCredentials, kind)
 	}
-	source, err := credential.LoadStaticFile(cfg.Credentials.StaticFile)
+}
+
+// tokenExchange builds the source that mints a credential per request
+// against the zone. The client secret is read here, once, so a rotated
+// secret takes effect on the next start. The projected workload token is
+// read on every exchange instead, because the kubelet rotates it under a
+// running process.
+func tokenExchange(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (*exchange.Source, error) {
+	var secret string
+	if cfg.Identity.ClientSecretFile != "" {
+		read, err := credential.ReadSecretFile(cfg.Identity.ClientSecretFile)
+		if err != nil {
+			return nil, fmt.Errorf("credentials: %w", err)
+		}
+		secret = read
+	}
+	source, err := exchange.New(exchange.Options{
+		ZoneURL:           cfg.Identity.ZoneURL,
+		ClientID:          cfg.Identity.ClientID,
+		ImpersonateUser:   cfg.Identity.Impersonate.User,
+		WorkloadTokenFile: cfg.Identity.WorkloadTokenFile,
+		ClientSecret:      secret,
+		Timeout:           cfg.Limits.ExchangeTimeout.Duration(),
+		Roots:             roots,
+		DenyAddr:          deny.DeniesAddr,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("credentials: %w", err)
 	}

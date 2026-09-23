@@ -385,12 +385,25 @@ func (s *Server) decideRequest(
 	if err := s.resolveCredential(ctx, *decision.Endpoint, fwd); err != nil {
 		return policy.Decision{
 			Verdict:  policy.VerdictDeny,
-			Reason:   policy.ReasonCredentialUnavailable,
+			Reason:   credentialReason(err),
 			Endpoint: decision.Endpoint,
 			Err:      err,
 		}
 	}
 	return decision
+}
+
+// credentialReason maps a source failure onto its denial reason. A source
+// says which class a failure is in, so nothing here reads a message.
+func credentialReason(err error) policy.Reason {
+	switch {
+	case errors.Is(err, credential.ErrAccessDenied):
+		return policy.ReasonAccessDenied
+	case errors.Is(err, credential.ErrExchangeFailed):
+		return policy.ReasonExchangeFailed
+	default:
+		return policy.ReasonCredentialUnavailable
+	}
 }
 
 // refuseRequestShape refuses a request the proxy cannot forward unchanged.
@@ -575,14 +588,16 @@ func statusFor(reason policy.Reason) int {
 	switch reason {
 	case policy.ReasonMalformedRequest, policy.ReasonNotAProxyRequest:
 		return http.StatusBadRequest
-	case policy.ReasonUpstreamFailed:
+	case policy.ReasonUpstreamFailed, policy.ReasonExchangeFailed:
+		// The proxy denies, and a dependency rather than the request is
+		// why. A retry can succeed.
 		return http.StatusBadGateway
 	case policy.ReasonCertificateUnavailable:
 		// The handshake fails before any request, so this reason reaches an
 		// audit record and never a response.
 		return http.StatusInternalServerError
 	case policy.ReasonDenyAlways, policy.ReasonNoMatchingEndpoint, policy.ReasonHostMismatch, policy.ReasonNoSNI,
-		policy.ReasonCredentialUnavailable:
+		policy.ReasonCredentialUnavailable, policy.ReasonAccessDenied:
 		return http.StatusForbidden
 	case policy.ReasonEndpointAllowed:
 		// An allow never reaches this function. The case is here because

@@ -49,7 +49,8 @@ by the hexadecimal SHA-256 digest of a document in RFC 8785 canonical JSON.
 the process enforces. The proxy computes it from the settings that decide an
 answer, in the form they take after every override and default: the endpoints,
 the cluster ranges, the deny list exceptions, the identity, the credential
-source, the upstream root files, and the platform deny list this build carries.
+source in force, the upstream root files, and the platform deny list this
+build carries.
 Two sidecars that answer every request alike write the same value, whatever
 document, flag or variable each one was given.
 
@@ -75,22 +76,43 @@ Every earlier example document continues to parse from
 
 ### `identity`
 
-The whole section is optional. When it exists, every key is required. The
-proxy applies these requirements and uses the values during token exchange.
-Both this section and `credentials.static_file` name a credential source. The
-proxy refuses a document that contains both.
+The whole section is optional. When it exists, the proxy mints the upstream
+credential for each allowed request with an RFC 8693 token exchange against
+the zone, impersonating `impersonate.user`. Both this section and
+`credentials.static_file` name a credential source. The proxy refuses a
+document that contains both.
 
 | Key | Variable | Description |
 |---|---|---|
-| `zone_url` | `EGRESS_PROXY_ZONE_URL` | The Keycard zone. Use an absolute `https` URL without user information. |
+| `zone_url` | `EGRESS_PROXY_ZONE_URL` | The Keycard zone. Use an absolute `https` URL without user information. RFC 8414 discovery runs against it, and the metadata must name it as the issuer. The proxy verifies the zone with the system roots and `tls.upstream_ca_files`, and refuses to dial an address on the platform deny list. |
 | `client_id` | `EGRESS_PROXY_CLIENT_ID` | The application credential ID from the catalog output. |
-| `workload_token_file` | `EGRESS_PROXY_WORKLOAD_TOKEN_FILE` | The absolute path of the projected ServiceAccount token. |
+| `workload_token_file` | `EGRESS_PROXY_WORKLOAD_TOKEN_FILE` | The absolute path of the projected ServiceAccount token. This build does not read one: it refuses to start when the identity names this key. |
+| `client_secret_file` | `EGRESS_PROXY_CLIENT_SECRET_FILE` | The absolute path of a file holding the application credential secret and nothing else. The proxy reads it once at start-up, so restart the process after a rotation. The file must be readable by its owner alone: the proxy refuses one with any group or other permission bit. |
 | `impersonate.user` | `EGRESS_PROXY_IMPERSONATE_USER` | The IAM user public ID for each exchange. The ServiceAccount has the same name, so a manifest sets this value from `spec.serviceAccountName`. |
 
+Exactly one of `workload_token_file` and `client_secret_file` authenticates
+the exchange, and the document must set exactly one. This build reads
+`client_secret_file` and refuses `workload_token_file`.
+
+A client secret authenticates with `client_secret_basic` and names no
+ServiceAccount, so a zone that accepts one permits impersonation on the
+strength of the secret alone. Bind the application credential to one user in
+the zone, and read the known limits in `docs/security-model.md` before you
+use this mechanism outside a test.
+
+Never write the secret itself into the document, which is a ConfigMap, into
+a flag, or into an environment variable. Only the path is a setting.
+
 An environment variable can provide one field for a document that contains
-the other fields. It can also provide all four fields for a document that
+the other fields. It can also provide every field for a document that
 contains none. The proxy rejects a partial identity supplied only by the
 environment.
+
+A request whose exchange the zone refuses on policy is denied with
+`access_denied` and answers 403. A request whose exchange did not complete,
+for any other reason, is denied with `exchange_failed` and answers 502,
+because the proxy does not know what the zone would have said. A request the
+endpoint list already denied makes no exchange at all.
 
 ### `listen`
 
@@ -143,6 +165,10 @@ start, and `/info` reports it as `credential_source`.
 |---|---|---|---|
 | `static_file` | unset | `--credential-static-file`, `EGRESS_PROXY_CREDENTIAL_STATIC_FILE` | A plain-text file that maps resources to credentials for tests and development. Use an absolute path that only its owner can read. The proxy refuses any group or other permission bit and refuses this setting with `identity`. |
 
+The other source is `identity`, which mints a credential per request against
+the zone. `config.digest` covers which source is in force, so two sidecars
+reading different sources never share it.
+
 The proxy reads the file once at start-up. Restart the process after a
 change. The file uses this format:
 
@@ -165,6 +191,7 @@ control character. A control character would split the request head.
 | `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections that the CONNECT listener accepts. Further accepts wait until a connection ends. |
 | `idle_timeout` | `5m` | `--idle-timeout`, `EGRESS_PROXY_IDLE_TIMEOUT` | The time before the proxy closes a connection that neither reads nor writes. The proxy applies this limit on the frontend, inside a tunnel, and on the upstream connection. It refuses a request head that has not arrived after 10 seconds. |
 | `response_header_timeout` | `30s` | `--response-header-timeout`, `EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT` | The time an upstream has to send a response head once the proxy writes the request. A slower upstream gets `upstream_failed`. This limit does not bound a body, so a server-sent event stream runs as long as it stays active. |
+| `exchange_timeout` | `10s` | `--exchange-timeout`, `EGRESS_PROXY_EXCHANGE_TIMEOUT` | The budget for one token exchange, discovery included. The dial and the TLS handshake to the zone carry five seconds each inside it. A request whose exchange spends the budget gets `exchange_failed`. This setting bounds a call and decides no answer, so it stays out of `config.digest`. |
 
 An absent setting takes the default, and so does a setting written as zero,
 because this schema reads zero as unset. A negative value is refused. Nothing
@@ -285,13 +312,16 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
+| `access_denied` | deny | request | The zone refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource. |
+| `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it answered with an error other than `access_denied`, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
 | `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and the tunnel carries no request. |
 
 A refusal carries its reason in the `X-Keycard-Deny-Reason` header. It carries
 the connection or request ID in `X-Keycard-Request-Id`. The proxy uses status
 403 for a policy refusal, 400 for a malformed or non-proxy request, and 502
-when the upstream fails. A refused handshake has no response that can carry a
+when a dependency fails: `upstream_failed` and `exchange_failed` both answer
+502, because a retry can succeed. A refused handshake has no response that can carry a
 header. The client sees a TLS failure, and the record names the reason.
 
 The proxy writes JSON logs to stderr. These logs contain no decision. The
