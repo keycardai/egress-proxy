@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -20,7 +21,7 @@ const settingsName = "settings"
 // settingsSchema is the version of the JSON this subcommand prints. A
 // consumer keys on it. Add a field without changing it, and raise it when a
 // field changes meaning or goes away.
-const settingsSchema = 1
+const settingsSchema = 2
 
 // errSettings is a settings surface this command refuses to publish.
 var errSettings = errors.New(settingsName)
@@ -46,8 +47,10 @@ type settingEntry struct {
 	// Flag is the long option, without its leading dashes.
 	Flag  string `json:"flag"`
 	Usage string `json:"usage"`
-	// Default is null for a setting the parser leaves empty.
-	Default *string `json:"default"`
+	// Default is the value the parser applies, and null for a setting it
+	// leaves empty. A duration is a JSON number of whole seconds, so a
+	// consumer compares it arithmetically. Every other default is a string.
+	Default any `json:"default"`
 }
 
 // probeSurface is how a manifest probes this binary.
@@ -149,7 +152,7 @@ func settings() (*settingsReport, error) {
 }
 
 // describeFlag reads one flag's name, variable and usage.
-func describeFlag(flag cli.Flag, defaults map[string]string) (settingEntry, error) {
+func describeFlag(flag cli.Flag, defaults map[string]any) (settingEntry, error) {
 	name := flag.Names()[0]
 	documented, ok := flag.(cli.DocGenerationFlag)
 	if !ok {
@@ -162,7 +165,7 @@ func describeFlag(flag cli.Flag, defaults map[string]string) (settingEntry, erro
 	}
 	entry := settingEntry{Env: vars[0], Flag: name, Usage: documented.GetUsage()}
 	if value, has := defaults[name]; has {
-		entry.Default = &value
+		entry.Default = value
 	}
 	return entry, nil
 }
@@ -173,23 +176,52 @@ func describeFlag(flag cli.Flag, defaults map[string]string) (settingEntry, erro
 const defaultDocument = "version: 1\nsandbox:\n  id: settings\nendpoints:\n  - host: example.com\n"
 
 // parserDefaults maps a flag to the value the document parser applies when
-// the document, the variable and the flag all leave the setting out. A flag
-// this map does not name has no default, and the report says so.
-func parserDefaults() (map[string]string, error) {
+// the document, the variable and the flag all leave the setting out.
+//
+// Every flag is in this map or in flagsWithNoDefault, and never in both.
+// TestEverySettingSaysWhetherItHasADefault holds that, so a flag added to
+// the flag set fails the build until its author says which it is. A flag
+// missing from both would publish "default": null, and a consumer reads
+// that as a setting the parser leaves empty.
+func parserDefaults() (map[string]any, error) {
 	cfg, err := config.Parse([]byte(defaultDocument), config.Overrides{})
 	if err != nil {
 		return nil, fmt.Errorf("%w: read the defaults: %w", errSettings, err)
 	}
-	return map[string]string{
+	return map[string]any{
 		"connect":                 cfg.Listen.Connect,
 		"admin":                   cfg.Listen.Admin,
 		"netsetup-receipt":        cfg.Netsetup.Receipt,
 		"ca-out-dir":              cfg.CA.OutDir,
-		"leaf-ttl":                cfg.CA.LeafTTL.Duration().String(),
+		"leaf-ttl":                seconds(cfg.CA.LeafTTL.Duration()),
 		"cache-size":              strconv.Itoa(cfg.CA.CacheSize),
 		"max-connections":         strconv.Itoa(cfg.Limits.MaxConnections),
-		"idle-timeout":            cfg.Limits.IdleTimeout.Duration().String(),
-		"response-header-timeout": cfg.Limits.ResponseHeaderTimeout.Duration().String(),
-		"exchange-timeout":        cfg.Limits.ExchangeTimeout.Duration().String(),
+		"idle-timeout":            seconds(cfg.Limits.IdleTimeout.Duration()),
+		"response-header-timeout": seconds(cfg.Limits.ResponseHeaderTimeout.Duration()),
+		"exchange-timeout":        seconds(cfg.Limits.ExchangeTimeout.Duration()),
 	}, nil
+}
+
+// flagsWithNoDefault are the settings the document parser leaves empty. The
+// report publishes null for each of them, which says the setting is unset
+// until a document, a variable or a flag fills it.
+var flagsWithNoDefault = map[string]bool{
+	"config":                 true,
+	"sandbox-id":             true,
+	"zone-url":               true,
+	"client-id":              true,
+	"workload-token-file":    true,
+	"impersonate-user":       true,
+	"transparent-port":       true,
+	"ca-state-dir":           true,
+	"client-secret-file":     true,
+	"credential-static-file": true,
+	"upstream-ca-file":       true,
+}
+
+// seconds is a duration as the report publishes it. A consumer compares a
+// number arithmetically, where Go's "24h0m0s" needs a parser the chart lint
+// reading this does not have.
+func seconds(d time.Duration) int64 {
+	return int64(d / time.Second)
 }

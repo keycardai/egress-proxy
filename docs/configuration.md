@@ -154,8 +154,9 @@ admin surface.
 `egress-proxy settings` prints the settings this binary accepts as JSON,
 with no document and no socket: every variable in the table above, the flag
 that fills the same setting, and the default the parser applies. It also
-prints the probe routes and the netsetup defaults a pod has to match.
-`docs/containers.md` says what reads it.
+prints the probe routes and the netsetup defaults a pod has to match. A
+duration default is a whole number of seconds, so `--leaf-ttl` publishes
+`86400`. `docs/containers.md` says what reads it.
 
 ### `netsetup`
 

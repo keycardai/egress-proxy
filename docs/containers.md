@@ -135,10 +135,13 @@ so a chart lint can read them out of the image it is about to deploy:
 
 Each entry names the `EGRESS_PROXY_` variable, the flag that fills the same
 setting, what it sets, and the value the document parser applies when
-neither is set. The report also names the probe subcommand and its routes,
-and the netsetup defaults above. `schema` is the version of the shape: a
-field is added without changing it, and a field that changes meaning or
-goes away raises it.
+neither is set. A duration default is a JSON number of whole seconds, so
+`--leaf-ttl` publishes `86400` rather than a string a consumer has to
+parse. Every other default is a string, and `null` says the parser leaves
+the setting empty. The report also names the probe subcommand and its
+routes, and the netsetup defaults above. `schema` is the version of the
+shape: a field is added without changing it, and a field that changes
+meaning or goes away raises it.
 
 A flag wins over its variable, and both win over the document. The
 endpoints and the `policy` section come from the document alone and have no

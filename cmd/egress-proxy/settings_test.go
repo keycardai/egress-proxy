@@ -77,23 +77,26 @@ func TestSettingsPublishWhatADeploymentHasToMatch(t *testing.T) {
 		byFlag[entry.Flag] = entry
 	}
 	tests := []struct {
-		flag        string
-		wantEnv     string
-		wantDefault string
-		// noDefault is a setting the parser leaves empty.
-		noDefault bool
+		flag    string
+		wantEnv string
+		// wantDefault is the published default, decoded from JSON: nil for
+		// a setting the parser leaves empty, a float64 for a duration in
+		// seconds, a string otherwise.
+		wantDefault any
 	}{
-		{flag: "config", wantEnv: config.EnvPrefix + "CONFIG", noDefault: true},
+		{flag: "config", wantEnv: config.EnvPrefix + "CONFIG", wantDefault: nil},
 		{flag: "connect", wantEnv: config.EnvPrefix + "CONNECT", wantDefault: config.DefaultConnect},
 		{flag: "admin", wantEnv: config.EnvPrefix + "ADMIN", wantDefault: config.DefaultAdmin},
-		{flag: "transparent-port", wantEnv: config.EnvPrefix + "TRANSPARENT_PORT", noDefault: true},
+		{flag: "transparent-port", wantEnv: config.EnvPrefix + "TRANSPARENT_PORT", wantDefault: nil},
 		{
 			flag: "netsetup-receipt", wantEnv: config.EnvPrefix + "NETSETUP_RECEIPT",
 			wantDefault: netsetup.DefaultReceiptPath,
 		},
 		{flag: "ca-out-dir", wantEnv: config.EnvPrefix + "CA_OUT_DIR", wantDefault: config.DefaultCAOutDir},
-		{flag: "ca-state-dir", wantEnv: config.EnvPrefix + "CA_STATE_DIR", noDefault: true},
-		{flag: "exchange-timeout", wantEnv: config.EnvPrefix + "EXCHANGE_TIMEOUT", wantDefault: "10s"},
+		{flag: "ca-state-dir", wantEnv: config.EnvPrefix + "CA_STATE_DIR", wantDefault: nil},
+		{flag: "leaf-ttl", wantEnv: config.EnvPrefix + "LEAF_TTL", wantDefault: float64(86400)},
+		{flag: "idle-timeout", wantEnv: config.EnvPrefix + "IDLE_TIMEOUT", wantDefault: float64(300)},
+		{flag: "exchange-timeout", wantEnv: config.EnvPrefix + "EXCHANGE_TIMEOUT", wantDefault: float64(10)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.flag, func(t *testing.T) {
@@ -101,12 +104,39 @@ func TestSettingsPublishWhatADeploymentHasToMatch(t *testing.T) {
 			entry, ok := byFlag[tc.flag]
 			require.True(t, ok, "the report has no --%s", tc.flag)
 			assert.Equal(t, tc.wantEnv, entry.Env, "the variable that fills --%s", tc.flag)
-			if tc.noDefault {
-				assert.Nil(t, entry.Default, "--%s has no default and the report must say so", tc.flag)
-				return
-			}
-			require.NotNil(t, entry.Default, "--%s has a default the report left out", tc.flag)
-			assert.Equal(t, tc.wantDefault, *entry.Default, "the default for --%s", tc.flag)
+			assert.Equal(t, tc.wantDefault, entry.Default, "the default for --%s", tc.flag)
 		})
+	}
+}
+
+// TestEverySettingSaysWhetherItHasADefault is what keeps the published
+// default honest. parserDefaults is written down, so a flag left out of it
+// would publish "default": null and a chart lint would read the setting as
+// unset when the parser fills it. Every flag is in parserDefaults or in
+// flagsWithNoDefault, and a new flag fails here until its author picks one.
+func TestEverySettingSaysWhetherItHasADefault(t *testing.T) {
+	t.Parallel()
+	defaults, err := parserDefaults()
+	require.NoError(t, err, "parserDefaults")
+
+	var opts flags
+	classified := map[string]bool{}
+	for _, flag := range flagSet(&opts) {
+		name := flag.Names()[0]
+		_, applied := defaults[name]
+		classified[name] = true
+		switch {
+		case applied && flagsWithNoDefault[name]:
+			assert.Fail(t, "--"+name+" is in parserDefaults and in flagsWithNoDefault, and a flag is in one")
+		case !applied && !flagsWithNoDefault[name]:
+			assert.Fail(t, "--"+name+" is in neither parserDefaults nor flagsWithNoDefault; "+
+				"add it to parserDefaults with the value the parser applies, or to flagsWithNoDefault")
+		}
+	}
+	for name := range defaults {
+		assert.True(t, classified[name], "parserDefaults names %q and the flag set has no such flag", name)
+	}
+	for name := range flagsWithNoDefault {
+		assert.True(t, classified[name], "flagsWithNoDefault names %q and the flag set has no such flag", name)
 	}
 }
