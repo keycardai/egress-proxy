@@ -1,0 +1,46 @@
+# A response that keeps sending is not idle. With the idle timeout set to one
+# second, an event stream that runs for two seconds arrives whole, and its
+# audit record reports a completed response.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+# The upstream binds a port the script cannot know in advance, and an
+# endpoint names one port, so the document is written with $UPSTREAM_PORT
+# and expanded before the proxy reads it.
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt
+env EGRESS_PROXY_IDLE_TIMEOUT=1s
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# Twenty events, one every 100 milliseconds, all of them through a proxy
+# whose idle timeout is shorter than the stream.
+exec curl -sS --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/stream
+stdout -count=20 '^data: active$'
+
+sigterm
+wait proxy
+
+audit stdout scope=request request.path=/stream decision.verdict=allow decision.reason=endpoint_allowed outcome.status=200
+! audit stdout scope=request request.path=/stream outcome.error~.
+
+-- config.yaml --
+version: 1
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost
+    port: $UPSTREAM_PORT

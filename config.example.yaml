@@ -1,0 +1,59 @@
+# The egress proxy configuration document. docs/configuration.md describes
+# every key. Keys with a default are shown commented out at their default.
+#
+# The sandbox, identity, listen, ca, tls and limits keys may also come from
+# the environment (EGRESS_PROXY_<KEY>) or a flag, which win over this file.
+# The endpoints and the policy section come from this file alone.
+version: 1
+
+sandbox:
+  id: "sbx-igmua2g0"                    # EGRESS_PROXY_SANDBOX_ID; attribution on every audit record
+
+identity:
+  zone_url: "https://acme.keycard.cloud"                 # EGRESS_PROXY_ZONE_URL
+  client_id: "<application credential id>"              # EGRESS_PROXY_CLIENT_ID
+  workload_token_file: "/var/run/secrets/keycard/token" # EGRESS_PROXY_WORKLOAD_TOKEN_FILE
+  impersonate:
+    user: "igmua2g0fwapl21qll7tczdw7t"  # EGRESS_PROXY_IMPERSONATE_USER; the ServiceAccount has the same name
+
+# listen:
+#   connect: "127.0.0.1:3128"           # EGRESS_PROXY_CONNECT
+#   admin: "/run/egress/admin.sock"     # EGRESS_PROXY_ADMIN; a Unix socket, never a port
+# ca:
+#   out_dir: "/shared-ca"               # EGRESS_PROXY_CA_OUT_DIR; receives ca.crt and nothing else
+#   state_dir: ""                       # EGRESS_PROXY_CA_STATE_DIR; a memory-backed volume holding the CA across restarts
+#   leaf_ttl: "24h"                     # EGRESS_PROXY_LEAF_TTL
+#   cache_size: 1024                    # EGRESS_PROXY_CACHE_SIZE
+# tls:
+#   upstream_ca_files: []               # EGRESS_PROXY_UPSTREAM_CA_FILES, comma-separated
+# limits:
+#   max_connections: 1024               # EGRESS_PROXY_MAX_CONNECTIONS
+#   idle_timeout: "5m"                  # EGRESS_PROXY_IDLE_TIMEOUT
+#   response_header_timeout: "30s"      # EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT
+
+policy:
+  cluster_cidrs: ["10.42.0.0/16", "10.43.0.0/16"]   # joined to the platform deny list
+  deny_list_exceptions: []                          # announced on every start; never 169.254.169.254
+
+endpoints:
+  - host: "api.github.com"
+    resource: "https://api.github.com/"             # the exchange's resource parameter
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GITHUB_TOKEN
+  - host: "github.com"                              # git over HTTPS
+    resource: "https://api.github.com/"
+    credential:
+      placement: {kind: basic, user: x-access-token}
+      env: GITHUB_TOKEN
+  - host: "openrouter.ai"
+    path_prefix: "/api/v1/"
+    resource: "https://openrouter.ai/api/v1"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: OPENROUTER_API_KEY
+  - host: "pypi.org"                                # allowed, no credential
+  - host: "files.pythonhosted.org"
+  - host: "registry.internal"                       # a second port is a second endpoint
+    port: 5000
+    path_prefix: "/v2/"

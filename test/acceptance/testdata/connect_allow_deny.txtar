@@ -1,0 +1,144 @@
+# The CONNECT frontend end to end with the built binary: a listed host is
+# reached through HTTPS_PROXY by curl, an unlisted host and a deny-listed
+# address are refused at the CONNECT, a request inside an allowed tunnel is
+# refused on its path, its Host header and its credential, the refused
+# destinations never reach the upstream, the admin socket answers, SIGTERM
+# stops the proxy cleanly, and every decision has an audit record on stdout.
+#
+# The per-instance settings reach the proxy through the environment, as a
+# manifest sets them. The endpoints and the policy come from the document.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+# A mounted emptyDir arrives at mode 0777, and the proxy binds the admin
+# socket in it. The directory mode is what keeps another container in the
+# pod off the socket, so the proxy sets it before it binds.
+chmod 0777 $ADMIN_DIR
+
+# The upstream binds a port the script cannot know in advance, and an
+# endpoint names one port, so the document is written with $UPSTREAM_PORT and
+# expanded before the proxy reads it.
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+# The CA output directory holds the certificate and nothing else.
+exists shared-ca/ca.crt
+! exists shared-ca/ca.key
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# An allowed host is reached through HTTPS_PROXY.
+exec curl -sS --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello
+stdout '^hello from upstream /hello$'
+
+# An unlisted host is refused at the CONNECT. curl fails and reports the
+# CONNECT status.
+! exec curl -sS -o /dev/null -w '%{http_connect}' https://denied.invalid/
+stdout '^403$'
+
+# A deny-listed address is refused at the CONNECT.
+! exec curl -sS -o /dev/null -w '%{http_connect}' https://169.254.169.254/latest/meta-data/
+stdout '^403$'
+
+# An endpoint names one port on its host. The same host on another port is a
+# destination the document does not declare, so the CONNECT is refused.
+! exec curl -sS -o /dev/null -w '%{http_connect}' https://localhost/
+stdout '^403$'
+
+# Inside an allowed tunnel the request decision runs again, on the path, the
+# Host header and the endpoint's credential. Each refusal answers over the
+# tunnel, so curl reports the response status rather than the CONNECT status.
+exec curl -sS -o /dev/null -w '%{http_code}' --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/secret
+stdout '^403$'
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null https://localhost:$UPSTREAM_PORT/secret
+stdout 'X-Keycard-Deny-Reason: no_matching_endpoint'
+stdout 'X-Keycard-Request-Id: '
+
+# The Host header must name the SNI and the port the tunnel was opened for.
+exec curl -sS -o /dev/null -w '%{http_code}' --cacert shared-ca/ca.crt -H 'Host: other.example' https://localhost:$UPSTREAM_PORT/hello
+stdout '^403$'
+
+# An endpoint that names a credential is refused while no identity is
+# configured, so the placeholder the workload holds never reaches upstream.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null https://localhost:$UPSTREAM_PORT/needs-credential
+stdout 'X-Keycard-Deny-Reason: credential_unavailable'
+
+# The decision reads the escaped path, the bytes the upstream receives.
+# Escaped dot segments are refused, because an upstream that decodes first
+# would read them as a path outside the prefix. curl sends the target as
+# written with --path-as-is.
+exec curl -sS -o /dev/null -w '%{http_code}' --path-as-is --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello/%2e%2e/secret
+stdout '^400$'
+
+# The socket directory reaches mode 0700 whatever mode it was mounted with.
+[exec:ls] exec ls -ld $ADMIN_DIR
+[exec:ls] stdout '^drwx------'
+
+# The admin socket answers.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/healthz
+stdout '^ok$'
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"sandbox_id": "acceptance"'
+stdout '"overridden": \['
+# The exceptions this document makes are reportable, because they remove
+# platform ranges that would otherwise be denied.
+stdout '"deny_list_exceptions": \[\s*"127.0.0.0/8",\s*"::1/128"\s*\]'
+
+# The refused destinations never reached the upstream.
+grep -count=1 '^request ' upstream/requests.log
+grep 'request GET /hello host=localhost:' upstream/requests.log
+
+# SIGTERM stops the proxy cleanly: exit 0, the stop is logged, and the admin
+# socket is unlinked.
+sigterm
+wait proxy
+! exists $ADMIN_DIR/admin.sock
+stderr '"msg":"stopping"'
+stderr '"overridden":\["ca.out_dir","listen.admin","listen.connect","sandbox.id","tls.upstream_ca_files"\]'
+
+# Every decision has an audit record, stamped with the sandbox id and both
+# digests: the document as mounted, and the settings in force.
+audit stdout scope=connection destination.host=localhost decision.verdict=allow decision.reason=endpoint_allowed
+! audit stdout scope=connection decision.endpoint~.
+audit stdout scope=request destination.sni=localhost request.method=GET request.path=/hello decision.reason=endpoint_allowed decision.endpoint=localhost:$UPSTREAM_PORT/hello outcome.status=200
+audit stdout scope=connection destination.host=denied.invalid decision.verdict=deny decision.reason=no_matching_endpoint
+audit stdout scope=connection destination.host=169.254.169.254 decision.verdict=deny decision.reason=deny_always
+audit stdout scope=connection destination.host=localhost destination.port=443 decision.verdict=deny decision.reason=no_matching_endpoint
+
+# A request refused inside a tunnel is recorded at request scope, with the
+# connection that carried it and the reason the workload was told.
+audit stdout scope=request request.path=/secret decision.verdict=deny decision.reason=no_matching_endpoint
+audit stdout scope=request request.path=/hello/%2e%2e/secret decision.verdict=deny decision.reason=malformed_request
+audit stdout scope=request request.path=/hello request.host=other.example decision.verdict=deny decision.reason=host_mismatch
+audit stdout scope=request request.path=/needs-credential decision.verdict=deny decision.reason=credential_unavailable decision.endpoint=localhost:$UPSTREAM_PORT/needs-credential
+audit -all stdout sandbox_id=acceptance
+audit -all stdout document.digest~^sha256:[0-9a-f]{64}$
+audit -all stdout config.digest~^sha256:[0-9a-f]{64}$
+
+-- config.yaml --
+version: 1
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /hello
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /needs-credential
+    credential:
+      env: UPSTREAM_TOKEN
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

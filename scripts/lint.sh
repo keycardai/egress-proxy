@@ -18,5 +18,8 @@ if [[ $# -gt 0 && -d $1 ]]; then
 fi
 
 cd "$dir"
-go tool -modfile="$repo_root/go.mod" golangci-lint run --config "$repo_root/.golangci.yml" ./... "$@"
+# The acceptance tests are behind a build tag; naming it here keeps them
+# under the same lint as everything else.
+go tool -modfile="$repo_root/go.mod" golangci-lint run --config "$repo_root/.golangci.yml" \
+	--build-tags acceptance ./... "$@"
 echo "lint: OK ($dir)"

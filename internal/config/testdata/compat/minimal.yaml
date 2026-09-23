@@ -1,0 +1,7 @@
+# The smallest document that starts: a sandbox id and one endpoint. Every
+# process setting takes its default.
+version: 1
+sandbox:
+  id: sbx-minimal
+endpoints:
+  - host: pypi.org

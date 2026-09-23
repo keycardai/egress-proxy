@@ -70,8 +70,11 @@ linters:
         linters:
           - gosec
         text: (G204|G304|G306)
+      # A table test repeats fixture strings and branches once per
+      # assertion, so the constant and complexity rules have nothing to say
+      # about it.
       - path: _test\.go
-        linters: [funlen, varnamelen]
+        linters: [funlen, varnamelen, cyclop, goconst]
 
 issues:
   max-issues-per-linter: 0

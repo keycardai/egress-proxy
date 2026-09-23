@@ -1,9 +1,11 @@
 // Package gates proves that each CI gate rejects what it exists to reject.
-// Every gate script under scripts/ accepts a module directory, and each case
-// points a script at a fixture module under testdata that must fail it, with
-// the message a developer would see. A control case per gate shows the gate
-// passes the same fixture once the offending input is removed, so a gate that
-// fails everything cannot pass this test.
+// Each case points a gate script at a fixture module under testdata that
+// must fail it, and asserts the message a developer sees. Every script this
+// test runs takes that directory as its first argument.
+//
+// The lint gate also has a control case: the same fixture passes without the
+// gate_negative build tag, which leaves the offending file out of the build.
+// A gate that failed everything could not pass that case.
 package gates_test
 
 import (
@@ -11,8 +13,10 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // repoRoot is the repository root relative to this package directory.
@@ -37,10 +41,10 @@ func TestGates(t *testing.T) {
 		script string
 		// fixture is the module directory under testdata the gate runs over.
 		fixture string
-		// args are passed to the gate after the directory.
+		// args go to the gate after the directory.
 		args []string
 		// wantExit is the exit code the gate must return. Every gate exits
-		// 0 when it passes; govulncheck exits 3 on a finding and
+		// 0 when it passes. govulncheck exits 3 on a finding, and
 		// golangci-lint and go-licenses exit 1.
 		wantExit int
 		// wantOutput are substrings that must all appear in the combined
@@ -88,7 +92,7 @@ func TestGates(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Each case runs a tool over its own fixture module; the go build
+			// Each case runs a tool over its own fixture module. The go build
 			// cache and the tool caches are safe for concurrent use.
 			t.Parallel()
 			script := filepath.Join(repoRoot, "scripts", tt.script)
@@ -107,15 +111,11 @@ func TestGates(t *testing.T) {
 			case errors.As(err, &exitErr):
 				exit = exitErr.ExitCode()
 			default:
-				t.Fatalf("running %s: %v\n%s", tt.script, err, out.String())
+				require.NoError(t, err, "running %s\n%s", tt.script, out.String())
 			}
-			if exit != tt.wantExit {
-				t.Errorf("%s exited %d, want %d\n%s", tt.script, exit, tt.wantExit, out.String())
-			}
+			assert.Equal(t, tt.wantExit, exit, "%s exit status\n%s", tt.script, out.String())
 			for _, want := range tt.wantOutput {
-				if !strings.Contains(out.String(), want) {
-					t.Errorf("%s output lacks %q\n%s", tt.script, want, out.String())
-				}
+				assert.Contains(t, out.String(), want, "%s output", tt.script)
 			}
 		})
 	}
