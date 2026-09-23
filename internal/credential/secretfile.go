@@ -7,15 +7,14 @@ import (
 	"strings"
 )
 
-// maxSecretFileSize bounds what a secret file can hold.
+// maxSecretFileSize limits the size of a secret file.
 const maxSecretFileSize = 1 << 20
 
 var errSecretFile = errors.New("invalid secret file")
 
-// CheckSecretFile refuses a path that cannot safely hold credential
-// material: anything that is not a regular file, a file any group or other
-// user can read, and a file larger than a megabyte. kind names the file in
-// the message.
+// CheckSecretFile rejects a path that cannot safely hold credential material.
+// It rejects non-regular files, files that a group or another user can read,
+// and files larger than a megabyte. kind names the file in the error.
 func CheckSecretFile(kind error, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -33,12 +32,11 @@ func CheckSecretFile(kind error, path string) error {
 	return nil
 }
 
-// ReadSecretFile reads a file holding one secret and nothing else. It
-// applies the CheckSecretFile rules, then returns the contents with
-// surrounding whitespace removed, because an editor leaves a trailing
-// newline and a secret never ends in one.
+// ReadSecretFile reads a file that holds one secret. It applies the
+// CheckSecretFile rules and removes surrounding whitespace from the contents.
+// Editors often add a trailing newline.
 //
-// The error NEVER quotes the contents.
+// The error never includes the contents.
 func ReadSecretFile(path string) (string, error) {
 	if err := CheckSecretFile(errSecretFile, path); err != nil {
 		return "", err

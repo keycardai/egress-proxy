@@ -17,7 +17,7 @@ import (
 // override the parser applies. It sets the environment, so it does not run
 // in parallel.
 func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltest // t.Setenv
-	for name, value := range map[string]string{ //nolint:gosec // G101: paths to secrets, not secrets
+	for name, value := range map[string]string{ //nolint:gosec // G101: paths, not secret values
 		"CONFIG":                  "/env/config.yaml",
 		"SANDBOX_ID":              "sbx-env",
 		"ZONE_URL":                "https://env.example",
@@ -48,7 +48,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 	})
 	require.NoError(t, cmd.Run(t.Context(), []string{"egress-proxy", "--connect", "127.0.0.1:2"}), "Run")
 
-	want := config.Overrides{ //nolint:gosec // G101: paths to secrets, not secrets
+	want := config.Overrides{ //nolint:gosec // G101: paths, not secret values
 		SandboxID: "sbx-env", ZoneURL: "https://env.example", ClientID: "env-client",
 		WorkloadTokenFile: "/env/token", ImpersonateUser: "env-user",
 		// The flag wins over EGRESS_PROXY_CONNECT.

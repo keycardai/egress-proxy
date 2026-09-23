@@ -1,8 +1,7 @@
-# The impersonating token exchange end to end with the built binary: the
-# proxy mints a credential per request against the zone, writes it at the
-# placement, records a zone refusal as access_denied and an exchange that
-# did not complete as exchange_failed, and makes no exchange at all for a
-# request the endpoint list already denies.
+# The built binary uses an impersonating token exchange. It mints a credential
+# per request, writes it at the configured placement, records zone refusals as
+# access_denied, records incomplete exchanges as exchange_failed, and skips
+# the exchange for a request that the endpoint list denies.
 #
 # The zone here is the fixture in test/fakeas. The real zone is exercised by
 # the cluster lane.
@@ -14,16 +13,16 @@ fakeas zone https://granted.example/=zone-issued-sekrit
 freeport PROXY_PORT
 shortdir ADMIN_DIR
 
-# A mounted emptyDir arrives at mode 0777, and the proxy binds the admin
-# socket in it. The directory mode is what keeps another container in the
-# pod off the socket, so the proxy sets it before it binds.
+# A mounted emptyDir has mode 0777, and the proxy binds the admin socket in
+# it. The proxy sets the directory mode before it binds the socket so other
+# containers in the pod cannot use it.
 chmod 0777 $ADMIN_DIR
 
 # The proxy refuses a client secret file that anyone but its owner can read.
 chmod 0600 client-secret
 
-# The upstream and the zone each bind a port the script cannot know in
-# advance, and the document names both.
+# The upstream and zone choose ports at run time. The document names both
+# ports.
 expand config.yaml
 
 env EGRESS_PROXY_CONFIG=config.yaml
@@ -39,37 +38,36 @@ waitport 127.0.0.1:$PROXY_PORT
 
 env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
 
-# The admin socket names the exchange, the zone and the impersonated user,
-# and carries neither the client secret nor an issued credential.
+# The admin socket names the exchange, zone, and impersonated user. It carries
+# neither the client secret nor an issued credential.
 exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
 stdout '"credential_source": "a Keycard token exchange at https://localhost:'
 stdout 'impersonating igmua2g0fwapl21qll7tczdw7t'
 stdout 'authenticated by a client secret'
 ! stdout 'acceptance-client-secret'
 
-# An endpoint whose resource the zone grants: the exchange runs and the
-# credential it issued replaces the placeholder the workload sent.
+# The zone grants this endpoint resource. The exchange runs, and its
+# credential replaces the placeholder that the workload sent.
 exec curl -sS --cacert shared-ca/ca.crt -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/granted/repos
 stdout '^hello from upstream /granted/repos$'
 
-# An endpoint whose resource no policy grants: the zone answers
-# access_denied and the request never reaches the upstream.
+# No zone policy grants this endpoint resource. The zone answers
+# access_denied, and the request never reaches the upstream.
 exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
 stdout '^403$'
 
-# A path no endpoint covers is denied before any exchange, so a denied
-# request costs the zone nothing. The count below proves it.
+# The proxy denies this path before an exchange. The zone receives no request.
+# The count below proves it.
 exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/unlisted/thing
 stdout '^403$'
 
-# The upstream received the granted request carrying the issued credential,
-# and nothing else.
+# The upstream received only the granted request with the issued credential.
 grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-issued-sekrit"' upstream/requests.log
 ! grep '/refused/thing' upstream/requests.log
 ! grep '/unlisted/thing' upstream/requests.log
 grep -count=1 '^request ' upstream/requests.log
 
-# The zone saw exactly the two exchanges the two matched endpoints made.
+# The two matched endpoints made exactly two exchanges at the zone.
 grep 'exchange client=acceptance-app-credential subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
 grep 'exchange client=acceptance-app-credential subject=igmua2g0fwapl21qll7tczdw7t resource=https://refused.example/ error="access_denied"' zone/requests.log
 grep -count=2 '^exchange ' zone/requests.log
@@ -77,25 +75,24 @@ grep -count=2 '^exchange ' zone/requests.log
 sigterm
 wait proxy
 
-# The process announces the exchange on every start, without the secret.
+# The process announces the exchange on every start without the secret.
 stderr '"msg":"credential source"'
 stderr 'a Keycard token exchange at https://localhost:'
 ! stderr 'acceptance-client-secret'
 
-# Each decision has a record, and the two failure classes are two reasons.
+# Each decision has a record. The two failure classes have separate reasons.
 audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
 audit stdout scope=request request.path=/refused/thing decision.verdict=deny decision.reason=access_denied decision.endpoint=localhost:$UPSTREAM_PORT/refused/
 audit stdout scope=request request.path=/unlisted/thing decision.verdict=deny decision.reason=no_matching_endpoint
 
-# No credential and no secret reaches the audit stream or the log.
+# The audit stream and log contain no credential or secret.
 ! stdout 'zone-issued-sekrit'
 ! stdout 'acceptance-client-secret'
 ! stderr 'zone-issued-sekrit'
 ! stderr 'acceptance-client-secret'
 
-# A zone that answers nothing is exchange_failed, not access_denied: the
-# proxy does not know what the zone would have said. A second proxy points
-# at a port nothing listens on.
+# A zone that answers nothing produces exchange_failed. The proxy does not
+# know what the zone would have said. A second proxy points to an unused port.
 freeport DEAD_PROXY_PORT
 freeport DEAD_ZONE_PORT
 shortdir DEAD_ADMIN_DIR

@@ -45,7 +45,7 @@ const (
 	// DefaultResponseHeaderTimeout bounds the wait for an upstream response
 	// head. It does not bound a body, so a streamed response is unaffected.
 	DefaultResponseHeaderTimeout = 30 * time.Second
-	// DefaultExchangeTimeout bounds one token exchange, discovery included.
+	// DefaultExchangeTimeout limits one token exchange, including discovery.
 	DefaultExchangeTimeout = 10 * time.Second
 
 	// Version is the only document version this build reads.
@@ -105,24 +105,24 @@ type Credentials struct {
 	StaticFile string `json:"static_file"`
 }
 
-// CredentialSourceKind names the source a process reads a credential from.
-// A record has to say which source answered, so a process reads from one.
+// CredentialSourceKind names the credential source that a process reads.
+// A record names the source that answered.
 type CredentialSourceKind string
 
 // The credential source kinds.
 const (
-	// SourceNone means the configuration names no source. Every endpoint
-	// that names a credential denies with credential_unavailable.
+	// SourceNone means that the configuration names no source. An endpoint
+	// that names a credential returns credential_unavailable.
 	SourceNone CredentialSourceKind = "none"
-	// SourceStaticFile reads every credential from credentials.static_file.
+	// SourceStaticFile reads credentials from credentials.static_file.
 	SourceStaticFile CredentialSourceKind = "static_file"
-	// SourceExchange mints a credential per request with a token exchange
+	// SourceExchange mints a credential for each request with a token exchange
 	// against identity.zone_url.
 	SourceExchange CredentialSourceKind = "exchange"
 )
 
-// CredentialSource names the source in force. Validation refuses a
-// configuration that names two, so the order here decides nothing.
+// CredentialSource names the effective source. Validation requires that only
+// one is configured.
 func (c *Config) CredentialSource() CredentialSourceKind {
 	switch {
 	case c.Credentials.StaticFile != "":
@@ -143,17 +143,14 @@ type Sandbox struct {
 // authority with which the egress proxy authenticates with a Keycard zone and
 // performs a token exchange on the impersonated user's behalf.
 // Exactly one of WorkloadTokenFile and ClientSecretFile authenticates the
-// exchange. They carry different authority: the zone reads a ServiceAccount
-// subject out of the workload token and can tie it to one user, and it
-// reads nothing of the kind out of a secret.
+// exchange. A workload token lets the zone read a ServiceAccount subject. A
+// client secret carries no ServiceAccount subject.
 type Identity struct {
 	ZoneURL           string `json:"zone_url"`
 	ClientID          string `json:"client_id"`
 	WorkloadTokenFile string `json:"workload_token_file"`
-	// ClientSecretFile holds the application credential's secret and
-	// nothing else. The secret is never written into the document, which is
-	// a ConfigMap, and never into a flag or a variable, which a process
-	// listing shows.
+	// ClientSecretFile holds the application credential secret. The proxy
+	// never writes the secret to the document, a flag, or a variable.
 	ClientSecretFile string      `json:"client_secret_file"`
 	Impersonate      Impersonate `json:"impersonate"`
 }
@@ -202,8 +199,8 @@ type Limits struct {
 	// head once the request is written. It does not bound the body, so a
 	// streamed response runs as long as it stays active.
 	ResponseHeaderTimeout Duration `json:"response_header_timeout"`
-	// ExchangeTimeout bounds one token exchange, discovery included. A
-	// request whose exchange spends it denies with exchange_failed.
+	// ExchangeTimeout limits one token exchange, including discovery. A
+	// request that exceeds it returns exchange_failed.
 	ExchangeTimeout Duration `json:"exchange_timeout"`
 }
 
@@ -391,13 +388,11 @@ type decisionInputs struct {
 	DenyList           string           `json:"deny_list"`
 }
 
-// credentialSource is the source in force and what tells two processes
-// running the same kind apart. Everything that distinguishes two exchanges
-// is in Identity, which the digest covers on its own.
+// credentialSource names the configured source.
 type credentialSource struct {
 	Kind CredentialSourceKind `json:"kind"`
-	// StaticFile is the file the static source reads. Two files hold
-	// different credentials.
+	// StaticFile is the file that the static source reads. Different files can
+	// hold different credentials.
 	StaticFile string `json:"static_file,omitempty"`
 }
 
@@ -765,8 +760,8 @@ func (id *Identity) validate(found *problems) {
 }
 
 // validateClientAuth requires exactly one client authentication mechanism.
-// The two carry different authority, so a record could not say which one
-// the zone read.
+// The mechanisms carry different authority, so a record must identify which
+// one the zone used.
 func (id *Identity) validateClientAuth(found *problems) {
 	switch {
 	case id.WorkloadTokenFile == "" && id.ClientSecretFile == "":

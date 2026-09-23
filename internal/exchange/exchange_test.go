@@ -19,7 +19,7 @@ import (
 	"github.com/keycardai/egress-proxy/test/fakeas"
 )
 
-// The fixture identity.
+// The identity used by the fixture.
 const (
 	user         = "igmua2g0fwapl21qll7tczdw7t"
 	clientID     = "app-cred-1"
@@ -28,7 +28,7 @@ const (
 	granted      = "gho_the_upstream_credential"
 )
 
-// zone starts a fake authorization server and returns it with its URL.
+// zone starts a fake authorization server and returns the server and its URL.
 func zone(t *testing.T, opts fakeas.Options) (*fakeas.Server, string) {
 	t.Helper()
 	if opts.Credentials == nil {
@@ -40,8 +40,8 @@ func zone(t *testing.T, opts fakeas.Options) (*fakeas.Server, string) {
 	return server, httpServer.URL
 }
 
-// TestTheWireForm pins the exchange parameter by parameter. The zone reads
-// these names, so a change here is a change to the contract with it.
+// TestTheWireForm checks each exchange parameter. The zone reads these names,
+// so they define the contract with it.
 func TestTheWireForm(t *testing.T) {
 	t.Parallel()
 	server, zoneURL := zone(t, fakeas.Options{ClientSecrets: map[string]string{clientID: clientSecret}})
@@ -68,8 +68,8 @@ func TestTheWireForm(t *testing.T) {
 	for key, want := range wantForm {
 		assert.Equal(t, want, form.Get(key), "form parameter %s", key)
 	}
-	// The secret rides in the Authorization header, so it reaches no form
-	// parameter and no request log.
+	// The secret uses the Authorization header. It reaches no form parameter or
+	// request log.
 	for _, key := range []string{"client_secret", "client_id", "actor_token", "actor_token_type", "scope", "audience"} {
 		assert.NotContains(t, form, key, "the form must not carry %s", key)
 	}
@@ -78,7 +78,7 @@ func TestTheWireForm(t *testing.T) {
 	assert.Equal(t, user, requests[0].Subject, "the impersonated user")
 }
 
-// substituteUser is the unsigned subject token the exchange must send. The
+// substituteUser is the unsigned subject token that the exchange sends. The
 // trailing dot marks the absent signature.
 func substituteUser(t *testing.T, subject string) string {
 	t.Helper()
@@ -88,24 +88,20 @@ func substituteUser(t *testing.T, subject string) string {
 	return encode([]byte(`{"typ":"vnd.kc.su+jwt","alg":"none"}`)) + "." + encode(payload) + "."
 }
 
-// TestFailuresAreTwoClasses records each failure as the reason the proxy
-// denies with. A zone that refused on policy is access_denied. Everything
-// else is exchange_failed, because the proxy does not know what the zone
-// would have answered.
+// TestFailuresAreTwoClasses records the reason for each failure. A zone
+// policy refusal is access_denied. Every other failure is exchange_failed.
 func TestFailuresAreTwoClasses(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		// secret authenticates the client. Empty means the one the zone
-		// knows.
+		// secret authenticates the client. An empty value uses the known secret.
 		secret string
-		// zoneOpts configures the fake server. A nil handler means the
-		// fixture serves.
+		// zoneOpts configures the fake server. A nil handler uses the fixture.
 		zoneOpts fakeas.Options
-		// handler replaces the fake server entirely.
+		// handler replaces the fixture server.
 		handler http.Handler
-		// unreachable points the source at an address nothing listens on.
+		// unreachable points the source at an unused address.
 		unreachable  bool
 		resource     string
 		wantErr      error
@@ -120,8 +116,8 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 		{
 			name:   "the client secret is not the one the zone holds",
 			secret: "not-the-secret",
-			// invalid_client is not a policy denial: the proxy never
-			// authenticated, so no policy was read.
+			// invalid_client is not a policy denial. The proxy did not
+			// authenticate, so it did not read policy.
 			wantErr:      credential.ErrExchangeFailed,
 			wantExchange: 1,
 		},
@@ -172,7 +168,7 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 	}
 }
 
-// closedAddress returns a loopback address nothing listens on.
+// closedAddress returns a loopback address with no listener.
 func closedAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -182,8 +178,8 @@ func closedAddress(t *testing.T) string {
 	return address
 }
 
-// TestADeniedRequestMakesNoExchange is the property the audit trail rests
-// on: a resource nothing asks for costs the zone nothing.
+// TestADeniedRequestMakesNoExchange checks that a resource no endpoint asks
+// for reaches no zone.
 func TestADeniedRequestMakesNoExchange(t *testing.T) {
 	t.Parallel()
 	server, zoneURL := zone(t, fakeas.Options{ClientSecrets: map[string]string{clientID: clientSecret}})
@@ -198,8 +194,8 @@ func TestADeniedRequestMakesNoExchange(t *testing.T) {
 	assert.Len(t, server.Requests(), 1, "one exchange for one call")
 }
 
-// TestTheBudgetBoundsAnExchange pins that a zone which accepts the request
-// and then goes quiet cannot hold a proxy request open.
+// TestTheBudgetBoundsAnExchange checks that a quiet zone cannot hold a proxy
+// request open after it accepts the request.
 func TestTheBudgetBoundsAnExchange(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
@@ -211,11 +207,11 @@ func TestTheBudgetBoundsAnExchange(t *testing.T) {
 		}
 		server.ServeHTTP(w, r)
 	}))
-	// Close runs last: it waits for the stalled handler, which only the
-	// release before it lets go.
+	// Close runs last. It waits for the stalled handler, which the release
+	// callback lets go.
 	t.Cleanup(slow.Close)
 	t.Cleanup(func() { close(release) })
-	// The metadata must name the slow server, which fronts the fixture.
+	// The metadata names the slow server that fronts the fixture.
 	source, err := exchange.New(exchange.Options{
 		ZoneURL: slow.URL, ClientID: clientID, ImpersonateUser: user, ClientSecret: clientSecret,
 		Timeout: 200 * time.Millisecond,
@@ -228,9 +224,8 @@ func TestTheBudgetBoundsAnExchange(t *testing.T) {
 	assert.Less(t, time.Since(start), 5*time.Second, "the budget ends the exchange")
 }
 
-// TestADeniedZoneAddressIsNotDialed pins the guard on the zone leg: a zone
-// URL that resolves into a range the platform denies reaches no socket, so
-// the client secret is never offered to it.
+// TestADeniedZoneAddressIsNotDialed checks the deny list on the zone leg. A
+// denied address reaches no socket, so the client secret is never offered.
 func TestADeniedZoneAddressIsNotDialed(t *testing.T) {
 	t.Parallel()
 	_, zoneURL := zone(t, fakeas.Options{ClientSecrets: map[string]string{clientID: clientSecret}})
@@ -245,7 +240,7 @@ func TestADeniedZoneAddressIsNotDialed(t *testing.T) {
 	assert.ErrorContains(t, err, "deny list", "the message names why")
 }
 
-// TestNewRefusals refuses a configuration the source cannot act on, at
+// TestNewRefusals rejects configuration that the source cannot use at
 // start-up rather than on the first request.
 func TestNewRefusals(t *testing.T) {
 	t.Parallel()
@@ -285,8 +280,8 @@ func TestNewRefusals(t *testing.T) {
 	}
 }
 
-// TestDescribeNamesTheSourceAndNoSecret is what the start-up log and /info
-// print, so it must carry nothing that outlives a request.
+// TestDescribeNamesTheSourceAndNoSecret checks the text that the start-up log
+// and /info print. It must contain no value that outlives a request.
 func TestDescribeNamesTheSourceAndNoSecret(t *testing.T) {
 	t.Parallel()
 	source, err := exchange.New(exchange.Options{
@@ -301,13 +296,13 @@ func TestDescribeNamesTheSourceAndNoSecret(t *testing.T) {
 	assert.NotContains(t, describe, clientSecret, "Describe NEVER carries the client secret")
 }
 
-// TestTheZoneIssuerMustMatchTheConfiguredZone pins RFC 8414 section 3.3: a
-// server that answers for another issuer is not the zone the document
-// names, so the exchange never posts a token to it.
+// TestTheZoneIssuerMustMatchTheConfiguredZone checks RFC 8414 section 3.3. A
+// server with another issuer is not the zone in the document, so the exchange
+// does not post a token to it.
 func TestTheZoneIssuerMustMatchTheConfiguredZone(t *testing.T) {
 	t.Parallel()
 	// The metadata names another issuer, which RFC 8414 section 3.3 makes a
-	// mismatch. It is a constant, so the handler encodes nothing.
+	// mismatch. The constant needs no handler encoding.
 	const metadata = `{"issuer":"https://other.example","token_endpoint":"https://other.example/token"}`
 	impostor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

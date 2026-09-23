@@ -1,12 +1,11 @@
-// Package fakeas is an authorization server fixture for the tests and the
-// acceptance lane. It answers RFC 8414 discovery and the RFC 8693 token
-// exchange the proxy posts, and keeps every request for a test to read back.
+// Package fakeas is an authorization server fixture for unit and acceptance
+// tests. It answers RFC 8414 discovery and the RFC 8693 token exchange that
+// the proxy posts. It keeps every request for tests to read.
 //
-// It authenticates a client with client_secret_basic, which is what this
-// build of the proxy sends.
+// It authenticates clients with client_secret_basic, which this build sends.
 //
-// It verifies no signature on anything, so it is a fixture and never a zone.
-// The real zone is exercised by the cluster lane.
+// It does not verify signatures. Use it as a fixture, not as a zone. The
+// cluster lane exercises the real zone.
 package fakeas
 
 import (
@@ -18,14 +17,14 @@ import (
 	"sync"
 )
 
-// The paths the server serves. MetadataPath is where RFC 8414 discovery
-// looks; TokenPath is what the metadata advertises.
+// MetadataPath is the RFC 8414 discovery path. TokenPath is the path that the
+// metadata advertises.
 const (
 	MetadataPath = "/.well-known/oauth-authorization-server"
 	TokenPath    = "/oauth2/token" //nolint:gosec // G101: a path, not a credential
 )
 
-// The wire values the exchange must send.
+// These are the wire values that the exchange sends.
 //
 //nolint:gosec // G101: protocol URNs, not credentials
 const (
@@ -34,7 +33,7 @@ const (
 	issuedTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
 )
 
-// The RFC 6749 section 5.2 error codes this server answers with.
+// These are the RFC 6749 section 5.2 error codes that the server returns.
 const (
 	codeInvalidRequest   = "invalid_request"
 	codeInvalidClient    = "invalid_client"
@@ -43,41 +42,39 @@ const (
 	codeAccessDenied     = "access_denied"
 )
 
-// expiresIn is the lifetime in seconds the server reports for every token it
-// issues.
+// expiresIn is the token lifetime in seconds.
 const expiresIn = 300
 
-// jwtSegments is how many dot-separated segments a JWT has, the third empty
-// for an unsigned one.
+// jwtSegments is the number of dot-separated JWT segments. The third segment
+// is empty for an unsigned token.
 const jwtSegments = 3
 
 // Options configures a Server.
 type Options struct {
-	// Credentials is the access token the server issues per resource. A
-	// resource it omits is refused with access_denied, the way a zone
-	// refuses a resource its policy does not grant.
+	// Credentials maps each resource to the access token that the server issues.
+	// The server returns access_denied for an unmapped resource.
 	Credentials map[string]string
-	// ClientSecrets is the secret per client id for client_secret_basic. A
-	// server with none authenticates nobody.
+	// ClientSecrets maps each client ID to its client_secret_basic secret. An
+	// empty map authenticates no client.
 	ClientSecrets map[string]string
 }
 
-// Request is one token request as the server read it.
+// Request contains one token request as the server read it.
 type Request struct {
-	// Form is the posted form, parameter by parameter. The client secret
-	// rides in the Authorization header, so it is not in here.
+	// Form contains the posted parameters. The client secret uses the
+	// Authorization header, so it is not in this field.
 	Form url.Values
-	// ClientID is the client the request authenticated as, from the basic
-	// credentials or the client_id parameter.
+	// ClientID is the authenticated client ID from basic credentials or the
+	// client_id parameter.
 	ClientID string
-	// Subject is the user the substitute-user token named.
+	// Subject is the user named by the substitute-user token.
 	Subject string
-	// Error is the OAuth error code the server answered with, empty on a
-	// token.
+	// Error is the OAuth error code that the server returned. It is empty for a
+	// successful token response.
 	Error string
 }
 
-// Server answers discovery and the token endpoint.
+// Server answers discovery and token requests.
 type Server struct {
 	opts Options
 
@@ -85,21 +82,21 @@ type Server struct {
 	requests []Request
 }
 
-// New builds a server. Mount it on any listener: it reads its issuer from
-// the request, so it needs no address in advance.
+// New builds a server. Mount it on any listener. The server reads its issuer
+// from each request, so it needs no address in advance.
 func New(opts Options) *Server {
 	return &Server{opts: opts}
 }
 
-// Requests returns every token request the server read, in order.
+// Requests returns the token requests in the order that the server read them.
 func (s *Server) Requests() []Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Request(nil), s.requests...)
 }
 
-// ServeHTTP routes discovery and the token endpoint. Every other path is a
-// 404, so a test that mistypes one sees it.
+// ServeHTTP routes discovery and token requests. It returns 404 for every
+// other path.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case MetadataPath:
@@ -111,8 +108,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// metadata answers RFC 8414 discovery. The issuer must be what the client
-// asked for, so it is built from the request rather than configured.
+// metadata answers RFC 8414 discovery. It builds the issuer from the request
+// so the issuer matches the URL that the client requested.
 func (s *Server) metadata(w http.ResponseWriter, r *http.Request) {
 	issuer := issuerOf(r)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -123,9 +120,8 @@ func (s *Server) metadata(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// token answers the exchange. It records the request whatever the outcome,
-// so a test can assert that a denied proxy request reached no exchange at
-// all.
+// token answers the exchange and records every request. A test can confirm
+// that a denied proxy request reached no exchange.
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	if refusal := requestShape(r); refusal != nil {
 		writeDenial(w, *refusal)
@@ -161,8 +157,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// requestShape refuses anything that is not a form POST, before the server
-// records it. Nothing about such a request is worth reading back.
+// requestShape rejects anything other than a form POST before the server
+// records it. The server does not retain those requests.
 func requestShape(r *http.Request) *denial {
 	if r.Method != http.MethodPost {
 		return &denial{
@@ -181,8 +177,8 @@ func requestShape(r *http.Request) *denial {
 	return nil
 }
 
-// issue applies client authentication, then the grant shape, then the
-// resource grant, and returns the credential.
+// issue checks client authentication, the grant shape, and the resource
+// grant, then returns the credential.
 func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *denial) {
 	if refusal := s.authenticate(record, secret, hasBasic); refusal != nil {
 		return "", refusal
@@ -209,9 +205,9 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 	return value, nil
 }
 
-// authenticate accepts a client secret this server knows. Nothing in a
-// secret names a ServiceAccount, so the server has nothing to bind the
-// client to the user it asks to impersonate.
+// authenticate accepts a client secret that the server knows. A secret names
+// no ServiceAccount, so the server cannot bind the client to the requested
+// user.
 func (s *Server) authenticate(record Request, secret string, hasBasic bool) *denial {
 	if hasBasic {
 		if known, ok := s.opts.ClientSecrets[record.ClientID]; ok && known == secret {
@@ -225,7 +221,7 @@ func (s *Server) authenticate(record Request, secret string, hasBasic bool) *den
 	}
 }
 
-// grantShape refuses a request that is not the impersonating exchange.
+// grantShape rejects a request that is not an impersonating exchange.
 func grantShape(form url.Values) *denial {
 	if form.Get("grant_type") != grantTokenExchange {
 		return &denial{
@@ -251,17 +247,15 @@ func grantShape(form url.Values) *denial {
 	return nil
 }
 
-// denial is an RFC 6749 section 5.2 error response and the status it goes
-// out with.
+// denial is an RFC 6749 section 5.2 error response and its HTTP status.
 type denial struct {
 	status      int
 	Code        string `json:"error"`
 	Description string `json:"error_description,omitempty"`
 }
 
-// claimSub reads the sub claim from a JWT without verifying it. It returns
-// an empty string for anything it cannot read, which the caller turns into a
-// refusal.
+// claimSub reads the sub claim from a JWT without verifying the signature. It
+// returns an empty string when it cannot read the claim.
 func claimSub(token string) string {
 	parts := strings.Split(token, ".")
 	if len(parts) != jwtSegments {
@@ -280,7 +274,7 @@ func claimSub(token string) string {
 	return claims.Sub
 }
 
-// issuerOf reconstructs the URL the client asked discovery for.
+// issuerOf reconstructs the URL that the client requested for discovery.
 func issuerOf(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil {

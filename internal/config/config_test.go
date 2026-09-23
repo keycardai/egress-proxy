@@ -211,7 +211,7 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			name:    "the static source and the exchange",
 			doc:     minimal + "credentials:\n  static_file: /creds.yaml\n",
 			against: minimal + identityDoc,
-			// A record has to name what answered. Two sidecars reading
+			// A record names the source that answered. Two sidecars that read
 			// different sources never share a digest.
 			wantSame: false,
 		},
@@ -225,7 +225,7 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			name:    "an exchange on workload identity and one on a client secret",
 			doc:     minimal + identityDoc,
 			against: minimal + secretDoc,
-			// The two mechanisms carry different authority to the zone.
+			// The two mechanisms give the zone different authority.
 			wantSame: false,
 		},
 		{
@@ -718,13 +718,13 @@ func TestParseRefusesInvalidIdentity(t *testing.T) {
 	})
 }
 
-// secretDoc is the identity section that authenticates with a client
-// secret. It differs from identityDoc only in the mechanism.
+// secretDoc is the identity section that authenticates with a client secret.
+// It differs from identityDoc only in the authentication mechanism.
 const secretDoc = "identity:\n  zone_url: https://z\n  client_id: c\n  client_secret_file: /s\n" +
 	"  impersonate: {user: u}\n"
 
-// TestCredentialSourceNamesTheSourceInForce pins what the process
-// announces, what /info reports, and what the config digest covers.
+// TestCredentialSourceNamesTheSourceInForce checks the source that the process
+// announces, reports at /info, and covers in the config digest.
 func TestCredentialSourceNamesTheSourceInForce(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -746,7 +746,7 @@ func TestCredentialSourceNamesTheSourceInForce(t *testing.T) {
 			t.Parallel()
 			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
 			require.NoError(t, err, "Parse:\n%s", tc.doc)
-			assert.Equal(t, tc.want, cfg.CredentialSource(), "the source in force")
+			assert.Equal(t, tc.want, cfg.CredentialSource(), "the configured source")
 		})
 	}
 }

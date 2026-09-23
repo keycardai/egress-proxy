@@ -124,8 +124,8 @@ func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Setenv("UPSTREAM_PORT", port)
 }
 
-// The client the fake authorization server knows. A scenario reads these
-// out of the environment rather than repeating them.
+// These are the client values that the fake authorization server knows. A
+// scenario reads them from the environment.
 const (
 	zoneClientID     = "acceptance-app-credential"
 	zoneClientSecret = "acceptance-client-secret"
@@ -135,11 +135,11 @@ const (
 //
 //	fakeas DIR RESOURCE=CREDENTIAL...
 //
-// It grants each named resource the credential beside it and refuses every
-// other resource with access_denied. It writes its CA certificate to
-// DIR/ca.crt, appends one line per token request to DIR/requests.log, and
-// exports its port as $ZONE_PORT with the client it knows as
-// $ZONE_CLIENT_ID and $ZONE_CLIENT_SECRET. It stops when the script ends.
+// It grants each named resource the credential beside it and refuses other
+// resources with access_denied. It writes its CA certificate to DIR/ca.crt,
+// appends one line per token request to DIR/requests.log, and exports its port
+// as $ZONE_PORT. It exports the known client as $ZONE_CLIENT_ID and
+// $ZONE_CLIENT_SECRET. It stops when the script ends.
 func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) < 2 {
 		ts.Fatalf("usage: fakeas DIR RESOURCE=CREDENTIAL...")
@@ -180,10 +180,10 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Setenv("ZONE_CLIENT_SECRET", zoneClientSecret)
 }
 
-// logExchanges writes one line per token request the zone read, so a
-// scenario can count the exchanges an allowed request made and assert that
-// a denied one made none. The line NEVER carries the issued credential or
-// the client secret.
+// logExchanges writes one line per token request that the zone reads. A
+// scenario can count exchanges for allowed requests and confirm that denied
+// requests make none. The line never carries the issued credential or client
+// secret.
 func logExchanges(zone *fakeas.Server, log io.Writer) http.Handler {
 	var mu sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -589,8 +589,7 @@ func statusFor(reason policy.Reason) int {
 	case policy.ReasonMalformedRequest, policy.ReasonNotAProxyRequest:
 		return http.StatusBadRequest
 	case policy.ReasonUpstreamFailed, policy.ReasonExchangeFailed:
-		// The proxy denies, and a dependency rather than the request is
-		// why. A retry can succeed.
+		// A dependency caused the denial, so a retry can succeed.
 		return http.StatusBadGateway
 	case policy.ReasonCertificateUnavailable:
 		// The handshake fails before any request, so this reason reaches an

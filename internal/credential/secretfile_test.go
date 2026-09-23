@@ -12,8 +12,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/credential"
 )
 
-// TestReadSecretFile reads a file that holds one secret and nothing else,
-// with the surrounding whitespace an editor leaves removed.
+// TestReadSecretFile reads one secret and removes surrounding whitespace.
 func TestReadSecretFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "secret")
@@ -24,9 +23,8 @@ func TestReadSecretFile(t *testing.T) {
 	assert.Equal(t, "s3cr3t", secret, "the secret without its surrounding whitespace")
 }
 
-// TestReadSecretFileRefusals covers every file the proxy will not take a
-// secret from. Each one stops the process, because a secret it cannot read
-// safely is one it must not offer to the zone.
+// TestReadSecretFileRefusals checks every file condition that the proxy
+// rejects. A secret that fails these checks never reaches the zone.
 func TestReadSecretFileRefusals(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

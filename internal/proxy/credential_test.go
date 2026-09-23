@@ -315,21 +315,20 @@ func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	assert.Contains(t, logged, "refused a request", "the proxy logged nothing, so the assertion above proves nothing")
 }
 
-// errSomethingElse stands for a source failure that names no class.
+// errSomethingElse represents a source failure with no class.
 var errSomethingElse = errors.New("something else")
 
-// refusingSource is a credential source that reports one failure for every
-// resource. It stands in for the exchange, whose failures are the same two
-// classes whatever the zone said.
+// refusingSource reports one failure for every resource. It represents the
+// exchange, whose failures use the same two classes for every zone response.
 type refusingSource struct{ err error }
 
 func (s refusingSource) Credential(context.Context, string) (string, error) { return "", s.err }
 
 func (refusingSource) Describe() string { return "a source that refuses every resource" }
 
-// TestASourceFailureClassIsItsDenialReason pins the mapping an audit query
-// and an agent's error handling both key on. A source says which class a
-// failure is in, and the proxy never reads its message to decide.
+// TestASourceFailureClassIsItsDenialReason checks the mapping used by audit
+// queries and error handling. A source reports the failure class, and the
+// proxy does not read its message to choose a reason.
 func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -344,8 +343,7 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 		},
 		{
 			name: "the exchange did not complete", err: credential.ErrExchangeFailed,
-			// A dependency rather than the request is why, so a retry can
-			// succeed.
+			// A dependency caused the failure, so a retry can succeed.
 			wantReason: policy.ReasonExchangeFailed, wantStatus: http.StatusBadGateway,
 		},
 		{

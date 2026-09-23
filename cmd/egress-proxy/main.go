@@ -315,7 +315,7 @@ func (p *process) announce() {
 	p.logger.Warn("credential source", slog.String("source", p.credentials.Describe()))
 }
 
-// errCredentials names a credential source this build cannot construct.
+// errCredentials names a credential source that this build cannot construct.
 var errCredentials = errors.New("credentials")
 
 // credentialSource builds the configured source. It returns nil when none is set.
@@ -338,11 +338,10 @@ func credentialSource(cfg *config.Config, deny *policy.DenyList, roots *x509.Cer
 	}
 }
 
-// tokenExchange builds the source that mints a credential per request
-// against the zone. The client secret is read here, once, so a rotated
-// secret takes effect on the next start. The projected workload token is
-// read on every exchange instead, because the kubelet rotates it under a
-// running process.
+// tokenExchange builds a source that mints a credential for each request
+// against the zone. It reads the client secret once, so a rotated secret
+// takes effect after restart. It reads the projected workload token for each
+// exchange because the kubelet rotates the file while the process runs.
 func tokenExchange(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (*exchange.Source, error) {
 	var secret string
 	if cfg.Identity.ClientSecretFile != "" {

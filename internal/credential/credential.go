@@ -43,16 +43,15 @@ var (
 	errInvalid   = errors.New("invalid credential")
 )
 
-// The failures a Source reports. Each one maps to a denial reason in
-// internal/proxy, so a source says which class a failure is in and nothing
-// else has to read its message.
+// These are the failures that a Source reports. Each one maps to a denial
+// reason in internal/proxy, so callers do not need to read an error message.
 var (
-	// ErrUnavailable means the source holds no credential for the resource.
+	// ErrUnavailable means that the source has no credential for the resource.
 	ErrUnavailable = errors.New("no credential for this resource")
-	// ErrAccessDenied means the authorization server refused: its policy
-	// does not permit this exchange.
+	// ErrAccessDenied means that the authorization server refused the exchange
+	// because its policy does not permit it.
 	ErrAccessDenied = errors.New("the authorization server denied the exchange")
-	// ErrExchangeFailed means the exchange did not complete, so the source
+	// ErrExchangeFailed means that the exchange did not complete. The source
 	// does not know whether the credential would have been granted.
 	ErrExchangeFailed = errors.New("the token exchange failed")
 )
