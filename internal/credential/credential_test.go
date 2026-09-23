@@ -3,6 +3,7 @@ package credential_test
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,7 +12,15 @@ import (
 	"github.com/keycardai/egress-proxy/internal/credential"
 )
 
-const secret = "sekrit-token" //nolint:gosec // G101: a test fixture, not a credential
+//nolint:gosec // G101: test fixtures, not credentials
+const (
+	secret = "sekrit-token"
+	// escapedSecret holds the three characters Validate permits and
+	// url.Values.Encode rewrites: a space becomes "+", "=" becomes "%3D",
+	// and "+" becomes "%2B".
+	escapedSecret = "a b=c+d"
+	escapedForm   = "a+b%3Dc%2Bd"
+)
 
 // request builds an outbound request the way the reverse proxy hands one to
 // the rewrite: a target with its query, and the headers the workload sent.
@@ -182,6 +191,81 @@ func TestNewWriterRefusals(t *testing.T) {
 	}
 }
 
+// TestNewWriterRefusesABannedHeaderName pins the names a header placement
+// cannot use. The refusal is in NewWriter, so it holds for an endpoint
+// assembled outside the document parser. Every name here is one
+// httpguts.ValidHeaderFieldName accepts, so the ban is what refuses it.
+func TestNewWriterRefusesABannedHeaderName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// group says why the name is banned, so a failure names the rule.
+		group string
+	}{
+		{name: "Connection", group: "hop-by-hop"},
+		{name: "Proxy-Connection", group: "hop-by-hop"},
+		{name: "Keep-Alive", group: "hop-by-hop"},
+		{name: "TE", group: "hop-by-hop"},
+		{name: "Trailer", group: "hop-by-hop"},
+		{name: "Transfer-Encoding", group: "hop-by-hop"},
+		{name: "Upgrade", group: "hop-by-hop"},
+		{name: "Proxy-Authenticate", group: "hop-by-hop"},
+		{name: "Proxy-Authorization", group: "hop-by-hop"},
+		{name: "Content-Length", group: "body framing"},
+		{name: "Host", group: "written from the request target, never from the header map"},
+		{name: "Forwarded", group: "upstream trust"},
+		{name: "X-Forwarded-For", group: "upstream trust, by prefix"},
+		{name: "X-Forwarded-Proto", group: "upstream trust, by prefix"},
+		{name: "Sec-Fetch-Site", group: "reserved for the user agent, by prefix"},
+		{name: "host", group: "the comparison ignores case"},
+		{name: "CONNECTION", group: "the comparison ignores case"},
+		{name: "TrAnSfEr-EnCoDiNg", group: "the comparison ignores case"},
+		{name: "x-FORWARDED-proto", group: "the prefix comparison ignores case"},
+		{name: "SEC-websocket-key", group: "the prefix comparison ignores case"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.True(t, credential.BannedHeaderName(tc.name), "BannedHeaderName: %s", tc.group)
+			writer, err := credential.NewWriter(credential.Placement{
+				Kind: credential.KindHeader, Name: tc.name, Template: "Bearer " + credential.Token,
+			})
+			require.ErrorContains(t, err, "a header placement cannot name "+strconv.Quote(tc.name), "NewWriter")
+			assert.Nil(t, writer, "a refused placement has no writer")
+		})
+	}
+}
+
+// TestNewWriterAcceptsAHeaderName pins the names the ban leaves alone.
+// Authorization is the placement most endpoints name, and a banned name
+// bans only an exact match or a whole family by prefix.
+func TestNewWriterAcceptsAHeaderName(t *testing.T) {
+	t.Parallel()
+	names := []string{
+		"Authorization",
+		"authorization",
+		"X-Api-Key",
+		"Private-Token",
+		// A banned prefix inside the name is not a banned prefix.
+		"My-X-Forwarded-Marker",
+		// A banned name as a prefix of a longer name is not banned.
+		"Second-Factor",
+		"Host-Key",
+		"Connection-Id",
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.False(t, credential.BannedHeaderName(name), "BannedHeaderName")
+			writer, err := credential.NewWriter(credential.Placement{
+				Kind: credential.KindHeader, Name: name, Template: "Bearer " + credential.Token,
+			})
+			require.NoError(t, err, "NewWriter")
+			assert.NotNil(t, writer, "an accepted placement has a writer")
+		})
+	}
+}
+
 // TestValidate refuses a credential the proxy cannot put into a request. A
 // carriage return or a newline in a header value splits the request head.
 func TestValidate(t *testing.T) {
@@ -221,7 +305,10 @@ func TestRedact(t *testing.T) {
 		want       string
 	}{
 		{
-			name: "a credential in a URL", text: `Get "https://maps.example/geocode?key=` + secret + `": refused`,
+			name: "a credential whose escaped form is itself",
+			text: `Get "https://maps.example/geocode?key=` + secret + `": refused`,
+			// url.QueryEscape leaves secret alone, so this case says
+			// nothing about escaping. The cases below carry that weight.
 			credential: secret, want: `Get "https://maps.example/geocode?key=[redacted]": refused`,
 		},
 		{
@@ -233,6 +320,28 @@ func TestRedact(t *testing.T) {
 			want: "dial tcp 127.0.0.1:1: refused",
 		},
 		{name: "no credential leaves the text alone", text: "anything", credential: "", want: "anything"},
+		{
+			name:       "a credential in the raw form a header placement writes",
+			text:       `Post "https://api.example/": header "Bearer ` + escapedSecret + `" rejected`,
+			credential: escapedSecret,
+			want:       `Post "https://api.example/": header "Bearer [redacted]" rejected`,
+		},
+		{
+			name:       "a credential in the escaped form a query placement writes",
+			text:       `Get "https://maps.example/geocode?key=` + escapedForm + `&q=here": refused`,
+			credential: escapedSecret,
+			want:       `Get "https://maps.example/geocode?key=[redacted]&q=here": refused`,
+		},
+		{
+			name:       "both forms in one text",
+			text:       escapedSecret + " encodes to " + escapedForm,
+			credential: escapedSecret, want: "[redacted] encodes to [redacted]",
+		},
+		{
+			name:       "the escaped form alone, with no raw occurrence",
+			text:       "key=" + escapedForm,
+			credential: escapedSecret, want: "key=[redacted]",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

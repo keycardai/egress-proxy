@@ -256,8 +256,14 @@ type forward struct {
 	// Both are empty for an endpoint that names none.
 	writer credential.Writer
 	secret string
-	denied bool
-	err    error
+	// writeErr is what the credential writer reported. The round trip
+	// refuses a forward that carries one.
+	writeErr error
+	denied   bool
+	// denyReason is the reason a refusal on the upstream leg records. It is
+	// set wherever denied is set.
+	denyReason policy.Reason
+	err        error
 	// status is the status the upstream answered, set before the response
 	// is written.
 	status int
@@ -330,19 +336,19 @@ func (s *Server) emitForwarded(
 	// of the decision. The endpoint the allow named stays on the record, so
 	// an audit query can find which rule covered the traffic.
 	//
-	// A query placement puts the credential in the outbound URL, so text
-	// from the upstream leg is redacted before it becomes a record.
+	// Every text this switch puts on the record comes from the upstream leg,
+	// which carries the credential. NEVER set one without Redact.
 	switch {
 	case fwd.denied:
 		record.Decision.Verdict = policy.VerdictDeny
-		record.Decision.Reason = policy.ReasonDenyAlways
+		record.Decision.Reason = fwd.denyReason
 		record.Decision.Error = credential.Redact(fwd.err.Error(), fwd.secret)
 	case fwd.err != nil:
 		record.Decision.Verdict = policy.VerdictDeny
 		record.Decision.Reason = policy.ReasonUpstreamFailed
 		record.Outcome.Error = credential.Redact(fwd.err.Error(), fwd.secret)
 	case recovered != nil:
-		record.Outcome.Error = panicOutcome(recovered, r.Context().Err())
+		record.Outcome.Error = credential.Redact(panicOutcome(recovered, r.Context().Err()), fwd.secret)
 	}
 	s.opts.Audit.Emit(record)
 }
@@ -448,10 +454,33 @@ func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 		return
 	}
 	if err := fwd.writer.Write(proxied.Out, fwd.secret); err != nil {
-		s.logger.Warn("the credential was not written; the request goes upstream without it",
+		// Rewrite cannot abort a forward. The failure goes on the forward,
+		// and the round trip refuses it before it reaches the upstream.
+		fwd.writeErr = err
+		s.logger.Warn("the credential was not written, so the request is refused",
 			slog.String("request_id", fwd.requestID),
 			slog.String("error", credential.Redact(err.Error(), fwd.secret)))
 	}
+}
+
+// credentialNotWrittenError is the round trip's refusal of a forward whose
+// credential writer failed.
+type credentialNotWrittenError struct{ err error }
+
+func (e *credentialNotWrittenError) Error() string { return e.err.Error() }
+
+func (e *credentialNotWrittenError) Unwrap() error { return e.err }
+
+// refuseUnwritten is the transport the reverse proxy uses. It opens nothing
+// for a forward whose credential writer failed, so a request NEVER reaches
+// an upstream without the credential its endpoint names.
+type refuseUnwritten struct{ next http.RoundTripper }
+
+func (t refuseUnwritten) RoundTrip(r *http.Request) (*http.Response, error) {
+	if fwd := forwardFrom(r.Context()); fwd != nil && fwd.writeErr != nil {
+		return nil, &credentialNotWrittenError{err: fwd.writeErr}
+	}
+	return t.next.RoundTrip(r) //nolint:wrapcheck // the transport's own error reaches the error handler
 }
 
 // recordUpstreamStatus keeps the upstream's status on the forward. The
@@ -465,17 +494,27 @@ func (s *Server) recordUpstreamStatus(res *http.Response) error {
 }
 
 // upstreamError answers an allowed request that produced no response. A dial
-// the deny list refused is a policy answer. Anything else is an upstream
-// failure.
+// the deny list refused and a credential the writer could not write are both
+// policy answers. Anything else is an upstream failure.
 func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	fwd := forwardFrom(r.Context())
 	fwd.err = err
-	if _, denied := errors.AsType[*deniedError](err); denied {
-		fwd.denied = true
-		writeDeny(w, http.StatusForbidden, policy.ReasonDenyAlways, fwd.requestID)
+	switch {
+	case isType[*deniedError](err):
+		fwd.denied, fwd.denyReason = true, policy.ReasonDenyAlways
+	case isType[*credentialNotWrittenError](err):
+		fwd.denied, fwd.denyReason = true, policy.ReasonCredentialUnavailable
+	default:
+		writeDeny(w, http.StatusBadGateway, policy.ReasonUpstreamFailed, fwd.requestID)
 		return
 	}
-	writeDeny(w, http.StatusBadGateway, policy.ReasonUpstreamFailed, fwd.requestID)
+	writeDeny(w, statusFor(fwd.denyReason), fwd.denyReason, fwd.requestID)
+}
+
+// isType reports whether err is or wraps an error of type E.
+func isType[E error](err error) bool {
+	_, ok := errors.AsType[E](err)
+	return ok
 }
 
 // handlePlain refuses a request that reached the proxy in absolute form

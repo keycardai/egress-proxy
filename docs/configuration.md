@@ -238,13 +238,26 @@ workload sent at that place, and it writes the credential where the workload
 sent nothing. A header placement replaces every value that the workload sent
 under that header name. A query placement replaces every value under that
 parameter name and re-encodes the query, so the request leaves with its
-parameters sorted by name. A header placement cannot name `Host`, because the
-host is the destination.
+parameters sorted by name.
+
+A header placement cannot name these headers, whatever their case. The
+document is refused at start-up, and the writer refuses the same names.
+
+| Header | Why |
+|---|---|
+| `Connection`, `Proxy-Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-Authenticate`, `Proxy-Authorization` | The hop-by-hop headers of RFC 9110 section 7.6.1 govern the connection the proxy owns. The proxy strips them, so the credential never leaves. |
+| `Content-Length` | It frames a body the proxy does not write. |
+| `Host` | The proxy writes the host from the request target and leaves the header map out of it, so the credential would never reach the upstream. |
+| `Forwarded` (RFC 7239), any name starting `X-Forwarded-`, any name starting `Sec-` | An upstream can read these as the client's identity or route, and the `Sec-` names belong to the user agent. |
+
+`Authorization` is not on the list. It is the placement most endpoints name.
 
 This build writes the `header` and `query` placements. A request to an
 endpoint with a `basic` placement is denied with `credential_unavailable`,
-and so is a request that the credential source cannot answer. The proxy never
-forwards the workload placeholder to a credentialed endpoint.
+and so is a request that the credential source cannot answer. A placement
+the writer cannot write is denied with the same reason, before the proxy
+dials. The proxy never forwards the workload placeholder to a credentialed
+endpoint.
 
 The proxy writes the credential after it removes the hop-by-hop headers that
 the workload named in `Connection`. A workload cannot name the placement
@@ -270,7 +283,7 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
-| `credential_unavailable` | deny | request | The proxy has no credential for the endpoint: the process has no source, the source holds none for the endpoint resource, or this build does not write the placement. `decision.error` says which. |
+| `credential_unavailable` | deny | request | The proxy did not put a credential in the request: the process has no source, the source holds none for the endpoint resource, this build does not write the placement, or the writer reported an error. `decision.error` says which. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
 | `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and the tunnel carries no request. |
 

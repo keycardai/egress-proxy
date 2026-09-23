@@ -183,7 +183,7 @@ func New(opts Options) (*Server, error) {
 	server.transport = server.newTransport()
 	server.reverse = &httputil.ReverseProxy{
 		Rewrite:   server.rewrite,
-		Transport: server.transport,
+		Transport: refuseUnwritten{next: server.transport},
 		// Responses stream: LLM traffic is server-sent events, and a
 		// buffered proxy stalls it.
 		FlushInterval:  -1,

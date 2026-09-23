@@ -806,8 +806,9 @@ func validatePlacement(placement Placement, i int, found *problems) {
 		if !strings.Contains(placement.Template, credential.Token) {
 			found.addf("endpoints[%d]: a header placement template must contain %s", i, credential.Token)
 		}
-		if strings.EqualFold(placement.Name, "Host") {
-			found.addf("endpoints[%d]: a header placement cannot name Host; the host is the destination", i)
+		if credential.BannedHeaderName(placement.Name) {
+			found.addf("endpoints[%d]: a header placement cannot name %s, "+
+				"a header the connection, the proxy or the upstream's trust depends on", i, placement.Name)
 		}
 	case PlacementQuery:
 		requireOnly(i, found, "query", placement.Name != "", "needs a name",

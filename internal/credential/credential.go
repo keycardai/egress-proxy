@@ -71,10 +71,36 @@ type Source interface {
 }
 
 // Writer puts a credential into an outbound request at one placement. A
-// writer that reports an error leaves the request as it found it, so the
-// request goes upstream carrying no credential.
+// writer that reports an error leaves the request as it found it, and the
+// proxy denies the request with credential_unavailable. NEVER forward a
+// request whose write failed.
 type Writer interface {
 	Write(out *http.Request, credential string) error
+}
+
+// BannedHeaderName reports whether a header placement is forbidden to name
+// this header. The comparison ignores case. A banned name falls in one of
+// four groups.
+//
+//   - The hop-by-hop headers of RFC 9110 section 7.6.1. They govern the
+//     connection the proxy owns, and the reverse proxy strips them, so the
+//     credential never leaves.
+//   - Content-Length, which frames a body the proxy does not write.
+//   - Host, which net/http writes from the request target and leaves out of
+//     the header map, so the request would go upstream uncredentialed.
+//   - The names an upstream can trust for routing or identity: Forwarded
+//     (RFC 7239), the x-forwarded- family, and the sec- family the Fetch
+//     standard reserves for the user agent.
+//
+// Authorization is NOT banned. It is the placement most endpoints name.
+func BannedHeaderName(name string) bool {
+	switch lower := strings.ToLower(name); lower {
+	case "connection", "proxy-connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
+		"proxy-authenticate", "proxy-authorization", "content-length", "host", "forwarded":
+		return true
+	default:
+		return strings.HasPrefix(lower, "x-forwarded-") || strings.HasPrefix(lower, "sec-")
+	}
 }
 
 // NewWriter returns the writer for a placement. It refuses a placement this
@@ -86,6 +112,9 @@ func NewWriter(placement Placement) (Writer, error) {
 	case KindHeader:
 		if !httpguts.ValidHeaderFieldName(placement.Name) {
 			return nil, fmt.Errorf("%w: %q is not a header name", errPlacement, placement.Name)
+		}
+		if BannedHeaderName(placement.Name) {
+			return nil, fmt.Errorf("%w: a header placement cannot name %q", errPlacement, placement.Name)
 		}
 		if !strings.Contains(placement.Template, Token) {
 			return nil, fmt.Errorf("%w: the header template holds no %s", errPlacement, Token)
@@ -155,10 +184,13 @@ func isControl(r rune) bool {
 }
 
 // Redact replaces every occurrence of the credential in text with Marker.
-// An empty credential leaves the text alone.
+// A query placement percent-encodes the credential into the URL, so the
+// escaped form is replaced as well as the raw one. An empty credential
+// leaves the text alone.
 func Redact(text, credential string) string {
 	if credential == "" {
 		return text
 	}
-	return strings.ReplaceAll(text, credential, Marker)
+	text = strings.ReplaceAll(text, credential, Marker)
+	return strings.ReplaceAll(text, url.QueryEscape(credential), Marker)
 }

@@ -606,9 +606,48 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 			name: "a header placement naming Host",
 			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
 				"      placement: {kind: header, name: host, template: \"{credential}\"}"),
-			wantErr: "cannot name Host",
+			wantErr: "endpoints[0]: a header placement cannot name host, " +
+				"a header the connection, the proxy or the upstream's trust depends on",
+		},
+		{
+			name: "a header placement naming a hop-by-hop header",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: Connection, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name Connection, ",
+		},
+		{
+			name: "a header placement naming a body framing header",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: Content-Length, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name Content-Length, ",
+		},
+		{
+			name: "a header placement in the x-forwarded- family",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: X-Forwarded-For, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name X-Forwarded-For, ",
+		},
+		{
+			name: "a header placement in the sec- family",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: Sec-Fetch-Site, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name Sec-Fetch-Site, ",
 		},
 	})
+}
+
+// TestParseAcceptsAnAuthorizationPlacement pins the placement most
+// endpoints name. The banned-name list must never grow to cover it.
+func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: a.example\n    credential:\n" +
+		"      env: GITHUB_TOKEN\n" +
+		"      placement: {kind: header, name: Authorization, template: \"Bearer {credential}\"}\n"
+	cfg, err := config.Parse([]byte(doc), config.Overrides{})
+	require.NoError(t, err, "Parse:\n%s", doc)
+	require.Len(t, cfg.Endpoints, 1, "the document names one endpoint")
+	require.NotNil(t, cfg.Endpoints[0].Credential, "the endpoint names a credential")
+	assert.Equal(t, "Authorization", cfg.Endpoints[0].Credential.Placement.Name, "placement.name")
 }
 
 // TestParseRefusesInvalidIdentity covers the exchange settings.

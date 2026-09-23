@@ -158,6 +158,15 @@ func TestCredentialInjection(t *testing.T) {
 			wantPrefix: "/anything/header/",
 		},
 		{
+			name: "a workload naming the placement header in Connection", path: "/anything/header/hopbyhop",
+			header: http.Header{
+				"Authorization": []string{"Bearer ${GITHUB_TOKEN}"},
+				"Connection":    []string{"Authorization"},
+			},
+			wantArgs: url.Values{}, wantAuthorization: []string{"Bearer " + headerSecret},
+			wantPrefix: "/anything/header/",
+		},
+		{
 			name: "a header placement leaves the query alone", path: "/anything/header/query?q=here",
 			wantArgs: url.Values{"q": {"here"}}, wantAuthorization: []string{"Bearer " + headerSecret},
 			wantPrefix: "/anything/header/",
@@ -264,10 +273,13 @@ func TestCredentialRefusals(t *testing.T) {
 	})
 }
 
-// TestNoCredentialReachesARecordOrALogLine drives the two paths that carry
-// a credential furthest: a request that succeeds with the credential in its
-// query, and one whose upstream never answers, whose error text reaches the
-// audit record and the log.
+// TestNoCredentialReachesARecordOrALogLine reads the whole record and the
+// whole log for three requests with a query placement: one the upstream
+// answers, one whose upstream never answers, and one the proxy refuses. It
+// proves that the record names the path without its query, that a failed
+// forward says why it failed, and that neither the records nor the log hold
+// the credential. The timeout text the stalled request produces names no
+// URL, so this case does not reach the redaction path.
 func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	t.Parallel()
 	h := start(t, harnessOptions{
