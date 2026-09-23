@@ -134,7 +134,7 @@ that the endpoint list denies.
 The admin socket answers `GET /healthz` with `ok` while the process is
 alive. It answers `GET /readyz` with `ok` once every frontend is bound
 and `ca.crt` is written to `ca.out_dir`, and with 503 and the reason before
-that. It answers `GET /info`
+that and again for the whole shutdown drain. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
 `document_digest`, `config_digest`, `overridden`, the listen and limit
 settings, the CA output directory and expiry, the credential source, the

@@ -61,7 +61,9 @@ type Options struct {
 	Info func() any
 	// Ready decides /readyz. A nil error answers 200 and an error answers
 	// 503 with the error text, so a probe reads why the process is not
-	// serving yet. A nil Ready answers 200.
+	// serving yet. A nil Ready answers 503: readiness is what the kubelet
+	// releases a workload on, so a server with no gate reports not ready
+	// rather than ready.
 	Ready func() error
 	// Logger discards when nil.
 	Logger *slog.Logger
@@ -114,7 +116,7 @@ func routes(opts Options) *http.ServeMux {
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if opts.Ready == nil {
-			writeText(w, http.StatusOK, "ok\n")
+			writeText(w, http.StatusServiceUnavailable, "no readiness gate is configured\n")
 			return
 		}
 		if err := opts.Ready(); err != nil {

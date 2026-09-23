@@ -83,9 +83,12 @@ func TestServerAnswersHealthAndInfo(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &decoded), "/info body is not JSON:\n%s", body)
 	assert.Equal(t, "test", decoded["version"], "/info version")
 
+	// No readiness gate fails closed: the kubelet releases the workload on
+	// a 200, so a server that was never told how to answer says it is not
+	// ready.
 	status, body = get(t, path, "/readyz")
-	assert.Equal(t, http.StatusOK, status, "/readyz status with no readiness gate")
-	assert.Equal(t, "ok\n", body, "/readyz body")
+	assert.Equal(t, http.StatusServiceUnavailable, status, "/readyz status with no readiness gate")
+	assert.Equal(t, "no readiness gate is configured\n", body, "/readyz body")
 
 	status, _ = get(t, path, "/metrics")
 	assert.Equal(t, http.StatusNotFound, status, "/metrics is not served")

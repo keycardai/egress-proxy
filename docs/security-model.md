@@ -257,6 +257,9 @@ probe runs which route is set in the manifest, which the sandbox chart owns.
 |---|---|---|
 | The workload starts before the proxy has written `ca.crt`, so every TLS handshake fails on certificate verification and an operator reads a misconfiguration as a policy denial. | The startup probe reads `/readyz`, which answers only once the listeners are bound and the certificate is on disk, and the kubelet holds the workload until it passes. The base image entrypoint waits for the certificate as well, which covers a restart that outlives the probe. | `TestReadyz`, `TestProbeReadsTheAdminSocket`, `TestSandboxBaseImage` |
 | The kubelet releases the workload while the port the capture redirects to is unbound, so the workload's first captured connection is refused. Readiness that answered on the CONNECT listener alone would do this. | Readiness turns true only after every listener is bound, the transparent sockets included. A transparent socket that fails to bind leaves the process not ready and stops it. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` |
+| The netns has IPv6 and another process holds the IPv6 capture socket. The proxy binds IPv4 alone, reports ready, and every IPv6 egress is refused for the life of the pod. A missing IPv6 socket is a valid start on a kernel with no IPv6, so the bind alone does not tell the two apart. | The receipt names the address families the init container programmed. The bind compares them against the sockets it opened and stops the process when the receipt names a family no socket covers. The start-up log names the families bound. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` (the two receipt rows) |
+| The kubelet reads a 200 from `/readyz` during the SIGTERM drain and keeps sending the workload at a proxy whose listeners are closing. | The shutdown path clears the readiness flag before any server drains, so `/readyz` answers 503 from the moment the signal arrives until the socket goes away. | `TestServeStopsReportingReadyWhileItDrains` |
+| An admin server is built with no readiness gate, and `/readyz` answers 200 for a process that has decided nothing. | A nil `Options.Ready` answers 503 naming that no gate is configured. | `TestServerAnswersHealthAndInfo` |
 | A probe reaches the admin surface over a port the workload can also reach. | There is no port. The probe runs this binary against the Unix socket in the proxy's mount namespace, and the socket path must be absolute. | `TestProbeReadsTheAdminSocket`, `TestProbeWithNoSocket`, `TestNewRefusals` |
 | The kubelet restarts a proxy that has not finished starting, because liveness reads readiness. | The two routes are separate. `/healthz` answers while the process is alive and `/readyz` answers when it serves, so a liveness probe on `/healthz` does not restart a starting proxy. | `TestReadyz`, `TestProbeReadsTheAdminSocket` |
 | The 503 body tells the workload something it does not already have. | The body says either that the listeners are not bound or that `ca.crt` is not readable. The only path in it is `ca.out_dir`, which `/info` already publishes. | `TestReadyz`, `TestProbeReadsTheAdminSocket` |
@@ -352,6 +355,9 @@ The three images are defined under `images/` and built locally by
 - Readiness is a point in time. `/readyz` reads the listener flag and stats
   `ca.crt` on each request, so it reports the state then rather than a
   guarantee about the next request.
+- The address family check reads the receipt, which the init container
+  wrote. It says what was programmed at that moment, so a rule removed
+  afterwards is outside what this check sees.
 - The pod is not this repository's to enforce. `egress-proxy settings`
   publishes the variables and the defaults a manifest has to match, and the
   sandbox chart's lint is what reads them and refuses a manifest that

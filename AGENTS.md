@@ -135,15 +135,18 @@ than a refactor, and it changes `docs/security-model.md` with it.
   `egress-proxy settings` prints the `EGRESS_PROXY_` names, the flag each
   one fills and the defaults in force, all read from `flagSet` and the
   document parser at run time. The pod composition and the lint that
-  enforces it live with the charts, so NEVER add a manifest reader here. A
+  enforces it live with the charts, so NEVER judge a manifest here. A
   setting added to the flag set is published on the next build, and the
   chart lint reads it out of the image.
 - **Readiness covers every listener.** `/readyz` answers 200 only after the
   CONNECT listener and the transparent sockets are bound and `ca.crt` is
   written. The kubelet releases the workload on that answer, so a frontend
   bound later would leave the workload's first captured connection refused.
-  The probe is the binary itself, because the admin surface is a socket and
-  the proxy image has no shell.
+  The netsetup receipt says which address families the redirect covers, and
+  a family it names with no bound socket stops the start. The shutdown path
+  clears the flag first, so `/readyz` answers 503 for the whole drain. The
+  probe is the binary itself, because the admin surface is a socket and the
+  proxy image has no shell.
 
 ## Tests
 

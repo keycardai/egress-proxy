@@ -178,7 +178,7 @@ const defaultDocument = "version: 1\nsandbox:\n  id: settings\nendpoints:\n  - h
 // parserDefaults maps a flag to the value the document parser applies when
 // the document, the variable and the flag all leave the setting out.
 //
-// Every flag is in this map or in flagsWithNoDefault, and never in both.
+// Every flag is in this map or in flagsWithNoDefault(), and never in both.
 // TestEverySettingSaysWhetherItHasADefault holds that, so a flag added to
 // the flag set fails the build until its author says which it is. A flag
 // missing from both would publish "default": null, and a consumer reads
@@ -202,21 +202,23 @@ func parserDefaults() (map[string]any, error) {
 	}, nil
 }
 
-// flagsWithNoDefault are the settings the document parser leaves empty. The
-// report publishes null for each of them, which says the setting is unset
-// until a document, a variable or a flag fills it.
-var flagsWithNoDefault = map[string]bool{
-	"config":                 true,
-	"sandbox-id":             true,
-	"zone-url":               true,
-	"client-id":              true,
-	"workload-token-file":    true,
-	"impersonate-user":       true,
-	"transparent-port":       true,
-	"ca-state-dir":           true,
-	"client-secret-file":     true,
-	"credential-static-file": true,
-	"upstream-ca-file":       true,
+// flagsWithNoDefault names the settings the document parser leaves empty.
+// The report publishes null for each of them, which says the setting is
+// unset until a document, a variable or a flag fills it.
+func flagsWithNoDefault() map[string]bool {
+	return map[string]bool{
+		"config":                 true,
+		"sandbox-id":             true,
+		"zone-url":               true,
+		"client-id":              true,
+		"workload-token-file":    true,
+		"impersonate-user":       true,
+		"transparent-port":       true,
+		"ca-state-dir":           true,
+		"client-secret-file":     true,
+		"credential-static-file": true,
+		"upstream-ca-file":       true,
+	}
 }
 
 // seconds is a duration as the report publishes it. A consumer compares a

@@ -5,9 +5,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
@@ -152,43 +152,116 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		// occupied holds listen.transparent_port before the process binds
-		// it, so the capture socket cannot open. A row that leaves it false
-		// runs no transparent frontend.
-		occupied bool
-		wantErr  error
+		// transparentPort is listen.transparent_port, built by the row
+		// because one of them holds the port against the bind. A zero
+		// result runs no transparent frontend.
+		transparentPort func(t *testing.T) int
+		// families is what the netsetup receipt records the redirect
+		// covers.
+		families    []string
+		wantCapture bool
+		wantErr     string
 	}{
-		{name: "no transparent frontend"},
-		{name: "the transparent sockets do not bind", occupied: true, wantErr: syscall.EADDRINUSE},
+		{name: "no transparent frontend", transparentPort: noPort},
+		{
+			name:            "another socket already holds the redirect port",
+			transparentPort: heldPort,
+			families:        []string{"ipv4"},
+			wantErr:         "address already in use",
+		},
+		{
+			name:            "the receipt names ipv4 and the ipv4 socket binds",
+			transparentPort: freePort,
+			families:        []string{"ipv4"},
+			wantCapture:     true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			proc := startingProcess(t, tc.occupied)
+			connect := freeAddress(t)
+			proc := startingProcess(t, connect, tc.transparentPort(t), tc.families)
 			require.ErrorIs(t, proc.ready(), errNotReady, "readiness before bind")
 
 			listener, captured, err := proc.bind(t.Context())
-			if tc.wantErr != nil {
-				require.ErrorIs(t, err, tc.wantErr, "bind")
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr, "bind")
 				require.ErrorIs(t, proc.ready(), errNotReady,
 					"readiness answered after a listener that never bound")
 				require.ErrorContains(t, proc.ready(), "the frontend listeners are not bound",
 					"the 503 says which half is missing")
+				// A bind that fails half way leaves nothing bound, so a
+				// restart finds the CONNECT address free.
+				reclaimed, reclaimErr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", connect)
+				require.NoError(t, reclaimErr, "the failed bind left the CONNECT listener open on %s", connect)
+				require.NoError(t, reclaimed.Close(), "close the reclaimed CONNECT listener")
 				return
 			}
 			require.NoError(t, err, "bind")
 			t.Cleanup(func() { _ = listener.Close() })
-			assert.Empty(t, captured, "no transparent frontend binds no capture socket")
+			for _, capture := range captured {
+				t.Cleanup(func() { _ = capture.Close() })
+			}
+			assert.Equal(t, tc.wantCapture, len(captured) > 0, "the capture sockets bound")
+			assert.Empty(t, missingFamilies(tc.families, boundFamilies(captured)),
+				"the capture bound every family the receipt names")
 			assert.NoError(t, proc.ready(), "readiness once every listener is bound")
 		})
 	}
 }
 
+// noPort runs no transparent frontend.
+func noPort(*testing.T) int { return 0 }
+
+// heldPort is a loopback port a listener holds for the whole test, so the
+// bind under test fails with EADDRINUSE on a real syscall. transparent.Listen
+// opens 127.0.0.1 first.
+func heldPort(t *testing.T) int {
+	t.Helper()
+	held, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp4", "127.0.0.1:0")
+	require.NoError(t, err, "hold the redirect port")
+	t.Cleanup(func() { _ = held.Close() })
+	return portOf(t, held.Addr())
+}
+
+// freePort is a loopback port nothing is listening on. The kernel hands out
+// one port at a time, so the port is free as soon as the listener that named
+// it closes.
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err, "take a port")
+	port := portOf(t, listener.Addr())
+	require.NoError(t, listener.Close(), "release the port")
+	return port
+}
+
+// portOf reads the port out of a bound address.
+func portOf(t *testing.T, addr net.Addr) int {
+	t.Helper()
+	_, port, err := net.SplitHostPort(addr.String())
+	require.NoError(t, err, "split %s", addr)
+	number, err := strconv.Atoi(port)
+	require.NoError(t, err, "parse the port in %s", addr)
+	return number
+}
+
+// freeAddress is a loopback address nothing is listening on. The kernel
+// hands out one port at a time, so the address is free as soon as the
+// listener that named it closes.
+func freeAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err, "take a port")
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close(), "release the port")
+	return address
+}
+
 // startingProcess is a process with its certificate written and nothing
 // bound, which is the state the sidecar is in when the kubelet first
-// probes it. Holding the transparent port drives the row where a capture
-// socket cannot open.
-func startingProcess(t *testing.T, occupyTransparentPort bool) *process {
+// probes it.
+func startingProcess(t *testing.T, connectAddr string, transparentPort int, families []string) *process {
 	t.Helper()
 	certDir := t.TempDir()
 	authority, err := ca.New(ca.Options{CommonName: "bind test"})
@@ -204,20 +277,22 @@ func startingProcess(t *testing.T, occupyTransparentPort bool) *process {
 		_ = adminServer.Run(ctx)
 	})
 
-	// The rows bind port 0, so two of them never collide. The document
-	// names no transparent port, so a row that wants one writes it after
-	// the parse.
+	// Each row picks its own ports, so two of them never collide. Both
+	// listen settings are written after the parse, which validates the
+	// document's own.
 	cfg, err := config.Parse([]byte(bindDocument), config.Overrides{})
 	require.NoError(t, err, "config.Parse")
+	cfg.Listen.Connect = connectAddr
+	cfg.Listen.TransparentPort = transparentPort
 
 	proc := &process{
-		cfg:      cfg,
-		logger:   slog.New(slog.DiscardHandler),
-		admin:    adminServer,
-		certPath: certPath,
+		cfg:             cfg,
+		logger:          slog.New(slog.DiscardHandler),
+		admin:           adminServer,
+		captureFamilies: families,
+		certPath:        certPath,
 	}
-	if occupyTransparentPort {
-		cfg.Listen.TransparentPort = heldPort(t)
+	if transparentPort != 0 {
 		proc.transparent, err = transparent.New(transparent.Options{
 			Handler:        func(net.Conn, proxy.Redirected) {},
 			MaxConnections: 1,
@@ -228,22 +303,57 @@ func startingProcess(t *testing.T, occupyTransparentPort bool) *process {
 	return proc
 }
 
-// heldPort binds a loopback port for the life of the test and reports it.
-// transparent.Listen opens 127.0.0.1 first, so a bind of that port answers
-// EADDRINUSE.
-func heldPort(t *testing.T) int {
-	t.Helper()
-	holder, err := net.Listen("tcp4", "127.0.0.1:0")
-	require.NoError(t, err, "hold a loopback port")
-	t.Cleanup(func() { _ = holder.Close() })
-	_, port, err := net.SplitHostPort(holder.Addr().String())
-	require.NoError(t, err, "split the held address")
-	number, err := strconv.Atoi(port)
-	require.NoError(t, err, "parse the held port")
-	return number
-}
-
 // bindDocument is the smallest document that starts, with the CONNECT
 // frontend on a port the kernel picks.
 const bindDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 	"listen:\n  connect: 127.0.0.1:0\nendpoints:\n  - host: example.com\n"
+
+// TestServeStopsReportingReadyWhileItDrains covers the other end of the
+// readiness contract. Each server drains for its grace period after the
+// signal, and /readyz answering 200 through that window would have the
+// kubelet keep sending the workload at listeners that are closing.
+func TestServeStopsReportingReadyWhileItDrains(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(bindDocument), config.Overrides{})
+	require.NoError(t, err, "config.Parse")
+	cfg.Listen.Connect = freeAddress(t)
+	cfg.Listen.Admin = socketPath(t)
+	cfg.CA.OutDir = t.TempDir()
+
+	proc, err := build(t.Context(), cfg, slog.New(slog.DiscardHandler), io.Discard)
+	require.NoError(t, err, "build")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stopped := make(chan error, 1)
+	go func() { stopped <- proc.serve(ctx) }()
+
+	// serve binds before it starts the admin server, so an answer on the
+	// socket is the signal that the bind is done. Nothing here polls.
+	status, body := probeAdmin(t, cfg.Listen.Admin, "readyz")
+	require.Equal(t, http.StatusOK, status, "/readyz once serve has bound: %s", body)
+
+	cancel()
+	require.NoError(t, <-stopped, "serve")
+	require.ErrorIs(t, proc.ready(), errNotReady, "readiness after the drain")
+	require.ErrorContains(t, proc.ready(), "the frontend listeners are not bound",
+		"the 503 says the listeners are gone")
+}
+
+// probeAdmin dials the admin socket the way the probe subcommand does and
+// returns the status and body of one route.
+func probeAdmin(t *testing.T, socket, route string) (int, string) {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		},
+	}}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://admin/"+route, nil)
+	require.NoError(t, err, "build the %s request", route)
+	resp, err := client.Do(req)
+	require.NoError(t, err, "GET /%s on %s", route, socket)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "read /%s", route)
+	return resp.StatusCode, string(body)
+}

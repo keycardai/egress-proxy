@@ -120,15 +120,16 @@ func TestEverySettingSaysWhetherItHasADefault(t *testing.T) {
 	require.NoError(t, err, "parserDefaults")
 
 	var opts flags
+	empty := flagsWithNoDefault()
 	classified := map[string]bool{}
 	for _, flag := range flagSet(&opts) {
 		name := flag.Names()[0]
 		_, applied := defaults[name]
 		classified[name] = true
 		switch {
-		case applied && flagsWithNoDefault[name]:
+		case applied && empty[name]:
 			assert.Fail(t, "--"+name+" is in parserDefaults and in flagsWithNoDefault, and a flag is in one")
-		case !applied && !flagsWithNoDefault[name]:
+		case !applied && !empty[name]:
 			assert.Fail(t, "--"+name+" is in neither parserDefaults nor flagsWithNoDefault; "+
 				"add it to parserDefaults with the value the parser applies, or to flagsWithNoDefault")
 		}
@@ -136,7 +137,7 @@ func TestEverySettingSaysWhetherItHasADefault(t *testing.T) {
 	for name := range defaults {
 		assert.True(t, classified[name], "parserDefaults names %q and the flag set has no such flag", name)
 	}
-	for name := range flagsWithNoDefault {
+	for name := range empty {
 		assert.True(t, classified[name], "flagsWithNoDefault names %q and the flag set has no such flag", name)
 	}
 }

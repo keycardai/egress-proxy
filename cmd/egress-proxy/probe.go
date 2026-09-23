@@ -50,8 +50,8 @@ func probeCommand(opts *flags, stdout io.Writer) *cli.Command {
 		ArgsUsage: "<" + strings.Join(probeRoutes(), "|") + ">",
 		Description: "Reads the socket named by --admin or " + config.EnvPrefix + "ADMIN, the same\n" +
 			"setting the serving process reads, and defaults to " + config.DefaultAdmin + ".\n" +
-			"healthz says the process is alive. readyz says the CONNECT listener is bound\n" +
-			"and ca.crt is written. info reports what the process enforces.",
+			"healthz says the process is alive. readyz says every frontend this process\n" +
+			"runs is bound and ca.crt is written. info reports what the process enforces.",
 		HideHelpCommand: true,
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if cmd.Args().Len() != 1 {

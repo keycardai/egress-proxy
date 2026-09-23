@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -218,10 +219,8 @@ func command(stdout, stderr io.Writer, action func(context.Context, flags) error
 }
 
 // errNoConfig is the refusal when the serve path gets no document. The
-// serve path checks the path itself and the flag holds no Required, so
-// probe and settings, which read no document, run without one. The check
-// here is the tighter of the two: Required only asks whether the flag was
-// set, and --config="" would pass it.
+// serve path refuses an empty document path, and the flag holds no
+// Required, so probe and settings run without one.
 var errNoConfig = errors.New("--config or EGRESS_PROXY_CONFIG names the configuration document, and neither is set")
 
 // process represents the configured components which make up the proxy process.
@@ -234,12 +233,17 @@ type process struct {
 	server      *proxy.Server
 	admin       *admin.Server
 	transparent *transparent.Frontend
+	// captureFamilies are the address families the netsetup receipt says
+	// the redirect covers. Every one of them needs a bound capture socket,
+	// or the redirect sends that family nowhere.
+	captureFamilies []string
 	// certPath is the CA certificate the workload trusts. Readiness checks
 	// that it is on disk.
 	certPath string
 	// listening turns true once every frontend this process runs is bound:
 	// the CONNECT listener, and the capture sockets when listen.transparent
-	// is set.
+	// is set. The shutdown path clears it, so /readyz answers 503 for the
+	// whole drain.
 	listening atomic.Bool
 }
 
@@ -300,7 +304,8 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
 		credentials: credentials, server: server, certPath: certPath,
 	}
-	if proc.transparent, err = capture(cfg, server, logger, netsetup.ContainmentRequest{}); err != nil {
+	proc.transparent, proc.captureFamilies, err = capture(cfg, server, logger, netsetup.ContainmentRequest{})
+	if err != nil {
 		return nil, err
 	}
 	proc.admin, err = admin.New(ctx, admin.Options{
@@ -438,9 +443,10 @@ func (p *process) info() any {
 	}
 }
 
-// errNotReady is what the admin socket reports at /readyz before the
-// process serves.
-var errNotReady = errors.New("egress-proxy is starting")
+// errNotReady is what the admin socket reports at /readyz while the
+// process is not serving, which is before the bind and again from the
+// moment the drain starts.
+var errNotReady = errors.New("egress-proxy is not serving")
 
 // ready decides /readyz. It answers once every frontend is bound and
 // ca.crt is on ca.out_dir, which are the two things the workload needs
@@ -466,14 +472,17 @@ func (p *process) ready() error {
 // check never services any request. The probes supply capability, sysctl,
 // network namespace, and owner reads. A zero-value request reads this process
 // and its filesystem.
+//
+// It also returns the address families the receipt records, which is what
+// the bind compares the capture sockets against.
 func capture(
 	cfg *config.Config, server *proxy.Server, logger *slog.Logger, probes netsetup.ContainmentRequest,
-) (*transparent.Frontend, error) {
+) (*transparent.Frontend, []string, error) {
 	if cfg.Listen.TransparentPort == 0 {
-		return nil, nil //nolint:nilnil // no transparent frontend is valid, not an error
+		return nil, nil, nil
 	}
 	if !transparent.Supported {
-		return nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
+		return nil, nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
 			transparent.ErrNotSupported)
 	}
 	request := probes
@@ -482,7 +491,7 @@ func capture(
 	request.UID = os.Getuid()
 	receipt, err := netsetup.Containment(request)
 	if err != nil {
-		return nil, fmt.Errorf("network capture: %w", err)
+		return nil, nil, fmt.Errorf("network capture: %w", err)
 	}
 	logger.Info("transparent network capture enabled",
 		slog.String("receipt", cfg.Netsetup.Receipt),
@@ -505,9 +514,9 @@ func capture(
 		IdleTimeout:    cfg.Limits.IdleTimeout.Duration(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("transparent frontend: %w", err)
+		return nil, nil, fmt.Errorf("transparent frontend: %w", err)
 	}
-	return frontend, nil
+	return frontend, receipt.Families, nil
 }
 
 // uncaptured returns cleartext ports outside the capture and redirect. The
@@ -546,6 +555,10 @@ func (p *process) serve(ctx context.Context) error {
 	group.Go(func() error { return p.admin.Run(ctx) })
 	group.Go(func() error {
 		<-ctx.Done()
+		// Readiness goes false before the drain starts. A kubelet that
+		// reads 200 while the listeners are closing sends the workload at
+		// a process that is going away.
+		p.listening.Store(false)
 		p.logger.Info("stopping", slog.String("cause", context.Cause(ctx).Error()))
 		return nil
 	})
@@ -585,25 +598,82 @@ func (p *process) bind(ctx context.Context) (net.Listener, []net.Listener, error
 	return listener, captured, nil
 }
 
+// errCapture is a transparent frontend this process refuses to serve
+// behind.
+var errCapture = errors.New("transparent frontend")
+
 // captureListeners binds one transparent frontend socket per address family,
 // on loopback. It returns no listeners when no transparent frontend is
 // configured.
+//
+// transparent.Listen treats a missing IPv6 socket as a valid start, because
+// a kernel with no IPv6 has no ip6tables ruleset redirecting anything to
+// one. The receipt names the families the init container programmed. A
+// family the receipt names and no socket bound refuses the start, because
+// the redirect sends that family nowhere.
 func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
 	if p.transparent == nil {
 		return nil, nil
 	}
 	listeners, err := transparent.Listen(ctx, p.cfg.Listen.TransparentPort)
 	if errors.Is(err, syscall.EACCES) {
-		return nil, fmt.Errorf("transparent frontend: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
+		return nil, fmt.Errorf("%w: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
 			"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
 			"grants only from the bounding set and, under no_new_privs, only when the process that ran this binary "+
 			"held it. Give the sidecar capabilities.add NET_BIND_SERVICE and make this binary the container "+
-			"entrypoint", err, p.cfg.Listen.TransparentPort)
+			"entrypoint", errCapture, err, p.cfg.Listen.TransparentPort)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("transparent frontend: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCapture, err)
+	}
+	bound := boundFamilies(listeners)
+	if missing := missingFamilies(p.captureFamilies, bound); len(missing) > 0 {
+		return nil, errors.Join(
+			fmt.Errorf("%w: the netsetup receipt names %s and the capture bound %s, so the redirect sends %s nowhere",
+				errCapture, strings.Join(p.captureFamilies, ","),
+				strings.Join(bound, ","), strings.Join(missing, ",")),
+			closeAll(listeners),
+		)
 	}
 	p.logger.Info("capturing redirected connections",
-		slog.String("transparent", transparent.Addresses(listeners)))
+		slog.String("transparent", transparent.Addresses(listeners)),
+		slog.Any("families", bound))
 	return listeners, nil
+}
+
+// boundFamilies names the address families a set of listeners covers, in
+// the words the netsetup receipt uses.
+func boundFamilies(listeners []net.Listener) []string {
+	var families []string
+	for _, listener := range listeners {
+		family := netsetup.FamilyIPv6.String()
+		if addr, ok := listener.Addr().(*net.TCPAddr); ok && addr.IP.To4() != nil {
+			family = netsetup.FamilyIPv4.String()
+		}
+		if !slices.Contains(families, family) {
+			families = append(families, family)
+		}
+	}
+	return families
+}
+
+// missingFamilies names the families the receipt records that no listener
+// covers.
+func missingFamilies(programmed, bound []string) []string {
+	var missing []string
+	for _, family := range programmed {
+		if !slices.Contains(bound, family) {
+			missing = append(missing, family)
+		}
+	}
+	return missing
+}
+
+// closeAll closes every listener and joins what the closes reported.
+func closeAll(listeners []net.Listener) error {
+	errs := make([]error, 0, len(listeners))
+	for _, listener := range listeners {
+		errs = append(errs, listener.Close())
+	}
+	return errors.Join(errs...)
 }

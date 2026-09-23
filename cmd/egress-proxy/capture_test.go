@@ -106,7 +106,8 @@ func TestCapture(t *testing.T) {
 				"netsetup:\n  receipt: "+path+"\nendpoints:\n  - host: pypi.org\n"), config.Overrides{})
 			require.NoError(t, err, "parse the document")
 			var logs bytes.Buffer
-			frontend, err := capture(cfg, nil, slog.New(slog.NewJSONHandler(&logs, nil)), netsetup.ContainmentRequest{
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			frontend, families, err := capture(cfg, nil, logger, netsetup.ContainmentRequest{
 				PortStart: func() (int, error) { return 1024, nil },
 			})
 			wantErr := tc.wantErr
@@ -115,11 +116,17 @@ func TestCapture(t *testing.T) {
 			}
 			if wantErr != nil {
 				require.ErrorIs(t, err, wantErr, "the refusal the caller keys on")
-				assert.Nil(t, frontend, "a capture error does not build a frontend")
+				assert.Nil(t, frontend, "a refused check builds no frontend")
+				assert.Nil(t, families, "a refused check reports no families")
 				return
 			}
 			require.NoError(t, err, "the check passes")
 			assert.Equal(t, cfg.Listen.TransparentPort != 0, frontend != nil, "a frontend exactly when one is configured")
+			var wantFamilies []string
+			if cfg.Listen.TransparentPort != 0 {
+				wantFamilies = []string{"ipv4"}
+			}
+			assert.Equal(t, wantFamilies, families, "the receipt's families, which the bind checks the sockets against")
 			for _, want := range tc.wantLog {
 				assert.Contains(t, logs.String(), want, "the start-up log")
 			}
