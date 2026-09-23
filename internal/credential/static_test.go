@@ -98,24 +98,24 @@ func TestLoadStaticFileRefusals(t *testing.T) {
 		{
 			name: "an unknown key", mode: 0o600,
 			body:    "version: 1\ncredential:\n  - resource: https://a/\n    value: v\n",
-			wantErr: `unknown field "credential"`,
+			wantErr: "unknown field or invalid value",
 		},
 		{
 			name: "an unknown key in an entry", mode: 0o600,
 			body:    "version: 1\ncredentials:\n  - resource: https://a/\n    token: v\n",
-			wantErr: `unknown field "token"`,
+			wantErr: "unknown field or invalid value",
 		},
 		{
 			name: "top-level keys that differ only in case", mode: 0o600,
 			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: one\n" +
 				"CREDENTIALS:\n  - resource: https://b/\n    value: two\n",
-			wantErr: "keys that differ only in case",
+			wantErr: "invalid object keys",
 		},
 		{
 			name: "entry keys that differ only in case", mode: 0o600,
 			body: "version: 1\ncredentials:\n  - resource: https://a/\n" +
 				"    RESOURCE: https://b/\n    value: one\n",
-			wantErr: "keys that differ only in case",
+			wantErr: "invalid object keys",
 		},
 		{
 			name: "a second YAML document", mode: 0o600,

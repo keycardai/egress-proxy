@@ -87,16 +87,16 @@ func parseStatic(path string, data []byte) (*staticDocument, error) {
 	}
 	jsonText, err := yaml.YAMLToJSONStrict(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
+		return nil, fmt.Errorf("%w %s: cannot decode YAML", errStaticFile, path)
 	}
 	if err := strictdoc.RefuseCaseFoldedJSONKeys(jsonText); err != nil {
-		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
+		return nil, fmt.Errorf("%w %s: invalid object keys", errStaticFile, path)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(jsonText))
 	decoder.DisallowUnknownFields()
 	var doc staticDocument
 	if err := decoder.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
+		return nil, fmt.Errorf("%w %s: unknown field or invalid value", errStaticFile, path)
 	}
 	if doc.Version != StaticVersion {
 		return nil, fmt.Errorf("%w %s: version is %d, this build reads version %d",
