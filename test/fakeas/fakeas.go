@@ -1,7 +1,7 @@
 // Package fakeas is an authorization server fixture for unit and acceptance
 // tests. It answers RFC 8414 discovery and the RFC 8693 token exchange that
-// the proxy posts, applies the impersonation rule the zone's policy applies,
-// and keeps every request for tests to read.
+// the proxy posts, applies the impersonation rule from the zone policy, and
+// keeps every request for tests to read.
 //
 // It authenticates clients with client_secret_basic or a client assertion.
 //
@@ -51,8 +51,8 @@ const expiresIn = 300
 // is empty for an unsigned token.
 const jwtSegments = 3
 
-// defaultNamespace is the ServiceAccount namespace the impersonation rule
-// expects when Options names none.
+// defaultNamespace is the ServiceAccount namespace that the impersonation
+// rule uses when Options does not set one.
 const defaultNamespace = "agents"
 
 // Options configures a Server.
@@ -60,8 +60,8 @@ type Options struct {
 	// Credentials maps each resource to the access token that the server issues.
 	// The server returns access_denied for an unmapped resource.
 	Credentials map[string]string
-	// Namespace is the ServiceAccount namespace that the impersonation rule
-	// expects. It defaults to "agents".
+	// Namespace is the ServiceAccount namespace that the impersonation rule uses.
+	// The default is "agents".
 	Namespace string
 	// ClientSecrets maps each client ID to its client_secret_basic secret. An
 	// empty map accepts only a client assertion.
@@ -77,7 +77,7 @@ type Request struct {
 	// client_id parameter.
 	ClientID string
 	// Actor is the subject of the client assertion. It is empty when the
-	// request authenticated with a client secret.
+	// request uses a client secret.
 	Actor string
 	// Subject is the user named by the substitute-user token.
 	Subject string
@@ -195,8 +195,8 @@ func requestShape(r *http.Request) *denial {
 	return nil
 }
 
-// issue checks client authentication, the grant shape, the impersonation
-// rule, and the resource grant, then returns the credential.
+// issue checks client authentication, the grant shape, the impersonation rule,
+// and the resource grant before it returns the credential.
 func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *denial) {
 	if refusal := s.authenticate(record, secret, hasBasic); refusal != nil {
 		return "", refusal
@@ -226,10 +226,9 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 	return value, nil
 }
 
-// impersonation applies the rule the zone's policy applies. A ServiceAccount
-// may act only for the user it is named after. A request that authenticated
-// with a client secret names no ServiceAccount, so the rule has nothing to
-// check.
+// impersonation applies the zone policy for user impersonation. A ServiceAccount
+// can act only for the user in its name. A request with a client secret names
+// no ServiceAccount, so this rule has nothing to check.
 func (s *Server) impersonation(record Request) *denial {
 	if record.Actor == "" {
 		return nil
@@ -245,9 +244,9 @@ func (s *Server) impersonation(record Request) *denial {
 	return nil
 }
 
-// authenticate accepts a client assertion alongside a client_id, or a client
-// secret that the server knows. A token-federation application credential is
-// resolved by client_id, so an assertion on its own does not name a client.
+// authenticate accepts a client assertion with a client_id or a known client
+// secret. The token-federation credential uses client_id to identify the
+// client, so the assertion alone is not enough.
 func (s *Server) authenticate(record Request, secret string, hasBasic bool) *denial {
 	switch {
 	case record.Form.Get("client_assertion") != "":

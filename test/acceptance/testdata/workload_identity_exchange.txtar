@@ -1,12 +1,10 @@
-# The exchange authenticated by the projected ServiceAccount token, end to
-# end with the built binary: the proxy sends the token as a client assertion
-# beside its client_id, the zone reads the ServiceAccount out of it, and a
-# proxy configured for a user its ServiceAccount is not named after is
-# refused with access_denied.
+# The built binary uses the projected ServiceAccount token for the exchange.
+# It sends the token as a client assertion with its client_id. The zone reads
+# the ServiceAccount from the assertion and refuses a proxy that impersonates a
+# user with a different ServiceAccount.
 #
-# The zone here is the fixture in test/fakeas, which verifies no signature.
-# The real zone, whose issuer signs the token, is exercised by the cluster
-# lane.
+# This scenario uses test/fakeas, which does not verify signatures. The cluster
+# lane uses a real zone that signs the token.
 
 [!exec:curl] skip 'curl is not installed'
 
@@ -16,8 +14,8 @@ freeport PROXY_PORT
 shortdir ADMIN_DIR
 chmod 0777 $ADMIN_DIR
 
-# The kubelet projects the token for the pod's own ServiceAccount, which is
-# named after the user the proxy impersonates.
+# The kubelet projects a token for the pod's ServiceAccount, whose name matches
+# the user that the proxy impersonates.
 satoken token system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t
 
 expand config.yaml
@@ -35,35 +33,33 @@ waitport 127.0.0.1:$PROXY_PORT
 
 env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
 
-# The admin socket names the mechanism and the token path, and carries no
-# token.
+# The admin socket names the mechanism and token path. It contains no token.
 exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
 stdout '"credential_source": "a Keycard token exchange at https://localhost:'
 stdout 'authenticated by the workload token at'
 
-# The exchange succeeds and the credential the zone issued reaches the
-# upstream.
+# The exchange succeeds, and the zone-issued credential reaches the upstream.
 exec curl -sS --cacert shared-ca/ca.crt -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/granted/repos
 stdout '^hello from upstream /granted/repos$'
 grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-issued-sekrit"' upstream/requests.log
 
-# The zone read the ServiceAccount out of the assertion and the user out of
-# the substitute-user token, and the client_id beside the assertion named
-# the application credential.
+# The zone reads the ServiceAccount from the assertion and the user from the
+# substitute-user token. The client_id beside the assertion identifies the
+# application credential.
 grep 'exchange client=acceptance-app-credential actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
 
 sigterm
 wait proxy
 audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
 
-# The token never reaches the audit stream or the log.
+# The token does not appear in the audit stream or the log.
 ! stdout 'system:serviceaccount'
 ! stderr 'zone-issued-sekrit'
 
-# A proxy that names a user its ServiceAccount is not named after is refused
-# by the zone. The proxy can put any user id on the substitute-user token,
-# and this is what stops it: the API server signs the ServiceAccount half,
-# so the pod cannot forge it.
+# The zone refuses a proxy that names a user different from the pod's
+# ServiceAccount. The proxy can put any user ID in the substitute-user token,
+# but the API server signs the ServiceAccount token, so the pod cannot forge
+# that identity.
 freeport WRONG_PROXY_PORT
 shortdir WRONG_ADMIN_DIR
 chmod 0777 $WRONG_ADMIN_DIR
@@ -81,9 +77,9 @@ env HTTPS_PROXY=http://127.0.0.1:$WRONG_PROXY_PORT
 exec curl -sS --cacert wrong-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
 stdout '^403$'
 
-# The request never reached the upstream, and the zone refused the exchange
-# rather than issuing a credential for a user this ServiceAccount cannot
-# act for.
+# The request does not reach the upstream. The zone refuses the exchange
+# instead of issuing a credential for a user that this ServiceAccount cannot
+# impersonate.
 grep -count=1 '^request ' upstream/requests.log
 grep 'actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=someone-else resource=https://granted.example/ error="access_denied"' zone/requests.log
 

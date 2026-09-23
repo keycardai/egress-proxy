@@ -121,14 +121,13 @@ The proxy writes a credential only at the placement that the endpoint names.
 
 The proxy exchanges for the upstream credential at `identity.zone_url` for
 each request that an endpoint with a credential allows. The exchange
-impersonates `identity.impersonate.user`. Exactly one of
-`identity.workload_token_file` and `identity.client_secret_file`
-authenticates it.
+impersonates `identity.impersonate.user`. The proxy authenticates with exactly
+one of `identity.workload_token_file` and `identity.client_secret_file`.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| The proxy names a user it is not entitled to act for. The substitute-user token is unsigned, so the proxy can put any user ID on the wire. | Authority comes from the client authentication, not from the subject token. Under workload identity the zone reads the ServiceAccount from the projected token, which the API server signed and the pod cannot forge, and its policy permits impersonation of exactly one user by exactly one ServiceAccount. A ServiceAccount acting for another user is refused with the OAuth code `access_denied`, which the proxy maps to `exchange_denied` and answers 403. | `TestFailuresAreTwoClasses/the_ServiceAccount_is_not_the_one_the_impersonated_user_is_named_after`, `TestASourceFailureClassIsItsDenialReason`, `workload_identity_exchange.txtar` |
-| The kubelet rotates the projected token and the proxy keeps offering the expired one. | The token file is re-read on every exchange. The client secret is read once instead, so a rotated secret takes effect on the next start. | `TestTheWorkloadTokenIsReadOnEveryExchange` |
+| The proxy names a user it cannot act for. The substitute-user token is unsigned, so the proxy can put any user ID on the wire. | The zone gets authority from client authentication, not from the subject token. Workload identity sends a projected token signed by the API server. The zone reads the ServiceAccount from it, and its policy allows that ServiceAccount to impersonate one user. The pod cannot forge the token. The zone refuses another user with OAuth code `access_denied`. The proxy maps it to `exchange_denied` and returns 403. | `TestFailuresAreTwoClasses/the_ServiceAccount_is_not_the_one_the_impersonated_user_is_named_after`, `TestASourceFailureClassIsItsDenialReason`, `workload_identity_exchange.txtar` |
+| The kubelet rotates the projected token and the proxy keeps offering the expired one. | The token file is read again for every exchange. A rotated client secret takes effect after the next start because the proxy reads it once. | `TestTheWorkloadTokenIsReadOnEveryExchange` |
 | The workload reads the projected ServiceAccount token or the client secret and mints credentials for itself, bypassing the endpoint list. | The proxy reads each file at the configured path and writes it nowhere else. Neither reaches a log line, an audit record, or an `/info` answer. The secret reaches no form parameter either, because the proxy sends it in HTTP basic credentials. A client secret file must be readable by its owner alone, and the proxy refuses any non-regular file. The pod controls whether the workload can read either path. This repository does not define that pod contract. | `TestReadSecretFileRefusals`, `TestDescribeNamesTheSourceAndNoSecret`, `TestTheWireForm`, `token_exchange.txtar`, `workload_identity_exchange.txtar` |
 | `identity.zone_url` resolves into the cluster or onto the metadata address, so the client authentication is offered to something that is not the zone. | The exchange uses the platform deny list for the zone connection. It refuses a resolved address on that list before it opens a socket. | `TestADeniedZoneAddressIsNotDialed` |
 | A server that is not the zone answers discovery, takes the client authentication, and issues credentials the proxy writes into requests. | The exchange verifies the zone with the system roots and `tls.upstream_ca_files`. It requires TLS 1.2 or later and uses no proxy. RFC 8414 section 3.3 requires the metadata to name the configured zone as its issuer. A mismatch fails the exchange before the proxy posts a secret. | `TestTheZoneIssuerMustMatchTheConfiguredZone` |
@@ -175,12 +174,12 @@ authenticates it.
   reads the file once. A rotated workload token takes effect on the next
   exchange.
 - A zone that accepts a client secret for impersonation permits it based on
-  the secret alone. That exchange names no ServiceAccount, so the zone cannot
-  limit it to one user the way the workload identity policy does. Anything
-  that holds the secret can act for any user that the zone permits. Bind the
-  application credential to one user in the zone, and treat the secret as
-  equal in power to every credential the exchange can mint. Use workload
-  identity in a cluster.
+  the secret alone. The exchange names no ServiceAccount, so the zone cannot
+  limit it to one user as it can with workload identity. Anyone who holds the
+  secret can act for any user that the zone permits. Bind the application
+  credential to one user in the zone, and treat the secret as equal in power
+  to every credential the exchange can mint. Use workload identity in a
+  cluster.
 - The proxy does not offer HTTP/2 to the workload. The tunnel negotiates
   `http/1.1` only. gRPC through the proxy is not yet supported. Server-sent
   events (SSE) should work through the proxy.

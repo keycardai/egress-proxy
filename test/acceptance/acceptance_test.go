@@ -186,8 +186,9 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 //
 //	satoken FILE SUBJECT
 //
-// The token is an unsigned JWT whose sub is SUBJECT. The fake zone reads
-// that claim and verifies no signature, so a scenario needs no key.
+// The token is an unsigned JWT with SUBJECT as its sub claim. The fake zone
+// reads that claim and does not verify a signature, so the scenario needs no
+// signing secret.
 func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 2 {
 		ts.Fatalf("usage: satoken FILE SUBJECT")
@@ -196,7 +197,7 @@ func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Check(err)
 	encode := base64.RawURLEncoding.EncodeToString
 	token := encode([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + encode(claims) + "." + encode([]byte("signature"))
-	// The kubelet projects the token at 0644.
+	// The kubelet writes the projected token with mode 0644.
 	ts.Check(os.WriteFile(ts.MkAbs(args[0]), []byte(token), 0o644))
 }
 

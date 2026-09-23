@@ -25,8 +25,8 @@ import (
 	"github.com/keycardai/egress-proxy/test/fakeas"
 )
 
-// The identity used by the fixture. The ServiceAccount is named after the
-// user, which is the rule the zone's policy applies.
+// The fixture uses a ServiceAccount named after the user because the zone
+// policy requires that match.
 const (
 	user         = "igmua2g0fwapl21qll7tczdw7t"
 	clientID     = "app-cred-1"
@@ -36,8 +36,8 @@ const (
 	granted      = "gho_the_upstream_credential"
 )
 
-// serviceAccount is the sub of a projected token for the user's own
-// ServiceAccount.
+// serviceAccount is the subject of a projected token for the ServiceAccount
+// that matches the user.
 const serviceAccount = "system:serviceaccount:" + namespace + ":" + user
 
 // zone is a fake authorization server over TLS. The exchange refuses a
@@ -121,21 +121,22 @@ func unsignedJWT(t *testing.T, subject string) string {
 	return encode([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + encode(payload) + "." + encode([]byte("signature"))
 }
 
-// TestTheWireForm checks each exchange parameter for each client
-// authentication mechanism. The zone reads these names, so they define the
-// contract with it.
+// TestTheWireForm checks every exchange parameter for both client
+// authentication mechanisms. The zone reads these values, so they define its
+// request contract.
 func TestTheWireForm(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		// adjust selects the mechanism. Nil keeps the client secret.
+		// adjust selects the client authentication mechanism. Nil keeps the client
+		// secret.
 		adjust func(t *testing.T) func(*exchange.Options)
-		// wantForm is every parameter the form must include, exactly.
+		// wantForm lists every form parameter the request must include.
 		wantForm map[string]string
-		// wantAbsent are the parameters the form must not include.
+		// wantAbsent lists every form parameter the request must omit.
 		wantAbsent []string
-		// wantActor is the ServiceAccount the zone read from the assertion.
+		// wantActor is the ServiceAccount that the zone reads from the assertion.
 		wantActor string
 	}{
 		{
@@ -152,8 +153,8 @@ func TestTheWireForm(t *testing.T) {
 				"resource":              resource,
 				"client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
 				"client_assertion":      unsignedJWT(t, serviceAccount),
-				// A token-federation application credential is resolved by
-				// client_id, so the assertion alone does not name the client.
+				// The token-federation credential uses client_id to identify the
+				// client.
 				"client_id": clientID,
 			},
 			wantAbsent: []string{"actor_token", "actor_token_type", "client_secret", "scope", "audience"},
@@ -168,8 +169,8 @@ func TestTheWireForm(t *testing.T) {
 				"subject_token_type": "urn:keycard:params:oauth:token-type:substitute-user",
 				"resource":           resource,
 			},
-			// The secret uses the Authorization header. It reaches no form
-			// parameter and no request log.
+			// The secret uses the Authorization header. It does not appear in the
+			// form or request log.
 			wantAbsent: []string{
 				"client_assertion", "client_assertion_type", "client_secret", "client_id",
 				"actor_token", "actor_token_type", "scope", "audience",
@@ -228,8 +229,8 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 		name string
 		// secret authenticates the client. An empty value uses the known secret.
 		secret string
-		// tokenSubject switches the case onto workload identity with this
-		// sub in the projected token.
+		// tokenSubject selects workload identity and sets this subject in the
+		// projected token.
 		tokenSubject string
 		// stall holds the token endpoint open until the case ends, so only
 		// the budget can end the exchange.
@@ -672,9 +673,9 @@ func TestDescribeNamesTheSourceAndNoSecret(t *testing.T) {
 	}
 }
 
-// TestTheWorkloadTokenIsReadOnEveryExchange pins what the kubelet needs. It
-// rotates the projected token under a running process, so a token read once
-// at start-up would expire.
+// TestTheWorkloadTokenIsReadOnEveryExchange checks that the kubelet can rotate
+// the projected token. It replaces the file while the process runs, so a
+// source that reads the token only at start-up would keep using an old token.
 func TestTheWorkloadTokenIsReadOnEveryExchange(t *testing.T) {
 	t.Parallel()
 	zone := newZone(t, nil)
@@ -687,8 +688,8 @@ func TestTheWorkloadTokenIsReadOnEveryExchange(t *testing.T) {
 	_, err := source.Credential(t.Context(), resource)
 	require.NoError(t, err, "the first exchange")
 
-	// The kubelet replaces the file. The claims stay the same, so the
-	// exchange still succeeds and only the bytes differ.
+	// The kubelet replaces the file. The claims stay the same, so the second
+	// exchange succeeds with different token bytes.
 	rotated := unsignedJWT(t, serviceAccount) + "-rotated"
 	require.NoError(t, os.WriteFile(path, []byte(rotated), 0o600), "rotate the token file")
 

@@ -5,12 +5,11 @@
 // subject_token is an unsigned substitute-user JWT, so the proxy sends no
 // signature. The zone's policy must refuse an unauthorized user.
 //
-// Two mechanisms authenticate the client. Workload identity sends the
-// projected ServiceAccount token as an RFC 7523 client assertion, and the
-// zone's policy ties that ServiceAccount to exactly one user. A client secret
-// sends client_secret_basic. A secret names no ServiceAccount, so a zone that
-// accepts one permits impersonation on the strength of the secret alone.
-// Prefer workload identity.
+// Workload identity sends the projected ServiceAccount token as an RFC 7523
+// client assertion. The zone policy ties that ServiceAccount to one user. A
+// client secret uses client_secret_basic without any binding to the
+// ServiceAccount, so a zone that accepts it permits impersonation based on the
+// secret alone. Use workload identity in a Kubernetes cluster deployment.
 package exchange
 
 import (
@@ -84,8 +83,8 @@ type Options struct {
 	ClientID string
 	// ImpersonateUser is the IAM user public ID for each exchange.
 	ImpersonateUser string
-	// WorkloadTokenFile is the projected ServiceAccount token, re-read on
-	// every exchange because the kubelet rotates it.
+	// WorkloadTokenFile is the projected ServiceAccount token. The proxy reads the
+	// file for every exchange because the kubelet rotates it.
 	WorkloadTokenFile string
 	// ClientSecret is the application credential secret. The proxy reads it
 	// once, so a rotated secret takes effect after restart.
@@ -166,11 +165,11 @@ func (o Options) checkZoneURL() error {
 	return nil
 }
 
-// application builds the client credential and the phrase Describe names it
-// with. It refuses a configuration that names neither mechanism or both,
-// because the two authenticate with different authority.
+// application builds the client credential and the description text. It
+// refuses a configuration with neither mechanism or with both, because each
+// mechanism provides different authority.
 //
-//nolint:ireturn // the SDK models the two mechanisms as one interface
+//nolint:ireturn // the SDK uses one interface for both mechanisms
 func (o Options) application() (oauth.ApplicationCredential, string, error) {
 	switch {
 	case o.WorkloadTokenFile != "" && o.ClientSecret != "":
@@ -190,12 +189,12 @@ func (o Options) application() (oauth.ApplicationCredential, string, error) {
 	}
 }
 
-// workloadIdentity authenticates with the projected ServiceAccount token.
-// The file source re-reads the file on every exchange. The client id goes on
-// the form beside the assertion, because a token-federation application
-// credential is resolved by it rather than by the assertion's subject.
+// workloadIdentity authenticates with the projected ServiceAccount token. The
+// file source reads the file for every exchange. The client ID goes on the form
+// with the assertion because the token-federation credential uses it to identify
+// the client.
 //
-//nolint:ireturn // the SDK models the two mechanisms as one interface
+//nolint:ireturn // polymorphism intended here
 func (o Options) workloadIdentity() (oauth.ApplicationCredential, string, error) {
 	tokens, err := oauth.NewFileTokenSource(oauth.WithFileTokenPath(o.WorkloadTokenFile))
 	if err != nil {
@@ -294,7 +293,7 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 	defer cancel()
 
 	// Workload identity reads the current token file here, so a rotated token
-	// reaches the zone without a restart. Neither mechanism reads the prepare
+	// reaches the zone without a restart. Both mechanisms ignore the prepare
 	// options, so they are nil.
 	request, err := s.application.PrepareTokenExchangeRequest(ctx, s.subject, resource, nil)
 	if err != nil {
