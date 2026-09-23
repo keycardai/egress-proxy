@@ -106,6 +106,24 @@ func TestLoadStaticFileRefusals(t *testing.T) {
 			body:    "version: 1\ncredentials:\n  - resource: https://a/\n    token: v\n",
 			wantErr: `unknown field "token"`,
 		},
+		{
+			name: "top-level keys that differ only in case", mode: 0o600,
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: one\n" +
+				"CREDENTIALS:\n  - resource: https://b/\n    value: two\n",
+			wantErr: "keys that differ only in case",
+		},
+		{
+			name: "entry keys that differ only in case", mode: 0o600,
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n" +
+				"    RESOURCE: https://b/\n    value: one\n",
+			wantErr: "keys that differ only in case",
+		},
+		{
+			name: "a second YAML document", mode: 0o600,
+			body: "version: 1\ncredentials:\n  - resource: https://a/\n    value: one\n" +
+				"---\nversion: 1\ncredentials:\n  - resource: https://b/\n    value: two\n",
+			wantErr: "more than one YAML document",
+		},
 		{name: "no credentials at all", body: "version: 1\n", mode: 0o600, wantErr: "credentials is empty"},
 		{
 			name: "an entry without a resource", mode: 0o600,

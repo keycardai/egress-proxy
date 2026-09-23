@@ -1,6 +1,7 @@
 package credential
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"strings"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/keycardai/egress-proxy/internal/strictdoc"
 )
 
 // StaticVersion is the only credential file version this build reads.
@@ -79,11 +82,17 @@ func LoadStaticFile(path string) (*StaticFile, error) {
 // parseStatic decodes the document and refuses a key it does not define, so
 // a misspelled key never leaves an endpoint without its credential.
 func parseStatic(path string, data []byte) (*staticDocument, error) {
+	if err := strictdoc.RefuseSecondYAMLDocument(data); err != nil {
+		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
+	}
 	jsonText, err := yaml.YAMLToJSONStrict(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(jsonText)))
+	if err := strictdoc.RefuseCaseFoldedJSONKeys(jsonText); err != nil {
+		return nil, fmt.Errorf("%w %s: %w", errStaticFile, path, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(jsonText))
 	decoder.DisallowUnknownFields()
 	var doc staticDocument
 	if err := decoder.Decode(&doc); err != nil {

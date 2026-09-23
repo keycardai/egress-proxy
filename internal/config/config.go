@@ -27,6 +27,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
+	"github.com/keycardai/egress-proxy/internal/strictdoc"
 )
 
 // Defaults for the process settings.
@@ -291,14 +292,14 @@ func Load(path string, overrides Overrides) (*Config, error) {
 // Parse parses a document, applies the overrides over it and the defaults
 // under both, and validates the result.
 func Parse(data []byte, overrides Overrides) (*Config, error) {
-	if err := refuseSecondDocument(data); err != nil {
+	if err := strictdoc.RefuseSecondYAMLDocument(data); err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)
 	}
 	jsonText, err := yaml.YAMLToJSONStrict(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)
 	}
-	if err = refuseCaseFoldedKeys(jsonText); err != nil {
+	if err = strictdoc.RefuseCaseFoldedJSONKeys(jsonText); err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)
 	}
 	canonical, err := jcs.Transform(jsonText)
