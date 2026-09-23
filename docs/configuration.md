@@ -100,9 +100,9 @@ environment.
 
 The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
-`document_digest`, `overridden`, the listen and limit settings, the CA output
-directory and expiry, the endpoint hosts, the cluster ranges, and the deny
-list exceptions. The socket has mode 0600 in a directory with mode 0700. The proxy sets that
+`document_digest`, `config_digest`, `overridden`, the listen and limit
+settings, the CA output directory and expiry, the endpoint hosts, the cluster
+ranges, and the deny list exceptions. The socket has mode 0600 in a directory with mode 0700. The proxy sets that
 directory mode on every start and refuses to start when the directory does
 not end up at mode 0700, so no other uid in the pod can reach the socket.
 Keep `ca.out_dir` out of that directory: the workload cannot traverse it.

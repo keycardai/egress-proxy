@@ -44,7 +44,7 @@ env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
 exec curl -sS --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello
 stdout '^hello from upstream /hello$'
 
-# An unlisted host is refused at the CONNECT; curl fails and reports the
+# An unlisted host is refused at the CONNECT. curl fails and reports the
 # CONNECT status.
 ! exec curl -sS -o /dev/null -w '%{http_connect}' https://denied.invalid/
 stdout '^403$'

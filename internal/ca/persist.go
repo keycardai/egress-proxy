@@ -40,8 +40,8 @@ var errSharedDirectory = errors.New("ca: the state directory and the output dire
 // cleans both paths, so a trailing slash, a repeated separator or a dot
 // segment cannot hide a nesting the filesystem honours.
 //
-// It compares text and cannot see a symlink. PrepareDirectories resolves the
-// paths first and then calls this, which is the check that holds.
+// It compares text and cannot see a symlink. Resolve both paths before
+// calling it wherever a symlink can hide the overlap.
 func Overlaps(a, b string) bool {
 	a, b = filepath.Clean(a), filepath.Clean(b)
 	separator := string(filepath.Separator)

@@ -7,10 +7,10 @@
 // through httputil.ReverseProxy.
 //
 // net/http serves the loop inside the tunnel, not goproxy. goproxy v1.9.1
-// dereferences a nil URL when a request inside a MITM tunnel carries an
-// asterisk-form target and a Host with a port (https.go line 498). That
-// panic runs in a goroutine goproxy starts, so no recover outside goproxy
-// reaches it. net/http recovers a panic per connection, routes `OPTIONS *`
+// dereferences a nil URL in (*ProxyHttpServer).handleHttps when a request
+// inside a MITM tunnel carries an asterisk-form target and a Host with a
+// port. That panic runs in a goroutine goproxy starts, so no recover outside
+// goproxy reaches it. net/http recovers a panic per connection, routes `OPTIONS *`
 // to the handler through DisableGeneralOptionsHandler, and streams
 // responses.
 //

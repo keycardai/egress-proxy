@@ -4,7 +4,7 @@ The Keycard egress proxy intercepts outbound network requests from an untrusted 
 
 It is a forward "man-in-the-middle" (MITM) proxy which terminates TLS and governs outbound connections with Keycard policy, which allows or denies target destinations and replaces placeholder credentials with actual bearer tokens, API keys or other real credentials transparently to the untrusted agent workload.
 
-Currently only HTTP/HTTPS is supported.
+It proxies HTTP and HTTPS.
 
 This project does not provide workload isolation "sandboxing" or the network configuration necessary for traffic to be forced through the proxy, or for the untrusted workload to trust the proxy's self-signed root CA. This service is designed to be deployed as a component into such a configuration, as a means by which trust can be removed from untrustworthy workloads. See [https://github.com/keycardai/agent-sandbox-poc] for a reference example of such a deployment.
 
@@ -23,7 +23,7 @@ document lists and nothing else:
 
     HTTPS_PROXY=http://127.0.0.1:3128 curl --cacert ./shared-ca/ca.crt https://pypi.org/simple/
 
-Every decision is one JSON line on stdout; logs are JSON on stderr. The admin
+Every decision is one JSON line on stdout. Logs are JSON on stderr. The admin
 socket answers `/healthz` and `/info`:
 
     curl --unix-socket /tmp/egress-admin.sock http://admin/info
@@ -38,7 +38,7 @@ enforces and what it does not.
     make all        # build, test, lint, checks, acceptance
 
 Go 1.27.1 or newer. The build-time tools are `tool` directives in `go.mod`,
-built by the `go` command on first use; nothing else needs installing.
+built by the `go` command on first use. Nothing else needs installing.
 
 ## License
 

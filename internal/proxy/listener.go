@@ -82,8 +82,7 @@ func (c *idleConn) SetWriteDeadline(t time.Time) error {
 //
 // arm holds the mutex from reading the caller's deadline to setting the
 // underlying one. net/http aborts a pending read by setting a past deadline
-// from another goroutine. Without the lock, an idle bound set between that
-// read and the abort overwrites the abort and leaves the read blocked.
+// from another goroutine, and the lock keeps that abort in force.
 func (c *idleConn) arm(read bool) error {
 	bound := time.Now().Add(c.timeout)
 	c.mu.Lock()

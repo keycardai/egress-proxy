@@ -1,9 +1,11 @@
 // Package gates proves that each CI gate rejects what it exists to reject.
-// Every gate script under scripts/ accepts a module directory, and each case
-// points a script at a fixture module under testdata that must fail it, with
-// the message a developer sees. A control case per gate shows the gate
-// passing the same fixture once the test removes the offending input, so a
-// gate that fails everything cannot pass this test.
+// Each case points a gate script at a fixture module under testdata that
+// must fail it, and asserts the message a developer sees. Every script this
+// test runs takes that directory as its first argument.
+//
+// The lint gate also has a control case: the same fixture passes without the
+// gate_negative build tag, which leaves the offending file out of the build.
+// A gate that failed everything could not pass that case.
 package gates_test
 
 import (

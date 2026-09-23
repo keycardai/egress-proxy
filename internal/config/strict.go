@@ -14,10 +14,9 @@ var (
 	errKeyNotString = errors.New("an object key is not a string")
 )
 
-// refuseCaseFoldedKeys walks the JSON once and refuses two keys at one
-// level that are equal under case folding. The struct decoder matches field
-// names case-insensitively, so "verify" and "Verify" both land on one field
-// and the later one wins in silence.
+// refuseCaseFoldedKeys walks the JSON once and refuses two keys in one
+// object that differ only in case. The struct decoder matches a field name
+// case-insensitively, so both keys name one setting.
 func refuseCaseFoldedKeys(jsonText []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(jsonText))
 	return walkValue(decoder, "")

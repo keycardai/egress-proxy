@@ -185,8 +185,8 @@ The gates and what each enforces:
 
 - **Lint** (`scripts/lint.sh`): `.golangci.yml`. The `depguard` rule is the
   import gate for working agreement 6. `gci` requires imports in three
-  groups: standard library, third-party, this module. `gocyclo` caps a
-  function's cyclomatic complexity at 12.
+  groups: standard library, third-party, this module. `cyclop` caps a
+  function's cyclomatic complexity at 10, and does not run on tests.
 - **Licenses** (`scripts/check-licenses.sh`): every module in the build list
   carries a license on the SPDX allow-list in that script: Apache-2.0, MIT,
   BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0. GPL, LGPL and AGPL are off it.

@@ -27,8 +27,7 @@ var errNoAuthority = errors.New("ca: store has no authority")
 // minting error here.
 type Store struct {
 	authority *Authority
-	// mu serializes minting, so two simultaneous handshakes for one name
-	// mint one leaf.
+	// mu serializes minting server certificates.
 	mu    sync.Mutex
 	cache *lru.Cache[string, *tls.Certificate]
 	mints atomic.Int64

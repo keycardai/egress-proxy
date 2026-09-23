@@ -57,8 +57,6 @@ const (
 	// a server name the policy allowed. The handshake fails and the tunnel
 	// carries no request.
 	ReasonCertificateUnavailable Reason = "certificate_unavailable"
-	// ReasonEndpointAllowed is the reason on every allow. A request-scoped
-	// record names the endpoint that matched; a connection-scoped record
-	// names none, because no path took part in that decision.
+	// ReasonEndpointAllowed is the reason on every allow, at both scopes.
 	ReasonEndpointAllowed Reason = "endpoint_allowed"
 )

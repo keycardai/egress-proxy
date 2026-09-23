@@ -57,7 +57,8 @@ type Decision struct {
 	Verdict Verdict
 	Reason  Reason
 	// Endpoint is the endpoint that matched. Request sets it on an allow.
-	// Connection leaves it nil, because that decision matches no path.
+	// Connection leaves it nil: that decision has no path in it, and a path
+	// prefix on such a record would be misleading.
 	Endpoint *Endpoint
 }
 
@@ -145,14 +146,8 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 // reach this host on this port at all. The deny list answers first, then the
 // endpoint list.
 //
-// An allow here names no endpoint. The question has no path in it, so no
-// endpoint has matched, and naming one would put a path prefix on a record
-// that no path took part in. Request names the endpoint that matched.
-//
-// A port no endpoint covers reads as no_matching_endpoint, the same code a
-// host no endpoint names reads as. The endpoint is the unit a document
-// declares, and a destination it does not declare is absent whichever part
-// of the destination differs.
+// A port no endpoint covers reads as no_matching_endpoint, the same code as
+// a host no endpoint names. The endpoint is the unit a document declares.
 func (m *Matcher) Connection(host string, port int) Decision {
 	host = NormalizeHost(host)
 	if host == "" {
@@ -171,14 +166,12 @@ func (m *Matcher) Connection(host string, port int) Decision {
 
 // Request makes the request-scoped decision for a path on a host.
 //
-// requestPath is the escaped path, exactly the bytes the upstream receives.
-// Matching those bytes is what makes the decision and the forwarded request
-// agree: "/a%2Fb" is one segment named "a/b" to an upstream, so it does not
-// fall under the prefix "/a/", and the matcher does not put it there either.
+// requestPath is the escaped path, exactly the bytes the upstream receives,
+// so the decision and the forwarded request read one path.
 //
 // The path must be absolute and already in its shortest form, decoded as
-// well as escaped. A path that carries dot segments matches one endpoint
-// here and reaches another upstream, so Request refuses it.
+// well as escaped. Request refuses a path carrying dot segments, which can
+// match one endpoint here and reach another upstream.
 func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	connection := m.Connection(host, port)
 	if !connection.Allowed() {

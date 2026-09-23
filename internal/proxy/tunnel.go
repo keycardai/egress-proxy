@@ -95,7 +95,7 @@ func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goprox
 			slog.String("reason", string(decision.Reason)))
 		// goproxy writes ctx.Resp to the client. The body is an in-memory
 		// reader with nothing to release.
-		//nolint:bodyclose // see above
+		//nolint:bodyclose // an in-memory body has nothing to release
 		ctx.Resp = denyResponse(ctx.Req, statusFor(decision.Reason), decision.Reason, state.connectionID)
 		return &goproxy.ConnectAction{Action: goproxy.ConnectReject}, authority
 	}
@@ -423,8 +423,9 @@ func statusFor(reason policy.Reason) int {
 		policy.ReasonCredentialUnavailable:
 		return http.StatusForbidden
 	case policy.ReasonEndpointAllowed:
-		// An allow never becomes a refusal. It is listed here so that a new
-		// reason code must choose a status.
+		// An allow never reaches this function. The case is here because
+		// exhaustive requires every reason code, whatever the default arm
+		// returns.
 		return http.StatusForbidden
 	default:
 		return http.StatusForbidden
