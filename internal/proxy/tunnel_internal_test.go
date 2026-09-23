@@ -118,6 +118,54 @@ func handshakeServer(t *testing.T, buf *bytes.Buffer, budget time.Duration, sink
 // allowedHost is the CONNECT authority the handshake cases tunnel to.
 const allowedHost = "upstream.test"
 
+// TestATunnelConfigDoesNotResume holds the invariant tlsConfig documents.
+// GetCertificate is the only place the SNI is checked and the only place
+// state.sni is set, and a resumed handshake skips it. The case drives two
+// handshakes through one config, because a config built per tunnel gets its
+// own ticket keys and hides a resumption that hoisting the config would
+// expose.
+func TestATunnelConfigDoesNotResume(t *testing.T) {
+	t.Parallel()
+	server := handshakeServer(t, &bytes.Buffer{}, time.Minute, &recordingSink{})
+	state := &tunnel{connectionID: "conn-1", host: allowedHost, port: 443}
+	config := server.tlsConfig(state)
+	cache := tls.NewLRUClientSessionCache(8)
+	for _, name := range []string{"the first handshake", "the second handshake"} {
+		state.sni = ""
+		client, peer := net.Pipe()
+		serverConn := tls.Server(peer, config)
+		served := make(chan error, 1)
+		go func() {
+			if err := serverConn.HandshakeContext(t.Context()); err != nil {
+				served <- err
+				return
+			}
+			_, err := serverConn.Write([]byte("hi"))
+			served <- err
+		}()
+		clientConn := tls.Client(client, &tls.Config{
+			ServerName:         allowedHost,
+			ClientSessionCache: cache,
+			InsecureSkipVerify: true, //nolint:gosec // G402: the case is about resumption, not the chain
+			MinVersion:         tls.VersionTLS12,
+		})
+		require.NoError(t, clientConn.HandshakeContext(t.Context()), "%s", name)
+		// The read takes in any session ticket the server sent, so the next
+		// handshake would offer it.
+		payload := make([]byte, 2)
+		_, err := io.ReadFull(clientConn, payload)
+		require.NoError(t, err, "read on %s", name)
+		require.NoError(t, <-served, "the server side of %s", name)
+
+		assert.False(t, clientConn.ConnectionState().DidResume, "%s resumed", name)
+		assert.Equal(t, allowedHost, state.sni, "GetCertificate ran on %s", name)
+		// Close the pipe rather than the TLS conn: net.Pipe is unbuffered
+		// and nothing reads the close_notify.
+		_ = client.Close()
+		_ = peer.Close()
+	}
+}
+
 // TestHandshakeFailureLogging covers both arms of logHandshakeFailure. A
 // handshake that spends the whole budget holds a connection slot for that
 // long, which is the case an operator has to see, so it warns. A client that

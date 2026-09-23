@@ -190,10 +190,17 @@ func (s *Server) recoverConn(client net.Conn, state *tunnel) {
 // tlsConfig is the server side of one tunnel. It mints a leaf for the SNI,
 // and only when the SNI is the CONNECT authority. A handshake with no SNI,
 // or with another name, fails and lands on the connection's audit record.
+//
+// Resumption is disabled, so crypto/tls calls GetCertificate on every
+// handshake. That is the only place the SNI is checked and the only place
+// state.sni is set. NEVER enable resumption here: a resumed handshake skips
+// GetCertificate, which leaves state.sni empty and denies every request in
+// the tunnel with host_mismatch.
 func (s *Server) tlsConfig(state *tunnel) *tls.Config {
 	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"http/1.1"},
+		MinVersion:             tls.VersionTLS12,
+		NextProtos:             []string{"http/1.1"},
+		SessionTicketsDisabled: true,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := policy.NormalizeHost(hello.ServerName)
 			var refusal error
@@ -283,12 +290,17 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 	recorder := &statusRecorder{ResponseWriter: w}
 	s.reverse.ServeHTTP(recorder, r.WithContext(context.WithValue(r.Context(), forwardKey{}, fwd)))
 	record.Outcome = &audit.Outcome{Status: recorder.status}
+	// A refusal on the upstream leg overturns the verdict and keeps the rest
+	// of the decision. The endpoint the allow named stays on the record, so
+	// an audit query can find which rule covered the traffic.
 	switch {
 	case fwd.denied:
-		record.Decision = audit.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonDenyAlways}
+		record.Decision.Verdict = policy.VerdictDeny
+		record.Decision.Reason = policy.ReasonDenyAlways
 		record.Decision.Error = fwd.err.Error()
 	case fwd.err != nil:
-		record.Decision = audit.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonUpstreamFailed}
+		record.Decision.Verdict = policy.VerdictDeny
+		record.Decision.Reason = policy.ReasonUpstreamFailed
 		record.Outcome.Error = fwd.err.Error()
 	}
 	s.opts.Audit.Emit(record)

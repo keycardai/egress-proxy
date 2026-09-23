@@ -172,12 +172,26 @@ func (a *Authority) NotAfter() time.Time {
 	return a.cert.NotAfter
 }
 
+// prepareOutDir creates the output directory and leaves it readable by the
+// workload, which runs as another uid. The mode is set on every start:
+// MkdirAll subtracts the process umask, which a hardened base image sets to
+// 0077, and applies outDirMode only to a directory it creates.
+func prepareOutDir(dir string) error {
+	if err := os.MkdirAll(dir, outDirMode); err != nil {
+		return fmt.Errorf("ca: create %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, outDirMode); err != nil {
+		return fmt.Errorf("ca: set mode on %s: %w", dir, err)
+	}
+	return nil
+}
+
 // WriteCertificate writes the CA certificate to dir and returns the path. It
 // writes the certificate and nothing else. The write is a create-and-rename,
 // so a workload reading the path never sees a partial file.
 func (a *Authority) WriteCertificate(dir string) (string, error) {
-	if err := os.MkdirAll(dir, outDirMode); err != nil {
-		return "", fmt.Errorf("ca: create %s: %w", dir, err)
+	if err := prepareOutDir(dir); err != nil {
+		return "", err
 	}
 	final := filepath.Join(dir, CertificateFileName)
 	tmp, err := os.CreateTemp(dir, CertificateFileName+".tmp*")

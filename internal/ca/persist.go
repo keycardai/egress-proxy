@@ -55,8 +55,8 @@ func Overlaps(a, b string) bool {
 // Call it before LoadOrNew. Resolving the paths needs them to exist, and a
 // refused pair must never have a key written into it.
 func PrepareDirectories(stateDir, outDir string) error {
-	if err := os.MkdirAll(outDir, outDirMode); err != nil {
-		return fmt.Errorf("ca: create %s: %w", outDir, err)
+	if err := prepareOutDir(outDir); err != nil {
+		return err
 	}
 	if stateDir == "" {
 		return nil

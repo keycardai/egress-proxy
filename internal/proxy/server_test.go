@@ -719,6 +719,8 @@ func TestANameResolvingIntoADeniedRangeIsRefusedAtTheDial(t *testing.T) {
 	assert.Equal(t, policy.ReasonDenyAlways, record.Decision.Reason, "record reason")
 	assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
 	assert.Contains(t, record.Decision.Error, "deny list", "the record says why")
+	assert.Equal(t, h.upstreamAuthority()+"/ok/", record.Decision.Endpoint,
+		"the endpoint the request decision allowed stays on the overturned record")
 	require.NotNil(t, record.Outcome)
 	assert.Equal(t, http.StatusForbidden, record.Outcome.Status, "record status")
 	assert.Zero(t, h.upstream.connections.Load(), "the upstream was never dialled")
@@ -733,6 +735,8 @@ func TestAnUnreachableUpstreamIsAGateway(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, answer.status, "response status")
 	assert.Equal(t, policy.ReasonUpstreamFailed, answer.reason(), "response reason")
 	record := h.sink.find(t, "the failed upstream", byReason(audit.ScopeRequest, policy.ReasonUpstreamFailed))
+	assert.Equal(t, h.upstreamAuthority()+"/ok/", record.Decision.Endpoint,
+		"the endpoint the request decision allowed stays on the overturned record")
 	require.NotNil(t, record.Outcome)
 	assert.Equal(t, http.StatusBadGateway, record.Outcome.Status, "record status")
 	assert.NotEmpty(t, record.Outcome.Error, "the record says why")

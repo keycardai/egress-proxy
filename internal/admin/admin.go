@@ -33,8 +33,10 @@ const (
 	maxSocketPath = 103
 
 	readHeaderTimeout = 5 * time.Second
-	// shutdownGrace bounds how long Run waits for an in-flight request after
-	// its context is cancelled. A health probe is short.
+	// shutdownGrace bounds how long Shutdown waits for a handler that is
+	// still writing its response. Every request context derives from the run
+	// context, so cancelling that context has already told each handler to
+	// stop. A health probe is short.
 	shutdownGrace = 5 * time.Second
 )
 
@@ -127,8 +129,9 @@ func (s *Server) Path() string {
 	return s.path
 }
 
-// stop drains the server for the grace period, closes open handles and unlinks
-// the listen socket. It logs a shutdown that ran out of time.
+// stop closes the listener and idle connections, waits up to shutdownGrace for
+// a handler that is still writing, and unlinks the listen socket. A shutdown
+// that runs out of time is logged and the remaining connections are closed.
 func (s *Server) stop(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 	defer cancel()
