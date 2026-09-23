@@ -1,4 +1,5 @@
-// Package admin serves health and process information over a Unix socket.
+// Package admin serves health, readiness and process information over a
+// Unix socket.
 //
 // The admin surface is NEVER a TCP port, loopback included, because the proxy
 // may share the pod's network namespace with the workload it governs. In such a
@@ -13,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -42,7 +44,7 @@ const (
 
 var errSocketPath = errors.New("admin: socket path refused")
 
-// Server answers /healthz and /info on a Unix socket.
+// Server answers /healthz, /readyz and /info on a Unix socket.
 type Server struct {
 	path     string
 	listener net.Listener
@@ -50,9 +52,24 @@ type Server struct {
 	logger   *slog.Logger
 }
 
-// New creates the socket at path. It calls info on every /info request and
-// writes the result as JSON. A nil logger discards.
-func New(ctx context.Context, path string, info func() any, logger *slog.Logger) (*Server, error) {
+// Options are the socket and the answers the server gives on it.
+type Options struct {
+	// Path is the socket's absolute file system path.
+	Path string
+	// Info is called for every /info request and its result is written as
+	// JSON.
+	Info func() any
+	// Ready decides /readyz. A nil error answers 200 and an error answers
+	// 503 with the error text, so a probe reads why the process is not
+	// serving yet. A nil Ready answers 200.
+	Ready func() error
+	// Logger discards when nil.
+	Logger *slog.Logger
+}
+
+// New creates the socket at opts.Path and serves the routes opts describes.
+func New(ctx context.Context, opts Options) (*Server, error) {
+	path, logger := opts.Path, opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -80,23 +97,45 @@ func New(ctx context.Context, path string, info func() any, logger *slog.Logger)
 		return nil, errors.Join(fmt.Errorf("admin: set mode on %s: %w", path, err), listener.Close(), removeSocket(path))
 	}
 
+	return &Server{
+		path:     path,
+		listener: listener,
+		server:   &http.Server{Handler: routes(opts), ReadHeaderTimeout: readHeaderTimeout},
+		logger:   logger,
+	}, nil
+}
+
+// routes builds the admin surface. /healthz says the process is alive,
+// /readyz says it is serving, and /info reports what it enforces.
+func routes(opts Options) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok\n"))
+		writeText(w, http.StatusOK, "ok\n")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if opts.Ready == nil {
+			writeText(w, http.StatusOK, "ok\n")
+			return
+		}
+		if err := opts.Ready(); err != nil {
+			writeText(w, http.StatusServiceUnavailable, err.Error()+"\n")
+			return
+		}
+		writeText(w, http.StatusOK, "ok\n")
 	})
 	mux.HandleFunc("GET /info", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")
-		_ = encoder.Encode(info())
+		_ = encoder.Encode(opts.Info())
 	})
-	return &Server{
-		path:     path,
-		listener: listener,
-		server:   &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTimeout},
-		logger:   logger,
-	}, nil
+	return mux
+}
+
+func writeText(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
 }
 
 // Run answers requests until ctx is cancelled, then shuts down and unlinks

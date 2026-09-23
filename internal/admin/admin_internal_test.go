@@ -17,7 +17,7 @@ import (
 func TestRunReturnsTheServeFailure(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "admin.sock")
-	server, err := New(t.Context(), path, func() any { return nil }, nil)
+	server, err := New(t.Context(), Options{Path: path, Info: func() any { return nil }})
 	require.NoError(t, err, "New")
 
 	require.NoError(t, server.listener.Close(), "close the listener out from under Serve")

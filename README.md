@@ -24,9 +24,10 @@ document lists and nothing else:
     HTTPS_PROXY=http://127.0.0.1:3128 curl --cacert ./shared-ca/ca.crt https://pypi.org/simple/
 
 Every decision is one JSON line on stdout. Logs are JSON on stderr. The admin
-socket answers `/healthz` and `/info`:
+socket answers `/healthz`, `/readyz` and `/info`, and the binary itself dials
+it, so a pod needs no shell and no curl to probe the proxy:
 
-    curl --unix-socket /tmp/egress-admin.sock http://admin/info
+    ./egress-proxy --admin /tmp/egress-admin.sock probe info
 
 `docs/configuration.md` describes every key of the document and every reason
 code in the audit stream. `docs/security-model.md` states what the proxy
@@ -36,6 +37,7 @@ enforces and what it does not.
 
     make build      # the binaries
     make all        # build, test, lint, checks, acceptance
+    make images     # the three images under images/, built locally
 
 Go 1.27.1 or newer. The build-time tools are `tool` directives in `go.mod`,
 built by the `go` command on first use. Nothing else needs installing.

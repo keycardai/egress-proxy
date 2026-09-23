@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,15 +41,15 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // envPrefix is the prefix of every environment variable this command reads.
-// A manifest lint can refuse any other variable with this prefix on the proxy
+// The manifest lint refuses any other variable with this prefix on the proxy
 // container.
-const envPrefix = "EGRESS_PROXY_"
+const envPrefix = config.EnvPrefix
 
 func main() {
 	action := func(ctx context.Context, opts flags) error {
 		return run(ctx, opts, os.Stdout, os.Stderr)
 	}
-	if err := command(os.Stderr, action).Run(context.Background(), os.Args); err != nil {
+	if err := command(os.Stdout, os.Stderr, action).Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "egress-proxy: %v\n", err)
 		os.Exit(1)
 	}
@@ -111,23 +112,23 @@ func (f flags) overrides() config.Overrides {
 // variables.
 func flagSet(opts *flags) []cli.Flag {
 	return slices.Concat([]cli.Flag{
-		stringFlag("config", "CONFIG", &opts.configPath, "path to the configuration document", true),
-		stringFlag("sandbox-id", "SANDBOX_ID", &opts.sandboxID, "the sandbox on every audit record (sandbox.id)", false),
-		stringFlag("zone-url", "ZONE_URL", &opts.zoneURL, "the Keycard zone (identity.zone_url)", false),
-		stringFlag("client-id", "CLIENT_ID", &opts.clientID, "the application credential id (identity.client_id)", false),
+		stringFlag("config", "CONFIG", &opts.configPath, "path to the configuration document"),
+		stringFlag("sandbox-id", "SANDBOX_ID", &opts.sandboxID, "the sandbox on every audit record (sandbox.id)"),
+		stringFlag("zone-url", "ZONE_URL", &opts.zoneURL, "the Keycard zone (identity.zone_url)"),
+		stringFlag("client-id", "CLIENT_ID", &opts.clientID, "the application credential id (identity.client_id)"),
 		stringFlag("workload-token-file", "WORKLOAD_TOKEN_FILE", &opts.workloadTokenFile,
-			"path of the projected ServiceAccount token (identity.workload_token_file)", false),
+			"path of the projected ServiceAccount token (identity.workload_token_file)"),
 		stringFlag("impersonate-user", "IMPERSONATE_USER", &opts.impersonateUser,
-			"the user every exchange acts for (identity.impersonate.user)", false),
+			"the user every exchange acts for (identity.impersonate.user)"),
 	}, listenFlags(opts), []cli.Flag{
 		stringFlag("ca-out-dir", "CA_OUT_DIR", &opts.caOutDir,
-			"directory the CA certificate is written to (ca.out_dir)", false),
+			"directory the CA certificate is written to (ca.out_dir)"),
 		stringFlag("ca-state-dir", "CA_STATE_DIR", &opts.caStateDir,
-			"memory-backed directory holding the CA across restarts (ca.state_dir)", false),
+			"memory-backed directory holding the CA across restarts (ca.state_dir)"),
 		stringFlag("client-secret-file", "CLIENT_SECRET_FILE", &opts.clientSecretFile,
-			"path of the file holding the application credential secret (identity.client_secret_file)", false),
+			"path of the file holding the application credential secret (identity.client_secret_file)"),
 		stringFlag("credential-static-file", "CREDENTIAL_STATIC_FILE", &opts.credentialStaticFile,
-			"file of credentials by resource, for tests and development (credentials.static_file)", false),
+			"file of credentials by resource, for tests and development (credentials.static_file)"),
 		&cli.DurationFlag{
 			Name: "leaf-ttl", Destination: &opts.leafTTL, Sources: env("LEAF_TTL"),
 			Usage: "lifetime of a minted leaf (ca.leaf_ttl)",
@@ -165,26 +166,21 @@ func flagSet(opts *flags) []cli.Flag {
 // the settings it checks for containment.
 func listenFlags(opts *flags) []cli.Flag {
 	return []cli.Flag{
-		stringFlag(
-			"connect",
-			"CONNECT",
-			&opts.connect,
-			"address of the CONNECT frontend, host:port (listen.connect)",
-			false,
-		),
+		stringFlag("connect", "CONNECT", &opts.connect,
+			"address of the CONNECT frontend, host:port (listen.connect)"),
 		&cli.IntFlag{
 			Name: "transparent-port", Destination: &opts.transparentPort, Sources: env("TRANSPARENT_PORT"),
 			Usage: "port the netsetup rules redirect to, bound on 127.0.0.1 and ::1 " +
 				"(listen.transparent_port); 0 runs no transparent frontend",
 		},
-		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)", false),
+		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)"),
 		stringFlag("netsetup-receipt", "NETSETUP_RECEIPT", &opts.netsetupReceipt,
-			"file the init container recorded what it programmed in (netsetup.receipt)", false),
+			"file the init container recorded what it programmed in (netsetup.receipt)"),
 	}
 }
 
-func stringFlag(name, envName string, dest *string, usage string, required bool) *cli.StringFlag {
-	return &cli.StringFlag{Name: name, Destination: dest, Sources: env(envName), Usage: usage, Required: required}
+func stringFlag(name, envName string, dest *string, usage string) *cli.StringFlag {
+	return &cli.StringFlag{Name: name, Destination: dest, Sources: env(envName), Usage: usage}
 }
 
 // env is the variable a flag reads when the command line omits it.
@@ -192,8 +188,10 @@ func env(name string) cli.ValueSourceChain {
 	return cli.EnvVars(envPrefix + name)
 }
 
-// command builds the command line.
-func command(stderr io.Writer, action func(context.Context, flags) error) *cli.Command {
+// command builds the command line. Running it with no subcommand serves
+// the proxy. A subcommand is an operator tool that serves nothing: probe
+// reads this process's admin socket.
+func command(stdout, stderr io.Writer, action func(context.Context, flags) error) *cli.Command {
 	var opts flags
 	return &cli.Command{
 		Name:  "egress-proxy",
@@ -207,12 +205,21 @@ func command(stderr io.Writer, action func(context.Context, flags) error) *cli.C
 		ErrWriter:       stderr,
 		HideHelpCommand: true,
 		Flags:           flagSet(&opts),
+		Commands:        []*cli.Command{probeCommand(&opts, stdout)},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			if opts.configPath == "" {
+				return errNoConfig
+			}
 			opts.transparentPortSet = cmd.Count("transparent-port") > 0
 			return action(ctx, opts)
 		},
 	}
 }
+
+// errNoConfig is the refusal when the serve path gets no document. The flag
+// is not marked required, because urfave/cli checks a required root flag
+// before it dispatches a subcommand, and probe reads no document.
+var errNoConfig = errors.New("--config or EGRESS_PROXY_CONFIG names the configuration document, and neither is set")
 
 // process represents the configured components which make up the proxy process.
 type process struct {
@@ -224,6 +231,11 @@ type process struct {
 	server      *proxy.Server
 	admin       *admin.Server
 	transparent *transparent.Frontend
+	// certPath is the CA certificate the workload trusts. Readiness checks
+	// that it is on disk.
+	certPath string
+	// listening turns true once the CONNECT frontend is bound.
+	listening atomic.Bool
 }
 
 func run(ctx context.Context, opts flags, stdout, stderr io.Writer) error {
@@ -252,7 +264,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, fmt.Errorf("tls: %w", err)
 	}
-	authority, store, err := certificates(cfg, logger)
+	authority, store, certPath, err := certificates(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -281,12 +293,14 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	}
 	proc := &process{
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
-		credentials: credentials, server: server,
+		credentials: credentials, server: server, certPath: certPath,
 	}
 	if proc.transparent, err = capture(cfg, server, logger, netsetup.ContainmentRequest{}); err != nil {
 		return nil, err
 	}
-	proc.admin, err = admin.New(ctx, cfg.Listen.Admin, proc.info, logger)
+	proc.admin, err = admin.New(ctx, admin.Options{
+		Path: cfg.Listen.Admin, Info: proc.info, Ready: proc.ready, Logger: logger,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("admin socket: %w", err)
 	}
@@ -296,29 +310,29 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 
 // certificates prepares the authority the proxy terminates tunnels with and
 // writes its certificate where the workload reads it.
-func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.Store, error) {
+func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.Store, string, error) {
 	// A state directory inside the output directory would expose the key to the
 	// workload.
 	if err := ca.PrepareDirectories(cfg.CA.StateDir, cfg.CA.OutDir); err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	authority, loaded, err := ca.LoadOrNew(cfg.CA.StateDir, ca.Options{LeafTTL: cfg.CA.LeafTTL.Duration()})
 	if err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	certPath, err := authority.WriteCertificate(cfg.CA.OutDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	store, err := ca.NewStore(authority, cfg.CA.CacheSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	logger.Info("certificate authority ready",
 		slog.String("certificate", certPath),
 		slog.Bool("loaded_from_state_dir", loaded),
 		slog.Time("not_after", authority.NotAfter()))
-	return authority, store, nil
+	return authority, store, certPath, nil
 }
 
 // announce says what the process enforces and where each setting came from,
@@ -419,6 +433,25 @@ func (p *process) info() any {
 	}
 }
 
+// errNotReady is what the admin socket reports at /readyz before the
+// process serves.
+var errNotReady = errors.New("egress-proxy is starting")
+
+// ready decides /readyz. It answers once the CONNECT listener is bound and
+// ca.crt is on ca.out_dir, which are the two things the workload needs
+// before it makes its first request. The sidecar's startup probe reads it,
+// so the agent container does not start before the certificate it must
+// trust exists.
+func (p *process) ready() error {
+	if !p.listening.Load() {
+		return fmt.Errorf("%w: the CONNECT listener is not bound", errNotReady)
+	}
+	if _, err := os.Stat(p.certPath); err != nil {
+		return fmt.Errorf("%w: %s is not readable: %w", errNotReady, p.certPath, err)
+	}
+	return nil
+}
+
 // capture builds the transparent frontend after the receipt shows that the
 // rules redirect to it and that this process cannot change them. A
 // configuration without listen.transparent_port does not run capture frontends.
@@ -497,6 +530,7 @@ func (p *process) serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
 	}
+	p.listening.Store(true)
 	p.logger.Info("serving",
 		slog.String("connect", listener.Addr().String()),
 		slog.String("admin", p.admin.Path()))

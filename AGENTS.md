@@ -18,9 +18,12 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   `test/acceptance/netfixture/` for the probes, listeners, HTTPS upstream,
   and Go client used by the Docker scenarios,
   `test/e2e/` for the cluster lanes,
-  `test/fakeas/` for the fake authorization server that unit and acceptance
-  tests use for token exchange,
-  `test/gates/` for the gate self-tests, `scripts/` for the gate scripts,
+  `test/fakeas/` a fake authorization server the unit tests and the
+  acceptance lane drive the exchange against,
+  `test/gates/` for the gate self-tests,
+  `test/images/` the image lane, Go behind the `images` build tag, which
+  builds the three images locally and drives what each one has to do,
+  `scripts/` for the gate scripts,
   `images/` for image definitions.
 - Build-time tools are `tool` directives in `go.mod`, run as
   `go tool <name>`: golangci-lint, go-licenses, govulncheck and ko. **Every
@@ -185,6 +188,7 @@ job, so the local gate and the CI gate are one gate.
     make checks      license allow-list, NOTICE freshness, govulncheck
     make acceptance  the acceptance tests under test/acceptance, against the built binary
     make e2e         the cluster lanes (skips when there are none)
+    make images      the three images, built locally, and what each one does
 
 `make all` runs build, test, lint, checks and acceptance in that order.
 
@@ -209,6 +213,9 @@ The gates and what each enforces:
 - **Vulnerabilities** (`scripts/vuln.sh`): `govulncheck` over the module. It
   also runs daily on a schedule, because a vulnerability can be published
   against a dependency that has not changed.
+- **Images** (`make images`): the three images under `images/`, built
+  locally with `ko build --local` and `docker build`. The lane skips when no
+  Docker daemon answers. Nothing in this repository pushes an image.
 
 Each gate has a negative fixture under `test/gates/testdata/` that makes it
 fail, and `test/gates` runs the gate scripts against those fixtures as part

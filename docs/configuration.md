@@ -131,7 +131,10 @@ that the endpoint list denies.
 | `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP. It gets the destination from the `Host` header. It reads every other captured port as TLS and gets the destination from the ClientHello. Endpoints name HTTPS destinations, so the proxy reads a cleartext connection and then refuses it. `config.digest` includes this setting only when `transparent_port` is set. |
 | `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
 
-The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
+The admin socket answers `GET /healthz` with `ok` while the process is
+alive. It answers `GET /readyz` with `ok` once the CONNECT listener is bound
+and `ca.crt` is written to `ca.out_dir`, and with 503 and the reason before
+that. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
 `document_digest`, `config_digest`, `overridden`, the listen and limit
 settings, the CA output directory and expiry, the credential source, the
@@ -140,6 +143,13 @@ has mode 0600 in a directory with mode 0700. The proxy sets that directory
 mode on every start and refuses to start when the directory does not end up
 at mode 0700, so no other uid in the pod can reach the socket. Keep
 `ca.out_dir` out of that directory: the workload cannot traverse it.
+
+`egress-proxy probe <healthz|readyz|info>` dials that socket, prints the
+answer and exits non-zero on anything but a 200. It reads the same `--admin`
+and `EGRESS_PROXY_ADMIN` the serving process reads, because it runs in the
+same container. The proxy image carries no shell and no curl, so this
+subcommand is how the kubelet's probes, an operator and the cluster lane
+reach the admin surface.
 
 ### `netsetup`
 

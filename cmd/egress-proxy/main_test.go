@@ -45,7 +45,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 	}
 
 	var got flags
-	cmd := command(io.Discard, func(_ context.Context, opts flags) error {
+	cmd := command(io.Discard, io.Discard, func(_ context.Context, opts flags) error {
 		got = opts
 		return nil
 	})
@@ -68,7 +68,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 }
 
 func TestCommandRequiresTheConfigPath(t *testing.T) { //nolint:paralleltest // the environment must not supply it
-	cmd := command(io.Discard, func(context.Context, flags) error { return nil })
+	cmd := command(io.Discard, io.Discard, func(context.Context, flags) error { return nil })
 	require.Error(t, cmd.Run(t.Context(), []string{"egress-proxy"}), "Run without --config")
 }
 
@@ -94,7 +94,7 @@ func TestTransparentPortOverrides(t *testing.T) {
 				require.NoError(t, os.Unsetenv(envPrefix+"TRANSPARENT_PORT"), "omit the environment override")
 			}
 			var cfg *config.Config
-			cmd := command(io.Discard, func(_ context.Context, opts flags) error {
+			cmd := command(io.Discard, io.Discard, func(_ context.Context, opts flags) error {
 				var err error
 				cfg, err = config.Parse([]byte("version: 1\nsandbox:\n  id: test\nlisten:\n  transparent_port: 1015\n"+
 					"endpoints:\n  - host: example.com\n"), opts.overrides())

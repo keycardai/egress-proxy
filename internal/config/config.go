@@ -55,6 +55,11 @@ const (
 
 	// Version is the only document version this build reads.
 	Version = 1
+
+	// EnvPrefix is the prefix of every environment variable the proxy
+	// reads. It gives a manifest lint one namespace to inspect: a variable
+	// with this prefix that the flag set does not name is refused.
+	EnvPrefix = "EGRESS_PROXY_"
 )
 
 // PlacementKind defines where the proxy writes a credential into a request.
