@@ -48,9 +48,10 @@ const (
 // secret goes to the zone, so cleartext would put it on the wire.
 const schemeHTTPS = "https"
 
-// maxResponseSize limits a response from the zone. An access token that a
-// request header can hold is far smaller, so a larger body is a zone fault.
-const maxResponseSize = 64 << 10
+// maxResponseSize limits a response from the zone. A token response holds the
+// access token, a refresh token, and any authorization details the zone
+// returns, so the limit sits well above the size of one token.
+const maxResponseSize = 1 << 20
 
 // DefaultTimeout is the budget for one exchange when Options sets no value.
 // It covers discovery and the token request.
@@ -68,7 +69,7 @@ var (
 	errDenied    = errors.New("the address is on the platform deny list")
 	errCleartext = errors.New("the zone must be https")
 	errRedirect  = errors.New("the zone redirected the exchange")
-	errTooLarge  = errors.New("the zone answered with more than 64 KiB")
+	errTooLarge  = errors.New("the zone answered with more than 1 MiB")
 )
 
 // Options configures a Source. ClientSecret authenticates the client.

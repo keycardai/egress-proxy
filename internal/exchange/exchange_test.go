@@ -339,9 +339,9 @@ func TestTheExchangeRefusesAnUnsafeZone(t *testing.T) {
 			name: "the token response is larger than the limit",
 			front: func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer"}`, strings.Repeat("a", 70<<10))
+				fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer"}`, strings.Repeat("a", 2<<20))
 			},
-			wantMessage: "64 KiB",
+			wantMessage: "1 MiB",
 		},
 	}
 	for _, tc := range tests {
