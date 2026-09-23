@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/keycardai/egress-proxy/internal/config"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -238,6 +239,19 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			doc:  minimal + identityDoc + "policy:\n  deny_list_exceptions: [\"127.0.0.0/8\"]\n",
 		},
 		{name: "no identity at all", doc: minimal},
+		{
+			name:      "a credential source, which decides whether an endpoint can be reached",
+			doc:       minimal,
+			against:   minimal,
+			overrides: config.Overrides{CredentialStaticFile: "/creds.yaml"}, //nolint:gosec // G101: a path
+		},
+		{
+			name:      "a credential source written in the document or supplied by a variable",
+			doc:       minimal,
+			against:   minimal + "credentials:\n  static_file: /creds.yaml\n",
+			overrides: config.Overrides{CredentialStaticFile: "/creds.yaml"}, //nolint:gosec // G101: a path
+			wantSame:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -578,7 +592,61 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 			doc:     endpoint("host: a.example\n    credential:\n      env: T\n      placement: {kind: cookie, name: x}"),
 			wantErr: `placement.kind "cookie"`,
 		},
+		{
+			name:    "a relative static credential file",
+			doc:     minimal + "credentials:\n  static_file: creds.yaml\n",
+			wantErr: "credentials.static_file",
+		},
+		{
+			name:    "a static credential file together with an identity",
+			doc:     minimal + "credentials:\n  static_file: /creds.yaml\n" + identityDoc,
+			wantErr: "both name a credential source",
+		},
+		{
+			name: "a header placement naming Host",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: host, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name host, " +
+				"a header the connection, the proxy or the upstream's trust depends on",
+		},
+		{
+			name: "a header placement naming a hop-by-hop header",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: Connection, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name Connection, ",
+		},
+		{
+			name: "a header placement naming a body framing header",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: Content-Length, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name Content-Length, ",
+		},
+		{
+			name: "a header placement in the x-forwarded- family",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: X-Forwarded-For, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name X-Forwarded-For, ",
+		},
+		{
+			name: "a header placement in the sec- family",
+			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: Sec-Fetch-Site, template: \"{credential}\"}"),
+			wantErr: "endpoints[0]: a header placement cannot name Sec-Fetch-Site, ",
+		},
 	})
+}
+
+// TestParseAcceptsAnAuthorizationPlacement keeps the common placement allowed.
+func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: a.example\n    credential:\n" +
+		"      env: GITHUB_TOKEN\n" +
+		"      placement: {kind: header, name: Authorization, template: \"Bearer {credential}\"}\n"
+	cfg, err := config.Parse([]byte(doc), config.Overrides{})
+	require.NoError(t, err, "Parse:\n%s", doc)
+	require.Len(t, cfg.Endpoints, 1, "the document names one endpoint")
+	require.NotNil(t, cfg.Endpoints[0].Credential, "the endpoint names a credential")
+	assert.Equal(t, "Authorization", cfg.Endpoints[0].Credential.Placement.Name, "placement.name")
 }
 
 // TestParseRefusesInvalidIdentity covers the exchange settings.
@@ -624,9 +692,10 @@ func TestPolicyEndpoints(t *testing.T) {
 	require.Len(t, endpoints, 2)
 	assert.Equal(t, policy.Endpoint{
 		Host: "a.example", Port: config.DefaultEndpointPort, PathPrefix: "/api",
-		Resource: "https://a.example/", HasCredential: true,
+		Resource:   "https://a.example/",
+		Credential: &credential.Placement{Kind: credential.KindHeader, Name: "X", Template: credential.Token},
 	}, endpoints[1], "the second endpoint, normalized and defaulted")
-	assert.False(t, endpoints[0].HasCredential, "pypi.org names no credential")
+	assert.Nil(t, endpoints[0].Credential, "pypi.org names no credential")
 }
 
 func TestUpstreamRoots(t *testing.T) {

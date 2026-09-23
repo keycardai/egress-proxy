@@ -42,6 +42,7 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -94,6 +95,9 @@ type Options struct {
 	Audit audit.Sink
 	// UpstreamRoots verifies upstream certificates.
 	UpstreamRoots *x509.CertPool
+	// Credentials supplies the credential an endpoint names. A nil source
+	// denies every such endpoint with credential_unavailable.
+	Credentials credential.Source
 	// Logger records the request path. A nil logger discards.
 	Logger *slog.Logger
 	// MaxConnections caps simultaneous connections on the listener. Zero
@@ -178,14 +182,16 @@ func New(opts Options) (*Server, error) {
 	server := &Server{opts: opts, logger: opts.Logger, intake: newIntake()}
 	server.transport = server.newTransport()
 	server.reverse = &httputil.ReverseProxy{
-		Rewrite:   rewrite,
-		Transport: server.transport,
+		Rewrite:   server.rewrite,
+		Transport: refuseUnwritten{next: server.transport},
 		// Responses stream: LLM traffic is server-sent events, and a
 		// buffered proxy stalls it.
 		FlushInterval:  -1,
 		ModifyResponse: server.recordUpstreamStatus,
 		ErrorHandler:   server.upstreamError,
-		ErrorLog:       slog.NewLogLogger(opts.Logger.Handler(), slog.LevelWarn),
+		// ReverseProxy body-read errors can quote upstream response bytes.
+		// The audit record reports incomplete responses without those bytes.
+		ErrorLog: slog.NewLogLogger(slog.DiscardHandler, slog.LevelWarn),
 	}
 
 	var http1 http.Protocols

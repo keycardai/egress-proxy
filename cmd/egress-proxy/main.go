@@ -25,6 +25,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/proxy"
 )
@@ -59,6 +60,7 @@ type flags struct {
 	admin                 string
 	caOutDir              string
 	caStateDir            string
+	credentialStaticFile  string
 	leafTTL               time.Duration
 	cacheSize             int
 	upstreamCAFiles       []string
@@ -79,6 +81,7 @@ func (f flags) overrides() config.Overrides {
 		Admin:                 f.admin,
 		CAOutDir:              f.caOutDir,
 		CAStateDir:            f.caStateDir,
+		CredentialStaticFile:  f.credentialStaticFile,
 		LeafTTL:               f.leafTTL,
 		CacheSize:             f.cacheSize,
 		UpstreamCAFiles:       f.upstreamCAFiles,
@@ -112,6 +115,8 @@ func flagSet(opts *flags) []cli.Flag {
 			"directory the CA certificate is written to (ca.out_dir)", false),
 		stringFlag("ca-state-dir", "CA_STATE_DIR", &opts.caStateDir,
 			"memory-backed directory holding the CA across restarts (ca.state_dir)", false),
+		stringFlag("credential-static-file", "CREDENTIAL_STATIC_FILE", &opts.credentialStaticFile,
+			"file of credentials by resource, for tests and development (credentials.static_file)", false),
 		&cli.DurationFlag{
 			Name: "leaf-ttl", Destination: &opts.leafTTL, Sources: env("LEAF_TTL"),
 			Usage: "lifetime of a minted leaf (ca.leaf_ttl)",
@@ -173,12 +178,13 @@ func command(stderr io.Writer, action func(context.Context, flags) error) *cli.C
 
 // process represents the configured components which make up the proxy process.
 type process struct {
-	cfg       *config.Config
-	logger    *slog.Logger
-	matcher   *policy.Matcher
-	authority *ca.Authority
-	server    *proxy.Server
-	admin     *admin.Server
+	cfg         *config.Config
+	logger      *slog.Logger
+	matcher     *policy.Matcher
+	authority   *ca.Authority
+	credentials credential.Source
+	server      *proxy.Server
+	admin       *admin.Server
 }
 
 func run(ctx context.Context, opts flags, stdout, stderr io.Writer) error {
@@ -207,22 +213,13 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, fmt.Errorf("tls: %w", err)
 	}
-	// Before the key exists: a state directory that resolves inside the
-	// output directory is a key the workload can read.
-	if err = ca.PrepareDirectories(cfg.CA.StateDir, cfg.CA.OutDir); err != nil {
-		return nil, fmt.Errorf("certificate authority: %w", err)
-	}
-	authority, loaded, err := ca.LoadOrNew(cfg.CA.StateDir, ca.Options{LeafTTL: cfg.CA.LeafTTL.Duration()})
+	authority, store, err := certificates(cfg, logger)
 	if err != nil {
-		return nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, err
 	}
-	certPath, err := authority.WriteCertificate(cfg.CA.OutDir)
+	credentials, err := credentialSource(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("certificate authority: %w", err)
-	}
-	store, err := ca.NewStore(authority, cfg.CA.CacheSize)
-	if err != nil {
-		return nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, err
 	}
 	server, err := proxy.New(proxy.Options{
 		Matcher:      matcher,
@@ -233,6 +230,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 			ConfigDigest:   cfg.ConfigDigest,
 		}, nil),
 		UpstreamRoots:         roots,
+		Credentials:           credentials,
 		Logger:                logger,
 		MaxConnections:        cfg.Limits.MaxConnections,
 		IdleTimeout:           cfg.Limits.IdleTimeout.Duration(),
@@ -242,17 +240,43 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, fmt.Errorf("proxy: %w", err)
 	}
-	proc := &process{cfg: cfg, logger: logger, matcher: matcher, authority: authority, server: server}
+	proc := &process{
+		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
+		credentials: credentials, server: server,
+	}
 	proc.admin, err = admin.New(ctx, cfg.Listen.Admin, proc.info, logger)
 	if err != nil {
 		return nil, fmt.Errorf("admin socket: %w", err)
+	}
+	proc.announce()
+	return proc, nil
+}
+
+// certificates prepares the authority the proxy terminates tunnels with and
+// writes its certificate where the workload reads it.
+func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.Store, error) {
+	// A state directory inside the output directory would expose the key to the
+	// workload.
+	if err := ca.PrepareDirectories(cfg.CA.StateDir, cfg.CA.OutDir); err != nil {
+		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+	}
+	authority, loaded, err := ca.LoadOrNew(cfg.CA.StateDir, ca.Options{LeafTTL: cfg.CA.LeafTTL.Duration()})
+	if err != nil {
+		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+	}
+	certPath, err := authority.WriteCertificate(cfg.CA.OutDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+	}
+	store, err := ca.NewStore(authority, cfg.CA.CacheSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("certificate authority: %w", err)
 	}
 	logger.Info("certificate authority ready",
 		slog.String("certificate", certPath),
 		slog.Bool("loaded_from_state_dir", loaded),
 		slog.Time("not_after", authority.NotAfter()))
-	proc.announce()
-	return proc, nil
+	return authority, store, nil
 }
 
 // announce says what the process enforces and where each setting came from,
@@ -270,14 +294,35 @@ func (p *process) announce() {
 		p.logger.Warn("deny list exception: the platform deny list does not cover this range",
 			slog.String("range", exception.String()))
 	}
-	if p.cfg.Identity == nil {
-		p.logger.Warn("no identity configured; every endpoint with a credential denies with credential_unavailable")
+	if p.credentials == nil {
+		p.logger.Warn("no credential source; every endpoint that names a credential denies " +
+			"with credential_unavailable")
+		return
 	}
+	p.logger.Warn("credential source", slog.String("source", p.credentials.Describe()))
+}
+
+// credentialSource builds the configured source. It returns nil when none is set.
+//
+//nolint:ireturn // delegating the constructor to the configured source is intentional
+func credentialSource(cfg *config.Config) (credential.Source, error) {
+	if cfg.Credentials.StaticFile == "" {
+		return nil, nil //nolint:nilnil // no source is a posture, not a failure
+	}
+	source, err := credential.LoadStaticFile(cfg.Credentials.StaticFile)
+	if err != nil {
+		return nil, fmt.Errorf("credentials: %w", err)
+	}
+	return source, nil
 }
 
 // info is what the admin socket reports at /info.
 func (p *process) info() any {
 	deny := p.matcher.DenyList()
+	source := "none"
+	if p.credentials != nil {
+		source = p.credentials.Describe()
+	}
 	return map[string]any{
 		"version":              version(),
 		"sandbox_id":           p.cfg.Sandbox.ID,
@@ -287,6 +332,7 @@ func (p *process) info() any {
 		"listen":               p.cfg.Listen,
 		"ca":                   map[string]any{"out_dir": p.cfg.CA.OutDir, "not_after": p.authority.NotAfter()},
 		"limits":               p.cfg.Limits,
+		"credential_source":    source,
 		"endpoint_hosts":       p.matcher.Hosts(),
 		"cluster_cidrs":        deny.ClusterCIDRs(),
 		"deny_list_exceptions": deny.Exceptions(),

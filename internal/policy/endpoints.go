@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/keycardai/egress-proxy/internal/credential"
 )
 
 var errEndpoint = errors.New("invalid endpoint")
@@ -31,11 +33,12 @@ type Endpoint struct {
 	// covers itself and every path under it as a segment, so "/api" covers
 	// "/api" and "/api/v1" but not "/apis".
 	PathPrefix string
-	// Resource is the resource identifier the exchange sends for this
-	// endpoint.
+	// Resource is the resource identifier sent for this endpoint. The
+	// credential source uses it to find the credential.
 	Resource string
-	// HasCredential says the endpoint names a credential to inject.
-	HasCredential bool
+	// Credential is where a credential goes in a request to this endpoint.
+	// Nil means the endpoint names none.
+	Credential *credential.Placement
 }
 
 // ID names the endpoint on an audit record: the authority and the prefix.
@@ -60,6 +63,9 @@ type Decision struct {
 	// Connection leaves it nil: that decision has no path in it, and a path
 	// prefix on such a record would be misleading.
 	Endpoint *Endpoint
+	// Err is why the decision failed, when the denial came from a failure
+	// rather than from a rule. The matcher never sets it.
+	Err error
 }
 
 // Allowed reports whether the decision forwards.

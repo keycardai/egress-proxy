@@ -1,4 +1,6 @@
-package config
+// Package strictdoc validates document boundaries and JSON object keys before
+// a decoder that ignores key case reads a document.
+package strictdoc
 
 import (
 	"bytes"
@@ -18,18 +20,10 @@ var (
 	errSecondDocument = errors.New("the input holds more than one YAML document")
 )
 
-// refuseSecondDocument refuses an input that carries a second YAML document.
-// The conversion to JSON reads the first document alone, so a second one
-// would take no part in the settings or in the document digest.
-//
-// The decoder here must stay the same module sigs.k8s.io/yaml uses for that
-// conversion, so the two agree on where one document ends. Change this
-// import only together with that dependency.
-func refuseSecondDocument(data []byte) error {
+// RefuseSecondYAMLDocument rejects input with a second YAML document.
+func RefuseSecondYAMLDocument(data []byte) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var first, second any
-	// A first document that does not parse leaves the decoder unusable, and
-	// the strict conversion that follows reports the syntax problem.
 	if err := decoder.Decode(&first); err == nil {
 		if err := decoder.Decode(&second); !errors.Is(err, io.EOF) {
 			return errSecondDocument
@@ -38,12 +32,18 @@ func refuseSecondDocument(data []byte) error {
 	return nil
 }
 
-// refuseCaseFoldedKeys walks the JSON once and refuses two keys in one
-// object that differ only in case. The struct decoder matches a field name
-// case-insensitively, so both keys name one setting.
-func refuseCaseFoldedKeys(jsonText []byte) error {
+// RefuseCaseFoldedJSONKeys rejects keys that a JSON struct decoder would match
+// to the same field when it ignores case.
+func RefuseCaseFoldedJSONKeys(jsonText []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(jsonText))
-	return walkValue(decoder, "")
+	if err := walkValue(decoder, ""); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("trailing data: %w", err)
+	}
+	return nil
 }
 
 func walkValue(decoder *json.Decoder, location string) error {
@@ -67,10 +67,8 @@ func walkValue(decoder *json.Decoder, location string) error {
 		if _, err := decoder.Token(); err != nil {
 			return fmt.Errorf("read %s: %w", location, err)
 		}
-		return nil
-	default:
-		return nil
 	}
+	return nil
 }
 
 func walkObject(decoder *json.Decoder, location string) error {
@@ -85,7 +83,7 @@ func walkObject(decoder *json.Decoder, location string) error {
 			return fmt.Errorf("%w: %v at %s", errKeyNotString, token, orRoot(location))
 		}
 		folded := strings.ToLower(key)
-		if previous, dup := seen[folded]; dup {
+		if previous, duplicate := seen[folded]; duplicate {
 			names := []string{previous, key}
 			sort.Strings(names)
 			return fmt.Errorf("%w: %q and %q at %s", errCaseFold, names[0], names[1], orRoot(location))

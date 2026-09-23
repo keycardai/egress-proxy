@@ -25,7 +25,9 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
+	"github.com/keycardai/egress-proxy/internal/strictdoc"
 )
 
 // Defaults for the process settings.
@@ -49,18 +51,14 @@ const (
 )
 
 // PlacementKind defines where the proxy writes a credential into a request.
-type PlacementKind string
+type PlacementKind = credential.Kind
 
 // The placement kinds.
 const (
-	PlacementHeader PlacementKind = "header"
-	PlacementQuery  PlacementKind = "query"
-	PlacementBasic  PlacementKind = "basic"
+	PlacementHeader = credential.KindHeader
+	PlacementQuery  = credential.KindQuery
+	PlacementBasic  = credential.KindBasic
 )
-
-// credentialToken is what a header template must contain. The credential
-// replaces it.
-const credentialToken = "{credential}" //nolint:gosec // G101: a template token, not a credential
 
 var (
 	errInvalid = errors.New("invalid configuration")
@@ -84,15 +82,25 @@ const maxPort = 65535
 
 // Document is the configuration document as written.
 type Document struct {
-	Version   int        `json:"version"`
-	Sandbox   Sandbox    `json:"sandbox"`
-	Identity  *Identity  `json:"identity,omitempty"`
-	Listen    Listen     `json:"listen"`
-	CA        CA         `json:"ca"`
-	TLS       TLS        `json:"tls"`
-	Limits    Limits     `json:"limits"`
-	Policy    Policy     `json:"policy"`
-	Endpoints []Endpoint `json:"endpoints"`
+	Version  int       `json:"version"`
+	Sandbox  Sandbox   `json:"sandbox"`
+	Identity *Identity `json:"identity,omitempty"`
+	Listen   Listen    `json:"listen"`
+	CA       CA        `json:"ca"`
+	TLS      TLS       `json:"tls"`
+	Limits   Limits    `json:"limits"`
+	// Credentials names the source from which the proxy reads credentials.
+	Credentials Credentials `json:"credentials"`
+	Policy      Policy      `json:"policy"`
+	Endpoints   []Endpoint  `json:"endpoints"`
+}
+
+// Credentials names the source for endpoint credentials. A document without a
+// source denies every endpoint that names a credential.
+type Credentials struct {
+	// StaticFile maps resources to credentials stored as plain text. It serves
+	// tests and development and cannot appear with an identity.
+	StaticFile string `json:"static_file"`
 }
 
 // Sandbox identifies the sandbox being proxied on every audit record.
@@ -181,12 +189,7 @@ type Credential struct {
 }
 
 // Placement is where the proxy writes a credential into a request.
-type Placement struct {
-	Kind     PlacementKind `json:"kind"`
-	Name     string        `json:"name"`
-	Template string        `json:"template"`
-	User     string        `json:"user"`
-}
+type Placement = credential.Placement
 
 // Duration is a time.Duration written as Go writes one, such as 24h or 5m.
 type Duration time.Duration
@@ -263,6 +266,7 @@ type Overrides struct {
 	Admin                 string
 	CAOutDir              string
 	CAStateDir            string
+	CredentialStaticFile  string
 	LeafTTL               time.Duration
 	CacheSize             int
 	UpstreamCAFiles       []string
@@ -287,14 +291,14 @@ func Load(path string, overrides Overrides) (*Config, error) {
 // Parse parses a document, applies the overrides over it and the defaults
 // under both, and validates the result.
 func Parse(data []byte, overrides Overrides) (*Config, error) {
-	if err := refuseSecondDocument(data); err != nil {
+	if err := strictdoc.RefuseSecondYAMLDocument(data); err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)
 	}
 	jsonText, err := yaml.YAMLToJSONStrict(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)
 	}
-	if err = refuseCaseFoldedKeys(jsonText); err != nil {
+	if err = strictdoc.RefuseCaseFoldedJSONKeys(jsonText); err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalid, err)
 	}
 	canonical, err := jcs.Transform(jsonText)
@@ -338,6 +342,7 @@ type decisionInputs struct {
 	DenyListExceptions []string   `json:"deny_list_exceptions"`
 	Identity           *Identity  `json:"identity,omitempty"`
 	UpstreamCAFiles    []string   `json:"upstream_ca_files"`
+	CredentialSource   string     `json:"credential_source"`
 	DenyList           string     `json:"deny_list"`
 }
 
@@ -397,12 +402,17 @@ func canonicalFiles(paths []string) []string {
 func (c *Config) PolicyEndpoints() []policy.Endpoint {
 	out := make([]policy.Endpoint, 0, len(c.Endpoints))
 	for _, endpoint := range c.Endpoints {
+		var placement *credential.Placement
+		if endpoint.Credential != nil {
+			value := endpoint.Credential.Placement
+			placement = &value
+		}
 		out = append(out, policy.Endpoint{
-			Host:          endpoint.Host,
-			Port:          endpoint.Port,
-			PathPrefix:    endpoint.PathPrefix,
-			Resource:      endpoint.Resource,
-			HasCredential: endpoint.Credential != nil,
+			Host:       endpoint.Host,
+			Port:       endpoint.Port,
+			PathPrefix: endpoint.PathPrefix,
+			Resource:   endpoint.Resource,
+			Credential: placement,
 		})
 	}
 	return out
@@ -440,6 +450,7 @@ func (c *Config) digestDecisionInputs() (string, error) {
 		DenyListExceptions: canonicalPrefixes(c.DenyListExceptions),
 		Identity:           c.Identity,
 		UpstreamCAFiles:    canonicalFiles(c.TLS.UpstreamCAFiles),
+		CredentialSource:   c.Credentials.StaticFile,
 		DenyList:           policy.CompiledDigest(),
 	}
 	encoded, err := json.Marshal(inputs)
@@ -528,6 +539,8 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("ca.cache_size", overrides.CacheSize != 0, func() { c.CA.CacheSize = overrides.CacheSize })
 	override("tls.upstream_ca_files", len(overrides.UpstreamCAFiles) > 0,
 		func() { c.TLS.UpstreamCAFiles = append([]string(nil), overrides.UpstreamCAFiles...) })
+	override("credentials.static_file", overrides.CredentialStaticFile != "",
+		func() { c.Credentials.StaticFile = overrides.CredentialStaticFile })
 	override(
 		"limits.max_connections",
 		overrides.MaxConnections != 0,
@@ -565,6 +578,7 @@ func (c *Config) validate() error {
 		c.Identity.validate(&found)
 	}
 	c.validateProcess(&found)
+	c.validateCredentials(&found)
 	c.validatePolicy(&found)
 	seen := make(map[string]int, len(c.Endpoints))
 	for i, endpoint := range c.Endpoints {
@@ -626,6 +640,19 @@ func (c CA) validate(found *problems) {
 	}
 	if c.CacheSize < 1 {
 		found.addf("ca.cache_size must be at least 1")
+	}
+}
+
+// validateCredentials requires an absolute static-file path and one source.
+func (c *Config) validateCredentials(found *problems) {
+	if c.Credentials.StaticFile == "" {
+		return
+	}
+	if !filepath.IsAbs(c.Credentials.StaticFile) {
+		found.addf("credentials.static_file %q must be an absolute path", c.Credentials.StaticFile)
+	}
+	if c.Identity != nil {
+		found.addf("credentials.static_file and identity both name a credential source; configure one")
 	}
 }
 
@@ -767,31 +794,35 @@ func (c Credential) validate(i int, found *problems) {
 	if !envNameRE.MatchString(c.Env) {
 		found.addf("endpoints[%d]: credential.env %q is not an environment variable name", i, c.Env)
 	}
-	c.Placement.validate(i, found)
+	validatePlacement(c.Placement, i, found)
 }
 
-func (p Placement) validate(i int, found *problems) {
-	switch p.Kind {
+func validatePlacement(placement Placement, i int, found *problems) {
+	switch placement.Kind {
 	case PlacementHeader:
-		p.requireOnly(i, found, "header", p.Name != "", "needs a name", p.User == "", "takes no user")
-		if !strings.Contains(p.Template, credentialToken) {
-			found.addf("endpoints[%d]: a header placement template must contain %s", i, credentialToken)
+		requireOnly(i, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
+		if !strings.Contains(placement.Template, credential.Token) {
+			found.addf("endpoints[%d]: a header placement template must contain %s", i, credential.Token)
+		}
+		if credential.BannedHeaderName(placement.Name) {
+			found.addf("endpoints[%d]: a header placement cannot name %s, "+
+				"a header the connection, the proxy or the upstream's trust depends on", i, placement.Name)
 		}
 	case PlacementQuery:
-		p.requireOnly(i, found, "query", p.Name != "", "needs a name",
-			p.Template == "" && p.User == "", "takes no template or user")
+		requireOnly(i, found, "query", placement.Name != "", "needs a name",
+			placement.Template == "" && placement.User == "", "takes no template or user")
 	case PlacementBasic:
-		p.requireOnly(i, found, "basic", p.User != "", "needs a user",
-			p.Name == "" && p.Template == "", "takes no name or template")
+		requireOnly(i, found, "basic", placement.User != "", "needs a user",
+			placement.Name == "" && placement.Template == "", "takes no name or template")
 	default:
 		found.addf("endpoints[%d]: placement.kind %q must be %s, %s or %s",
-			i, p.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
+			i, placement.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
 	}
 }
 
 // requireOnly reports a missing required field and a field the kind does not
 // take.
-func (p Placement) requireOnly(
+func requireOnly(
 	i int, found *problems, kind string, hasRequired bool, missing string, onlyAllowed bool, extra string,
 ) {
 	if !hasRequired {

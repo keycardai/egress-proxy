@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
@@ -368,4 +371,199 @@ func TestInflightWaitJoins(t *testing.T) {
 			})
 		})
 	}
+}
+
+// textError is an error whose text is exactly what a case gives it, so a
+// case can put a credential in the middle of it.
+type textError string
+
+func (e textError) Error() string { return string(e) }
+
+// TestEmitForwardedRedactsTheCredential covers every arm that puts upstream
+// text on a record. A header placement puts the credential on the wire as
+// the workload would read it, and a query placement percent-encodes it into
+// the URL, so an error naming that URL carries the escaped form.
+func TestEmitForwardedRedactsTheCredential(t *testing.T) {
+	t.Parallel()
+	const secret = "a b=c+d"
+	escaped := url.QueryEscape(secret)
+	require.NotEqual(t, secret, escaped, "the fixture must escape to something else")
+	rawText := `Get "https://maps.example/geocode?key=` + secret + `": refused`
+	escapedText := `Get "https://maps.example/geocode?key=` + escaped + `": refused`
+	const wantText = `Get "https://maps.example/geocode?key=` + credential.Marker + `": refused`
+
+	deniedError := func(text string) *forward {
+		return &forward{secret: secret, denied: true, err: textError(text)}
+	}
+	upstreamError := func(text string) *forward {
+		return &forward{secret: secret, err: textError(text)}
+	}
+	tests := []struct {
+		name      string
+		fwd       *forward
+		recovered any
+		// field reads the record text the arm writes.
+		field func(audit.Record) string
+		want  string
+	}{
+		{
+			name: "a refusal on the upstream leg, raw", fwd: deniedError(rawText),
+			field: decisionError, want: wantText,
+		},
+		{
+			name: "a refusal on the upstream leg, query escaped", fwd: deniedError(escapedText),
+			field: decisionError, want: wantText,
+		},
+		{
+			name: "an upstream failure, raw", fwd: upstreamError(rawText),
+			field: outcomeError, want: wantText,
+		},
+		{
+			name: "an upstream failure, query escaped", fwd: upstreamError(escapedText),
+			field: outcomeError, want: wantText,
+		},
+		{
+			name: "a panic in the handler, raw", fwd: &forward{secret: secret},
+			recovered: textError(rawText),
+			field:     outcomeError, want: "the handler panicked: " + wantText,
+		},
+		{
+			name: "a panic in the handler, query escaped", fwd: &forward{secret: secret},
+			recovered: escapedText,
+			field:     outcomeError, want: "the handler panicked: " + wantText,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sink := &recordingSink{}
+			server := handshakeServer(t, &bytes.Buffer{}, time.Minute, sink)
+			recorder := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/geocode", nil)
+
+			server.emitForwarded(audit.Record{Scope: audit.ScopeRequest}, tc.fwd, recorder, request, tc.recovered)
+
+			records := sink.all()
+			require.Len(t, records, 1, "emitForwarded emits one record")
+			assert.Equal(t, tc.want, tc.field(records[0]), "the record text")
+			line, err := json.Marshal(records[0])
+			require.NoError(t, err, "marshal the record")
+			assert.Contains(t, string(line), credential.Marker, "the record says the text was redacted")
+			assert.NotContains(t, string(line), secret, "the record carries the credential")
+			assert.NotContains(t, string(line), escaped, "the record carries the escaped credential")
+		})
+	}
+}
+
+func decisionError(record audit.Record) string { return record.Decision.Error }
+
+func outcomeError(record audit.Record) string {
+	if record.Outcome == nil {
+		return ""
+	}
+	return record.Outcome.Error
+}
+
+// failingWriter reports an error from every write. No writer this build
+// ships can fail on a request that reached the forward, so the contract a
+// later placement writer inherits needs a double to exercise it.
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write(*http.Request, string) error { return w.err }
+
+// countingRoundTripper answers every round trip that reaches the upstream
+// and counts them.
+type countingRoundTripper struct{ trips atomic.Int64 }
+
+func (t *countingRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.trips.Add(1)
+	return &http.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+		Header: http.Header{}, Body: http.NoBody, Request: r,
+	}, nil
+}
+
+// TestAFailedCredentialWriteDenies verifies that a failed placement write
+// denies the request instead of forwarding it without a credential. The case
+// drives the reverse proxy and audit record after the request is allowed.
+func TestAFailedCredentialWriteDenies(t *testing.T) {
+	t.Parallel()
+	const secret = "query-sekrit" //nolint:gosec // G101: a test fixture, not a credential
+	tests := []struct {
+		name       string
+		writer     credential.Writer
+		wantStatus int
+		wantReason policy.Reason
+		wantTrips  int64
+		// wantVerdict is the verdict the record carries. An allowed forward
+		// keeps the verdict the decision put on the record.
+		wantVerdict policy.Verdict
+	}{
+		{
+			name:       "the writer reports an error",
+			writer:     failingWriter{err: textError("the request query does not parse: key=" + secret)},
+			wantStatus: http.StatusForbidden, wantReason: policy.ReasonCredentialUnavailable,
+			wantTrips: 0, wantVerdict: policy.VerdictDeny,
+		},
+		{
+			name:       "the writer succeeds",
+			writer:     workingWriter{},
+			wantStatus: http.StatusOK, wantReason: policy.ReasonEndpointAllowed,
+			wantTrips: 1, wantVerdict: policy.VerdictAllow,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logs := &bytes.Buffer{}
+			sink := &recordingSink{}
+			server := handshakeServer(t, logs, time.Minute, sink)
+			upstream := &countingRoundTripper{}
+			server.reverse.Transport = refuseUnwritten{next: upstream}
+
+			fwd := &forward{
+				host: allowedHost, port: 443, requestID: "req-1",
+				writer: tc.writer, secret: secret,
+			}
+			request := httptest.NewRequestWithContext(
+				context.WithValue(t.Context(), forwardKey{}, fwd),
+				http.MethodGet, "https://"+allowedHost+"/geocode?q=here", nil,
+			)
+			request.Host = allowedHost + ":443"
+			recorder := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+			server.reverse.ServeHTTP(recorder, request)
+			server.emitForwarded(audit.Record{
+				Scope:    audit.ScopeRequest,
+				Decision: audit.Decision{Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed},
+			}, fwd, recorder, request, nil)
+
+			written, ok := recorder.ResponseWriter.(*httptest.ResponseRecorder)
+			require.True(t, ok, "the recorder wraps an httptest recorder")
+			assert.Equal(t, tc.wantStatus, written.Code, "the status the client receives")
+			assert.Equal(t, tc.wantTrips, upstream.trips.Load(), "round trips that reached the upstream")
+
+			records := sink.all()
+			require.Len(t, records, 1, "the request emits one record")
+			assert.Equal(t, tc.wantVerdict, records[0].Decision.Verdict, "record verdict")
+			assert.Equal(t, tc.wantReason, records[0].Decision.Reason, "record reason")
+			if tc.wantVerdict == policy.VerdictDeny {
+				assert.Equal(t, string(tc.wantReason), written.Header().Get(HeaderReason), "the deny reason header")
+				assert.Equal(t, "req-1", written.Header().Get(HeaderRequestID), "the request id header")
+				assert.Equal(t, "egress-proxy: "+string(tc.wantReason)+"\n", written.Body.String(), "the deny body")
+				assert.NotEmpty(t, records[0].Decision.Error, "the record says why the write failed")
+			}
+			line, err := json.Marshal(records[0])
+			require.NoError(t, err, "marshal the record")
+			assert.NotContains(t, string(line), secret, "an audit record carries the credential")
+			assert.NotContains(t, logs.String(), secret, "a log line carries the credential")
+		})
+	}
+}
+
+// workingWriter stands in for a placement writer that writes.
+type workingWriter struct{}
+
+func (workingWriter) Write(out *http.Request, secret string) error {
+	out.Header.Set("Authorization", "Bearer "+secret)
+	return nil
 }
