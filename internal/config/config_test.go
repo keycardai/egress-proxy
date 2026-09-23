@@ -46,6 +46,48 @@ func TestParseAppliesDefaults(t *testing.T) {
 	}
 }
 
+// TestParseNormalizesTheEndpointHost pins how a host spelling reaches the
+// rest of the process. Normalization runs before validation, so the two have
+// to agree on which spellings are one name and which are no name at all.
+func TestParseNormalizesTheEndpointHost(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+		// wantHost is the normalized host, or empty when the document is
+		// refused.
+		wantHost string
+		wantErr  string
+	}{
+		{name: "as written", host: "pypi.org", wantHost: "pypi.org"},
+		{name: "with the root label", host: "pypi.org.", wantHost: "pypi.org"},
+		{name: "in mixed case", host: "PyPI.ORG", wantHost: "pypi.org"},
+		{name: "padded", host: " pypi.org. ", wantHost: "pypi.org"},
+		// One trailing dot is the root label. A second one is an empty
+		// label, which no name can carry. Normalization drops a single dot,
+		// so the host still holds the empty label when it is validated.
+		{name: "with two trailing dots", host: "pypi.org..", wantErr: "must be a DNS name"},
+		{name: "with three trailing dots", host: "pypi.org...", wantErr: "must be a DNS name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: \"" + tc.host + "\"\n"
+			cfg, err := config.Parse([]byte(doc), config.Overrides{})
+			if tc.wantErr != "" {
+				require.Error(t, err, "Parse")
+				assert.Contains(t, err.Error(), tc.wantErr, "refusal")
+				return
+			}
+			require.NoError(t, err, "Parse")
+			assert.Equal(t, tc.wantHost, cfg.Endpoints[0].Host, "host")
+			// The default resource is built from the normalized host, so two
+			// spellings of one name produce one resource.
+			assert.Equal(t, "https://"+tc.wantHost+"/", cfg.Endpoints[0].Resource, "resource")
+		})
+	}
+}
+
 func TestDigestIsOverTheDocumentAsWritten(t *testing.T) {
 	t.Parallel()
 	yamlForm, err := config.Parse([]byte(minimal), config.Overrides{})
