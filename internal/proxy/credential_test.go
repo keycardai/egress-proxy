@@ -1,7 +1,10 @@
 package proxy_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -310,4 +313,63 @@ func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	logged := h.logs.String()
 	assert.NotContains(t, logged, querySecret, "a log line carries the credential")
 	assert.Contains(t, logged, "refused a request", "the proxy logged nothing, so the assertion above proves nothing")
+}
+
+// errSomethingElse represents a source failure with no class.
+var errSomethingElse = errors.New("something else")
+
+// refusingSource reports one failure for every resource. It represents the
+// exchange, whose failures use the same two classes for every zone response.
+type refusingSource struct{ err error }
+
+func (s refusingSource) Credential(context.Context, string) (string, error) { return "", s.err }
+
+func (refusingSource) Describe() string { return "a source that refuses every resource" }
+
+// TestASourceFailureClassIsItsDenialReason checks the mapping used by audit
+// queries and error handling. A source reports the failure class, and the
+// proxy does not read its message to choose a reason.
+func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		err        error
+		wantReason policy.Reason
+		wantStatus int
+	}{
+		{
+			name: "the zone's policy refused the exchange", err: credential.ErrExchangeDenied,
+			wantReason: policy.ReasonExchangeDenied, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "the exchange did not complete", err: credential.ErrExchangeFailed,
+			// A dependency caused the failure, so a retry can succeed.
+			wantReason: policy.ReasonExchangeFailed, wantStatus: http.StatusBadGateway,
+		},
+		{
+			name: "the source holds nothing for the resource", err: credential.ErrUnavailable,
+			wantReason: policy.ReasonCredentialUnavailable, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "a failure in no class at all", err: errSomethingElse,
+			wantReason: policy.ReasonCredentialUnavailable, wantStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := start(t, harnessOptions{
+				upstream: httpbinUpstream(), endpoints: credentialEndpoints,
+				credentials: refusingSource{err: fmt.Errorf("resource %s: %w", headerResource, tc.err)},
+			})
+			answer := fetch(t, h, h.upstreamURL("/anything/header/repos"), nil)
+			assert.Equal(t, tc.wantStatus, answer.status, "response status")
+			assert.Equal(t, tc.wantReason, answer.reason(), "response reason")
+
+			record := h.sink.find(t, tc.name, byRequest(answer.id()))
+			assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
+			assert.Equal(t, tc.wantReason, record.Decision.Reason, "record reason")
+			assert.Zero(t, h.upstream.connections.Load(), "a request without its credential reached the upstream")
+		})
+	}
 }

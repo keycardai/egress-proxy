@@ -208,6 +208,33 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			wantSame: true,
 		},
 		{
+			name:    "the static source and the exchange",
+			doc:     minimal + "credentials:\n  static_file: /creds.yaml\n",
+			against: minimal + identityDoc,
+			// A record names the source that answered. Two sidecars that read
+			// different sources never share a digest.
+			wantSame: false,
+		},
+		{
+			name:     "two static files at different paths",
+			doc:      minimal + "credentials:\n  static_file: /a.yaml\n",
+			against:  minimal + "credentials:\n  static_file: /b.yaml\n",
+			wantSame: false,
+		},
+		{
+			name:    "an exchange on workload identity and one on a client secret",
+			doc:     minimal + identityDoc,
+			against: minimal + secretDoc,
+			// The two mechanisms give the zone different authority.
+			wantSame: false,
+		},
+		{
+			name:      "the exchange budget, which bounds a call and decides nothing",
+			doc:       minimal + identityDoc,
+			overrides: config.Overrides{ExchangeTimeout: 42 * time.Second},
+			wantSame:  true,
+		},
+		{
 			name:     "the default port written out explicitly",
 			doc:      strings.Replace(minimal, "- host: pypi.org", "- host: pypi.org\n    port: 443", 1) + identityDoc,
 			wantSame: true,
@@ -670,7 +697,58 @@ func TestParseRefusesInvalidIdentity(t *testing.T) {
 			doc:     minimal + "identity:\n  zone_url: https://z\n  client_id: c\n  workload_token_file: /t\n",
 			wantErr: "identity.impersonate.user is empty",
 		},
+		{
+			name: "identity with neither client authentication mechanism",
+			doc: minimal + "identity:\n  zone_url: https://z\n  client_id: c\n" +
+				"  impersonate: {user: u}\n",
+			wantErr: "names no client authentication",
+		},
+		{
+			name: "identity with both client authentication mechanisms",
+			doc: minimal + "identity:\n  zone_url: https://z\n  client_id: c\n  workload_token_file: /t\n" +
+				"  client_secret_file: /s\n  impersonate: {user: u}\n",
+			wantErr: "both authenticate the exchange; configure one",
+		},
+		{
+			name: "identity with a relative client secret file",
+			doc: minimal + "identity:\n  zone_url: https://z\n  client_id: c\n  client_secret_file: s\n" +
+				"  impersonate: {user: u}\n",
+			wantErr: "identity.client_secret_file",
+		},
 	})
+}
+
+// secretDoc is the identity section that authenticates with a client secret.
+// It differs from identityDoc only in the authentication mechanism.
+const secretDoc = "identity:\n  zone_url: https://z\n  client_id: c\n  client_secret_file: /s\n" +
+	"  impersonate: {user: u}\n"
+
+// TestCredentialSourceNamesTheSourceInForce checks the source that the process
+// announces, reports at /info, and covers in the config digest.
+func TestCredentialSourceNamesTheSourceInForce(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		doc  string
+		want config.CredentialSourceKind
+	}{
+		{name: "no source", doc: minimal, want: config.SourceNone},
+		{
+			name: "a static file",
+			doc:  minimal + "credentials:\n  static_file: /creds.yaml\n",
+			want: config.SourceStaticFile,
+		},
+		{name: "an exchange on workload identity", doc: minimal + identityDoc, want: config.SourceExchange},
+		{name: "an exchange on a client secret", doc: minimal + secretDoc, want: config.SourceExchange},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
+			require.NoError(t, err, "Parse:\n%s", tc.doc)
+			assert.Equal(t, tc.want, cfg.CredentialSource(), "the configured source")
+		})
+	}
 }
 
 func TestParseReportsEveryProblem(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/rogpeppe/go-internal/testscript"
 
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/test/fakeas"
 )
 
 // waitFor bounds every wait a script asks for.
@@ -69,6 +71,7 @@ func TestAcceptance(t *testing.T) {
 		},
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"upstream": cmdUpstream,
+			"fakeas":   cmdFakeAS,
 			"expand":   cmdExpand,
 			"freeport": cmdFreePort,
 			"shortdir": cmdShortDir,
@@ -119,6 +122,80 @@ func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
 	ts.Check(err)
 	ts.Setenv("UPSTREAM_PORT", port)
+}
+
+// These are the client values that the fake authorization server knows. A
+// scenario reads them from the environment.
+const (
+	zoneClientID     = "acceptance-app-credential"
+	zoneClientSecret = "acceptance-client-secret"
+)
+
+// cmdFakeAS starts a fake Keycard zone over TLS in the test process:
+//
+//	fakeas DIR RESOURCE=CREDENTIAL...
+//
+// It grants each named resource the credential beside it and refuses other
+// resources with access_denied. It writes its CA certificate to DIR/ca.crt,
+// appends one line per token request to DIR/requests.log, and exports its port
+// as $ZONE_PORT. It exports the known client as $ZONE_CLIENT_ID and
+// $ZONE_CLIENT_SECRET. It stops when the script ends.
+func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) < 2 {
+		ts.Fatalf("usage: fakeas DIR RESOURCE=CREDENTIAL...")
+	}
+	dir := ts.MkAbs(args[0])
+	grants := make(map[string]string, len(args)-1)
+	for _, arg := range args[1:] {
+		resource, value, ok := strings.Cut(arg, "=")
+		if !ok {
+			ts.Fatalf("fakeas: %q is not RESOURCE=CREDENTIAL", arg)
+		}
+		grants[resource] = value
+	}
+	authority, err := ca.New(ca.Options{CommonName: "acceptance zone CA"})
+	ts.Check(err)
+	leaf, err := authority.Leaf("localhost")
+	ts.Check(err)
+	_, err = authority.WriteCertificate(dir)
+	ts.Check(err)
+	requests, err := os.OpenFile(filepath.Join(dir, "requests.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	ts.Check(err)
+
+	zone := fakeas.New(fakeas.Options{
+		Credentials:   grants,
+		ClientSecrets: map[string]string{zoneClientID: zoneClientSecret},
+	})
+	server := httptest.NewUnstartedServer(logExchanges(zone, requests))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	ts.Defer(func() {
+		server.Close()
+		_ = requests.Close()
+	})
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	ts.Check(err)
+	ts.Setenv("ZONE_PORT", port)
+	ts.Setenv("ZONE_CLIENT_ID", zoneClientID)
+	ts.Setenv("ZONE_CLIENT_SECRET", zoneClientSecret)
+}
+
+// logExchanges writes one line per token request that the zone reads. A
+// scenario can count exchanges for allowed requests and confirm that denied
+// requests make none. The line never includes the issued credential or the
+// client secret.
+func logExchanges(zone *fakeas.Server, log io.Writer) http.Handler {
+	var mu sync.Mutex
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen := len(zone.Requests())
+		zone.ServeHTTP(w, r)
+		for _, request := range zone.Requests()[seen:] {
+			fmt.Fprintf(log, "exchange client=%s subject=%s resource=%s error=%q\n",
+				request.ClientID, request.Subject, request.Form.Get("resource"), request.Error)
+		}
+	})
 }
 
 // streamEvents and streamInterval shape the event stream: the stream runs

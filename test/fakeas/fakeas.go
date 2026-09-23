@@ -1,0 +1,299 @@
+// Package fakeas is an authorization server fixture for unit and acceptance
+// tests. It answers RFC 8414 discovery and the RFC 8693 token exchange that
+// the proxy posts. It keeps every request for tests to read.
+//
+// It authenticates clients with client_secret_basic, which this build sends.
+//
+// It does not verify signatures. Use it as a fixture, not as a zone. The
+// cluster lane exercises the real zone.
+package fakeas
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+)
+
+// MetadataPath is the RFC 8414 discovery path. TokenPath is the path that the
+// metadata advertises.
+const (
+	MetadataPath = "/.well-known/oauth-authorization-server"
+	TokenPath    = "/oauth2/token" //nolint:gosec // G101: a path, not a credential
+)
+
+// These are the wire values that the exchange sends.
+//
+//nolint:gosec // G101: protocol URNs, not credentials
+const (
+	grantTokenExchange    = "urn:ietf:params:oauth:grant-type:token-exchange"
+	subjectTypeSubstitute = "urn:keycard:params:oauth:token-type:substitute-user"
+	issuedTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
+)
+
+// These are the RFC 6749 section 5.2 error codes that the server returns.
+const (
+	codeInvalidRequest   = "invalid_request"
+	codeInvalidClient    = "invalid_client"
+	codeInvalidGrant     = "invalid_grant"
+	codeUnsupportedGrant = "unsupported_grant_type"
+	codeAccessDenied     = "access_denied"
+)
+
+// expiresIn is the token lifetime in seconds.
+const expiresIn = 300
+
+// jwtSegments is the number of dot-separated JWT segments. The third segment
+// is empty for an unsigned token.
+const jwtSegments = 3
+
+// Options configures a Server.
+type Options struct {
+	// Credentials maps each resource to the access token that the server issues.
+	// The server returns access_denied for an unmapped resource.
+	Credentials map[string]string
+	// ClientSecrets maps each client ID to its client_secret_basic secret. An
+	// empty map authenticates no client.
+	ClientSecrets map[string]string
+}
+
+// Request contains one token request as the server read it.
+type Request struct {
+	// Form contains the posted parameters. The client secret uses the
+	// Authorization header, so it is not in this field.
+	Form url.Values
+	// ClientID is the authenticated client ID from basic credentials or the
+	// client_id parameter.
+	ClientID string
+	// Subject is the user named by the substitute-user token.
+	Subject string
+	// Error is the OAuth error code that the server returned. It is empty for a
+	// successful token response.
+	Error string
+}
+
+// Server answers discovery and token requests.
+type Server struct {
+	opts Options
+
+	mu       sync.Mutex
+	requests []Request
+}
+
+// New builds a server. Mount it on any listener. The server reads its issuer
+// from each request, so it needs no address in advance.
+func New(opts Options) *Server {
+	return &Server{opts: opts}
+}
+
+// Requests returns the token requests in the order that the server read them.
+func (s *Server) Requests() []Request {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Request(nil), s.requests...)
+}
+
+// ServeHTTP routes discovery and token requests. It returns 404 for every
+// other path.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case MetadataPath:
+		s.metadata(w, r)
+	case TokenPath:
+		s.token(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// metadata answers RFC 8414 discovery. It builds the issuer from the request
+// so the issuer matches the URL that the client requested.
+func (s *Server) metadata(w http.ResponseWriter, r *http.Request) {
+	issuer := issuerOf(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":                                issuer,
+		"token_endpoint":                        issuer + TokenPath,
+		"grant_types_supported":                 []string{grantTokenExchange},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic"},
+	})
+}
+
+// token answers the exchange and records every request. A test can confirm
+// that a denied proxy request reached no exchange.
+func (s *Server) token(w http.ResponseWriter, r *http.Request) {
+	if refusal := requestShape(r); refusal != nil {
+		writeDenial(w, *refusal)
+		return
+	}
+	basicID, basicSecret, hasBasic := r.BasicAuth()
+	record := Request{
+		Form:     r.PostForm,
+		ClientID: r.PostForm.Get("client_id"),
+		Subject:  claimSub(r.PostForm.Get("subject_token")),
+	}
+	if hasBasic {
+		record.ClientID = basicID
+	}
+
+	value, refusal := s.issue(record, basicSecret, hasBasic)
+	if refusal != nil {
+		record.Error = refusal.Code
+	}
+	s.mu.Lock()
+	s.requests = append(s.requests, record)
+	s.mu.Unlock()
+
+	if refusal != nil {
+		writeDenial(w, *refusal)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":      value,
+		"token_type":        "Bearer",
+		"expires_in":        expiresIn,
+		"issued_token_type": issuedTypeAccessToken,
+	})
+}
+
+// requestShape rejects anything other than a form POST before the server
+// records it. The server does not retain those requests.
+func requestShape(r *http.Request) *denial {
+	if r.Method != http.MethodPost {
+		return &denial{
+			status:      http.StatusMethodNotAllowed,
+			Code:        codeInvalidRequest,
+			Description: "the token endpoint takes a POST",
+		}
+	}
+	if err := r.ParseForm(); err != nil {
+		return &denial{
+			status:      http.StatusBadRequest,
+			Code:        codeInvalidRequest,
+			Description: "the form does not parse",
+		}
+	}
+	return nil
+}
+
+// issue checks client authentication, the grant shape, and the resource
+// grant, then returns the credential.
+func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *denial) {
+	if refusal := s.authenticate(record, secret, hasBasic); refusal != nil {
+		return "", refusal
+	}
+	if refusal := grantShape(record.Form); refusal != nil {
+		return "", refusal
+	}
+	if record.Subject == "" {
+		return "", &denial{
+			status:      http.StatusBadRequest,
+			Code:        codeInvalidGrant,
+			Description: "the substitute-user token has no sub claim",
+		}
+	}
+	resource := record.Form.Get("resource")
+	value, granted := s.opts.Credentials[resource]
+	if !granted {
+		return "", &denial{
+			status:      http.StatusForbidden,
+			Code:        codeAccessDenied,
+			Description: "no policy grants " + resource,
+		}
+	}
+	return value, nil
+}
+
+// authenticate accepts a client secret that the server knows. A secret names
+// no ServiceAccount, so the server cannot bind the client to the requested
+// user.
+func (s *Server) authenticate(record Request, secret string, hasBasic bool) *denial {
+	if hasBasic {
+		if known, ok := s.opts.ClientSecrets[record.ClientID]; ok && known == secret {
+			return nil
+		}
+	}
+	return &denial{
+		status:      http.StatusUnauthorized,
+		Code:        codeInvalidClient,
+		Description: "the request has no client secret this server knows",
+	}
+}
+
+// grantShape rejects a request that is not an impersonating exchange.
+func grantShape(form url.Values) *denial {
+	if form.Get("grant_type") != grantTokenExchange {
+		return &denial{
+			status:      http.StatusBadRequest,
+			Code:        codeUnsupportedGrant,
+			Description: "this server serves the token-exchange grant",
+		}
+	}
+	if form.Get("subject_token_type") != subjectTypeSubstitute {
+		return &denial{
+			status:      http.StatusBadRequest,
+			Code:        codeInvalidRequest,
+			Description: "this server serves the substitute-user subject token type",
+		}
+	}
+	if form.Get("actor_token") != "" {
+		return &denial{
+			status:      http.StatusBadRequest,
+			Code:        codeInvalidRequest,
+			Description: "a substitute-user exchange sends no actor_token",
+		}
+	}
+	return nil
+}
+
+// denial is an RFC 6749 section 5.2 error response and its HTTP status.
+type denial struct {
+	status      int
+	Code        string `json:"error"`
+	Description string `json:"error_description,omitempty"`
+}
+
+// claimSub reads the sub claim from a JWT without verifying the signature. It
+// returns an empty string when it cannot read the claim.
+func claimSub(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != jwtSegments {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.Sub
+}
+
+// issuerOf reconstructs the URL that the client requested for discovery.
+func issuerOf(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+func writeDenial(w http.ResponseWriter, refusal denial) {
+	writeJSON(w, refusal.status, refusal)
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		http.Error(w, "encode the response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(encoded)
+}

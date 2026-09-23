@@ -16,6 +16,8 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   `test/acceptance/` for the acceptance tests, Go behind the `acceptance`
   build tag with one testscript per scenario under `testdata/`,
   `test/e2e/` for the cluster lanes,
+  `test/fakeas/` for the fake authorization server that unit and acceptance
+  tests use for token exchange,
   `test/gates/` for the gate self-tests, `scripts/` for the gate scripts,
   `images/` for image definitions.
 - Build-time tools are `tool` directives in `go.mod`, run as

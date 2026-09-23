@@ -17,12 +17,6 @@ import (
 // StaticVersion is the only credential file version this build reads.
 const StaticVersion = 1
 
-// maxStaticFileSize bounds what LoadStaticFile reads.
-const maxStaticFileSize = 1 << 20
-
-// ErrUnavailable means the source holds no credential for the resource.
-var ErrUnavailable = errors.New("no credential for this resource")
-
 var errStaticFile = errors.New("invalid credential file")
 
 // StaticFile is a Source that reads every credential from one file at
@@ -48,18 +42,8 @@ type staticEntry struct {
 
 // LoadStaticFile reads the credential file at path.
 func LoadStaticFile(path string) (*StaticFile, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errStaticFile, err)
-	}
-	switch {
-	case !info.Mode().IsRegular():
-		return nil, fmt.Errorf("%w %s: it is not a regular file", errStaticFile, path)
-	case info.Mode().Perm()&0o077 != 0:
-		return nil, fmt.Errorf("%w %s: it has mode %#o and holds credentials, so it must be readable "+
-			"by its owner alone", errStaticFile, path, info.Mode().Perm())
-	case info.Size() > maxStaticFileSize:
-		return nil, fmt.Errorf("%w %s: it is larger than %d bytes", errStaticFile, path, maxStaticFileSize)
+	if err := CheckSecretFile(errStaticFile, path); err != nil {
+		return nil, err
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is credentials.static_file
 	if err != nil {

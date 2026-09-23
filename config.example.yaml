@@ -9,10 +9,17 @@ version: 1
 sandbox:
   id: "sbx-igmua2g0"                    # EGRESS_PROXY_SANDBOX_ID; attribution on every audit record
 
+# The exchange mints an upstream credential for each request. Set exactly one
+# of workload_token_file and client_secret_file. This build reads
+# client_secret_file and refuses workload_token_file.
 identity:
-  zone_url: "https://acme.keycard.cloud"                 # EGRESS_PROXY_ZONE_URL
-  client_id: "<application credential id>"              # EGRESS_PROXY_CLIENT_ID
-  workload_token_file: "/var/run/secrets/keycard/token" # EGRESS_PROXY_WORKLOAD_TOKEN_FILE
+  zone_url: "https://acme.keycard.cloud"                     # EGRESS_PROXY_ZONE_URL
+  client_id: "<application credential id>"                   # EGRESS_PROXY_CLIENT_ID
+  client_secret_file: "/run/secrets/keycard/client-secret"   # EGRESS_PROXY_CLIENT_SECRET_FILE
+  # This file holds the application credential secret. The zone reads no
+  # ServiceAccount from the secret, so its policy cannot tie the secret to one
+  # user. See docs/security-model.md.
+  # workload_token_file: "/var/run/secrets/keycard/token"    # EGRESS_PROXY_WORKLOAD_TOKEN_FILE
   impersonate:
     user: "igmua2g0fwapl21qll7tczdw7t"  # EGRESS_PROXY_IMPERSONATE_USER; the ServiceAccount has the same name
 
@@ -30,6 +37,7 @@ identity:
 #   max_connections: 1024               # EGRESS_PROXY_MAX_CONNECTIONS
 #   idle_timeout: "5m"                  # EGRESS_PROXY_IDLE_TIMEOUT
 #   response_header_timeout: "30s"      # EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT
+#   exchange_timeout: "10s"             # EGRESS_PROXY_EXCHANGE_TIMEOUT
 
 # credentials:
 #   static_file: "/run/egress/credentials.yaml"  # EGRESS_PROXY_CREDENTIAL_STATIC_FILE

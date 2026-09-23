@@ -45,6 +45,8 @@ const (
 	// DefaultResponseHeaderTimeout bounds the wait for an upstream response
 	// head. It does not bound a body, so a streamed response is unaffected.
 	DefaultResponseHeaderTimeout = 30 * time.Second
+	// DefaultExchangeTimeout limits one token exchange, including discovery.
+	DefaultExchangeTimeout = 10 * time.Second
 
 	// Version is the only document version this build reads.
 	Version = 1
@@ -103,6 +105,35 @@ type Credentials struct {
 	StaticFile string `json:"static_file"`
 }
 
+// CredentialSourceKind names the credential source that a process reads.
+// A record names the source that answered.
+type CredentialSourceKind string
+
+// The credential source kinds.
+const (
+	// SourceNone means that the configuration names no source. An endpoint
+	// that names a credential returns credential_unavailable.
+	SourceNone CredentialSourceKind = "none"
+	// SourceStaticFile reads credentials from credentials.static_file.
+	SourceStaticFile CredentialSourceKind = "static_file"
+	// SourceExchange mints a credential for each request with a token exchange
+	// against identity.zone_url.
+	SourceExchange CredentialSourceKind = "exchange"
+)
+
+// CredentialSource names the effective source. Validation requires that only
+// one is configured.
+func (c *Config) CredentialSource() CredentialSourceKind {
+	switch {
+	case c.Credentials.StaticFile != "":
+		return SourceStaticFile
+	case c.Identity != nil:
+		return SourceExchange
+	default:
+		return SourceNone
+	}
+}
+
 // Sandbox identifies the sandbox being proxied on every audit record.
 type Sandbox struct {
 	ID string `json:"id"`
@@ -111,11 +142,17 @@ type Sandbox struct {
 // Identity is the principal that identifies this proxy workload. It is the
 // authority with which the egress proxy authenticates with a Keycard zone and
 // performs a token exchange on the impersonated user's behalf.
+// Exactly one of WorkloadTokenFile and ClientSecretFile authenticates the
+// exchange. A workload token lets the zone read a ServiceAccount subject. A
+// client secret gives the zone no ServiceAccount subject.
 type Identity struct {
-	ZoneURL           string      `json:"zone_url"`
-	ClientID          string      `json:"client_id"`
-	WorkloadTokenFile string      `json:"workload_token_file"`
-	Impersonate       Impersonate `json:"impersonate"`
+	ZoneURL           string `json:"zone_url"`
+	ClientID          string `json:"client_id"`
+	WorkloadTokenFile string `json:"workload_token_file"`
+	// ClientSecretFile holds the application credential secret. The proxy
+	// never writes the secret to the document, a flag, or a variable.
+	ClientSecretFile string      `json:"client_secret_file"`
+	Impersonate      Impersonate `json:"impersonate"`
 }
 
 // Impersonate identifies the user subject this proxy impersonates in every
@@ -162,6 +199,9 @@ type Limits struct {
 	// head once the request is written. It does not bound the body, so a
 	// streamed response runs as long as it stays active.
 	ResponseHeaderTimeout Duration `json:"response_header_timeout"`
+	// ExchangeTimeout limits one token exchange, including discovery. A
+	// request that exceeds it returns exchange_failed.
+	ExchangeTimeout Duration `json:"exchange_timeout"`
 }
 
 // Policy is what joins and what leaves the platform deny list.
@@ -266,6 +306,7 @@ type Overrides struct {
 	Admin                 string
 	CAOutDir              string
 	CAStateDir            string
+	ClientSecretFile      string
 	CredentialStaticFile  string
 	LeafTTL               time.Duration
 	CacheSize             int
@@ -273,6 +314,7 @@ type Overrides struct {
 	MaxConnections        int
 	IdleTimeout           time.Duration
 	ResponseHeaderTimeout time.Duration
+	ExchangeTimeout       time.Duration
 }
 
 // Load reads and parses the document at path with the overrides applied.
@@ -337,13 +379,21 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // carries rather than a document. Two binaries that deny different
 // destinations must not share a digest.
 type decisionInputs struct {
-	Endpoints          []Endpoint `json:"endpoints"`
-	ClusterCIDRs       []string   `json:"cluster_cidrs"`
-	DenyListExceptions []string   `json:"deny_list_exceptions"`
-	Identity           *Identity  `json:"identity,omitempty"`
-	UpstreamCAFiles    []string   `json:"upstream_ca_files"`
-	CredentialSource   string     `json:"credential_source"`
-	DenyList           string     `json:"deny_list"`
+	Endpoints          []Endpoint       `json:"endpoints"`
+	ClusterCIDRs       []string         `json:"cluster_cidrs"`
+	DenyListExceptions []string         `json:"deny_list_exceptions"`
+	Identity           *Identity        `json:"identity,omitempty"`
+	UpstreamCAFiles    []string         `json:"upstream_ca_files"`
+	CredentialSource   credentialSource `json:"credential_source"`
+	DenyList           string           `json:"deny_list"`
+}
+
+// credentialSource names the configured source.
+type credentialSource struct {
+	Kind CredentialSourceKind `json:"kind"`
+	// StaticFile is the file that the static source reads. Different files can
+	// hold different credentials.
+	StaticFile string `json:"static_file,omitempty"`
 }
 
 // canonicalPrefixes renders a range list the way the deny list reads it:
@@ -450,7 +500,7 @@ func (c *Config) digestDecisionInputs() (string, error) {
 		DenyListExceptions: canonicalPrefixes(c.DenyListExceptions),
 		Identity:           c.Identity,
 		UpstreamCAFiles:    canonicalFiles(c.TLS.UpstreamCAFiles),
-		CredentialSource:   c.Credentials.StaticFile,
+		CredentialSource:   credentialSource{Kind: c.CredentialSource(), StaticFile: c.Credentials.StaticFile},
 		DenyList:           policy.CompiledDigest(),
 	}
 	encoded, err := json.Marshal(inputs)
@@ -483,6 +533,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Limits.ResponseHeaderTimeout == 0 {
 		c.Limits.ResponseHeaderTimeout = Duration(DefaultResponseHeaderTimeout)
+	}
+	if c.Limits.ExchangeTimeout == 0 {
+		c.Limits.ExchangeTimeout = Duration(DefaultExchangeTimeout)
 	}
 	for i := range c.Endpoints {
 		applyEndpointDefaults(&c.Endpoints[i])
@@ -520,7 +573,7 @@ func (c *Config) applyOverrides(overrides Overrides) {
 		}
 	}
 	identity := overrides.ZoneURL != "" || overrides.ClientID != "" || overrides.WorkloadTokenFile != "" ||
-		overrides.ImpersonateUser != ""
+		overrides.ClientSecretFile != "" || overrides.ImpersonateUser != ""
 	if identity && c.Identity == nil {
 		c.Identity = &Identity{}
 	}
@@ -529,6 +582,8 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("identity.client_id", overrides.ClientID != "", func() { c.Identity.ClientID = overrides.ClientID })
 	override("identity.workload_token_file", overrides.WorkloadTokenFile != "",
 		func() { c.Identity.WorkloadTokenFile = overrides.WorkloadTokenFile })
+	override("identity.client_secret_file", overrides.ClientSecretFile != "",
+		func() { c.Identity.ClientSecretFile = overrides.ClientSecretFile })
 	override("identity.impersonate.user", overrides.ImpersonateUser != "",
 		func() { c.Identity.Impersonate.User = overrides.ImpersonateUser })
 	override("listen.connect", overrides.Connect != "", func() { c.Listen.Connect = overrides.Connect })
@@ -555,6 +610,11 @@ func (c *Config) applyOverrides(overrides Overrides) {
 		"limits.response_header_timeout",
 		overrides.ResponseHeaderTimeout != 0,
 		func() { c.Limits.ResponseHeaderTimeout = Duration(overrides.ResponseHeaderTimeout) },
+	)
+	override(
+		"limits.exchange_timeout",
+		overrides.ExchangeTimeout != 0,
+		func() { c.Limits.ExchangeTimeout = Duration(overrides.ExchangeTimeout) },
 	)
 	sort.Strings(c.Overridden)
 }
@@ -621,6 +681,9 @@ func (c *Config) validateProcess(found *problems) {
 	}
 	if c.Limits.ResponseHeaderTimeout <= 0 {
 		found.addf("limits.response_header_timeout must be positive")
+	}
+	if c.Limits.ExchangeTimeout <= 0 {
+		found.addf("limits.exchange_timeout must be positive")
 	}
 }
 
@@ -690,11 +753,28 @@ func (id *Identity) validate(found *problems) {
 	if strings.TrimSpace(id.ClientID) == "" {
 		found.addf("identity.client_id is empty")
 	}
-	if !filepath.IsAbs(id.WorkloadTokenFile) {
-		found.addf("identity.workload_token_file %q must be an absolute path", id.WorkloadTokenFile)
-	}
+	id.validateClientAuth(found)
 	if strings.TrimSpace(id.Impersonate.User) == "" {
 		found.addf("identity.impersonate.user is empty")
+	}
+}
+
+// validateClientAuth requires exactly one client authentication mechanism.
+// The two mechanisms give the zone different authority, so a record must
+// identify which one the zone used.
+func (id *Identity) validateClientAuth(found *problems) {
+	switch {
+	case id.WorkloadTokenFile == "" && id.ClientSecretFile == "":
+		found.addf("identity names no client authentication; set workload_token_file or client_secret_file")
+	case id.WorkloadTokenFile != "" && id.ClientSecretFile != "":
+		found.addf("identity.workload_token_file and identity.client_secret_file both authenticate the " +
+			"exchange; configure one")
+	}
+	if id.WorkloadTokenFile != "" && !filepath.IsAbs(id.WorkloadTokenFile) {
+		found.addf("identity.workload_token_file %q must be an absolute path", id.WorkloadTokenFile)
+	}
+	if id.ClientSecretFile != "" && !filepath.IsAbs(id.ClientSecretFile) {
+		found.addf("identity.client_secret_file %q must be an absolute path", id.ClientSecretFile)
 	}
 }
 

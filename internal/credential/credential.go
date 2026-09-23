@@ -43,6 +43,20 @@ var (
 	errInvalid   = errors.New("invalid credential")
 )
 
+// These are the failures that a Source reports. Each one maps to a denial
+// reason in internal/proxy, so callers do not need to read an error message.
+var (
+	// ErrUnavailable means that the source has no credential for the resource.
+	ErrUnavailable = errors.New("no credential for this resource")
+	// ErrExchangeDenied means that the authorization server refused the
+	// exchange because its policy does not permit it. The refusal is
+	// permanent, so a retry returns the same answer.
+	ErrExchangeDenied = errors.New("the authorization server denied the exchange")
+	// ErrExchangeFailed means that the exchange did not complete. The source
+	// does not know whether the credential would have been granted.
+	ErrExchangeFailed = errors.New("the token exchange failed")
+)
+
 // Placement is where the proxy writes a credential into a request. It is
 // the `placement` object of an endpoint's credential.
 type Placement struct {
