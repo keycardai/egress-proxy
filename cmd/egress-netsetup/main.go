@@ -1,0 +1,355 @@
+// Command egress-netsetup programs the iptables rules that send a sandbox
+// pod's outbound TCP traffic into the egress proxy and drop everything else.
+// It runs as an init container with NET_ADMIN and SETPCAP, gives both up
+// once the rules are in place, and exits.
+//
+// Re-running it installs the same rules rather than a second copy: each
+// chain it owns is flushed before it is refilled, and each OUTPUT jump is
+// appended only when it is absent. A run that fails part way leaves the
+// chains stricter than the finished ruleset, never looser, unlinks the
+// receipt and exits non-zero.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/urfave/cli/v3"
+
+	"github.com/keycardai/egress-proxy/internal/netsetup"
+)
+
+func main() {
+	if err := command(os.Stdout).Run(context.Background(), os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "egress-netsetup: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// settings are what the command line supplies.
+type settings struct {
+	proxyUID     int
+	redirectPort int
+	capturePorts []string
+	podCIDRs     []string
+	serviceCIDRs []string
+	dnsServers   []string
+	resolvConf   string
+	ipv6         string
+	iptables     string
+	ip6tables    string
+	receipt      string
+	dryRun       bool
+	verifyOnly   bool
+	keepNetAdmin bool
+}
+
+// command builds the command line.
+//
+// NEVER give a flag here an environment variable source. An init container's
+// settings are its arguments, so a manifest review reads the whole ruleset
+// off the pod spec.
+func command(out io.Writer) *cli.Command {
+	var opts settings
+	return &cli.Command{
+		Name:  "egress-netsetup",
+		Usage: "programs the sandbox egress rules with iptables-legacy",
+		Description: "Re-running it installs the same rules rather than a second copy. A run that fails\n" +
+			"part way leaves the chains stricter than the finished ruleset, never looser.",
+		Writer:          out,
+		ErrWriter:       out,
+		HideVersion:     true,
+		HideHelpCommand: true,
+		Flags:           flagSet(&opts),
+		Action:          func(ctx context.Context, cmd *cli.Command) error { return run(ctx, cmd, opts, out) },
+	}
+}
+
+// errUsage is every refusal that comes from the command line rather than
+// from the tables.
+var errUsage = errors.New("egress-netsetup")
+
+func run(ctx context.Context, cmd *cli.Command, opts settings, out io.Writer) error {
+	if cmd.Args().Len() > 0 {
+		return fmt.Errorf("%w: unexpected argument %q", errUsage, cmd.Args().First())
+	}
+	cfg, err := opts.config(out)
+	if err != nil {
+		return err
+	}
+	if opts.dryRun {
+		return dryRun(cfg, out)
+	}
+	// NEVER let a failure past this point leave an earlier run's receipt in
+	// place. The receipt is the sidecar's only evidence of its own
+	// containment, and one written before the rules were flushed says they
+	// are in force when they are not.
+	if err := program(ctx, cfg, opts, out); err != nil {
+		return errors.Join(err, netsetup.RemoveReceipt(opts.receipt))
+	}
+	return nil
+}
+
+// config turns the flags into a validated ruleset input.
+func (s settings) config(out io.Writer) (netsetup.Config, error) {
+	cfg := netsetup.Config{ProxyUID: s.proxyUID, RedirectPort: s.redirectPort}
+	var err error
+	if cfg.CapturePorts, err = parsePorts(s.capturePorts); err != nil {
+		return cfg, fmt.Errorf("--capture-ports: %w", err)
+	}
+	if cfg.PodCIDRs, err = parsePrefixes(s.podCIDRs); err != nil {
+		return cfg, fmt.Errorf("--pod-cidrs: %w", err)
+	}
+	if cfg.ServiceCIDRs, err = parsePrefixes(s.serviceCIDRs); err != nil {
+		return cfg, fmt.Errorf("--service-cidrs: %w", err)
+	}
+	if cfg.DNSServers, err = parseAddrs(s.dnsServers); err != nil {
+		return cfg, fmt.Errorf("--dns-servers: %w", err)
+	}
+	if len(cfg.DNSServers) == 0 {
+		if cfg.DNSServers, err = netsetup.Nameservers(s.resolvConf); err != nil {
+			return cfg, fmt.Errorf("--resolv-conf: %w. Name the resolvers with --dns-servers", err)
+		}
+		fmt.Fprintf(out, "# resolvers from %s: %s\n", s.resolvConf, joinAddrs(cfg.DNSServers))
+	}
+	if cfg.IPv6, err = resolveIPv6(s.ipv6, out); err != nil {
+		return cfg, fmt.Errorf("--ipv6: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("netsetup: %w", err)
+	}
+	return cfg, nil
+}
+
+// dryRun prints the ruleset each family would get and applies nothing.
+func dryRun(cfg netsetup.Config, out io.Writer) error {
+	for _, family := range cfg.Families() {
+		program, err := cfg.Program(family)
+		if err != nil {
+			return fmt.Errorf("netsetup: %w", err)
+		}
+		fmt.Fprint(out, program.String())
+	}
+	return nil
+}
+
+// program applies and verifies the ruleset on every family, gives up
+// CAP_NET_ADMIN and writes the receipt. Every failure it returns leaves the
+// receipt to be unlinked by the caller.
+func program(ctx context.Context, cfg netsetup.Config, opts settings, out io.Writer) error {
+	programs := make([]netsetup.Program, 0, len(cfg.Families()))
+	for _, family := range cfg.Families() {
+		built, err := cfg.Program(family)
+		if err != nil {
+			return fmt.Errorf("netsetup: %w", err)
+		}
+		programs = append(programs, built)
+		override := opts.iptables
+		if family == netsetup.FamilyIPv6 {
+			override = opts.ip6tables
+		}
+		handle, tool, err := netsetup.Open(ctx, family, override)
+		if err != nil {
+			return fmt.Errorf("netsetup: %w", err)
+		}
+		fmt.Fprintf(out, "# %s: %s (%s)\n", family, tool.Path, tool.Version)
+		if !opts.verifyOnly {
+			if err := netsetup.Apply(handle, built, out); err != nil {
+				return fmt.Errorf("netsetup: %w", err)
+			}
+		}
+		if err := netsetup.Verify(handle, built, out); err != nil {
+			return fmt.Errorf("netsetup: %w", err)
+		}
+	}
+	receipt := netsetup.NewReceipt(cfg, programs, true, time.Now())
+	if err := dropNetAdmin(opts.keepNetAdmin, &receipt, out); err != nil {
+		return err
+	}
+	if err := netsetup.WriteReceipt(opts.receipt, receipt); err != nil {
+		return fmt.Errorf("netsetup: %w", err)
+	}
+	fmt.Fprintf(out, "# receipt %s: %s\n", opts.receipt, receipt.RulesetDigest)
+	return nil
+}
+
+// dropNetAdmin gives up the capability that programs the tables, after they
+// are verified. The receipt records whether it went, because the sidecar
+// refuses a receipt written by a process that could still change the rules.
+// The drop covers the calling thread, and the process exits as soon as the
+// receipt is written.
+func dropNetAdmin(keep bool, receipt *netsetup.Receipt, out io.Writer) error {
+	if keep {
+		fmt.Fprintln(out, "# --keep-net-admin: CAP_NET_ADMIN is still held, and the sidecar refuses this receipt")
+		return nil
+	}
+	if err := netsetup.DropNetAdmin(); err != nil {
+		return fmt.Errorf("netsetup: %w", err)
+	}
+	receipt.CapabilitiesDropped = true
+	fmt.Fprintln(out, "# CAP_NET_ADMIN dropped from every capability set on this thread, no_new_privs set")
+	return nil
+}
+
+// resolveIPv6 decides whether to program ip6tables. auto follows the
+// kernel, on requires IPv6 and off leaves it ungoverned.
+func resolveIPv6(mode string, out io.Writer) (bool, error) {
+	switch mode {
+	case "auto":
+		has := netsetup.KernelHasIPv6()
+		if !has {
+			fmt.Fprintln(out, "# this kernel has no IPv6, so no ip6tables ruleset is programmed")
+		}
+		return has, nil
+	case "on":
+		if !netsetup.KernelHasIPv6() {
+			return false, fmt.Errorf("%w: on was asked for and this kernel has no IPv6", errUsage)
+		}
+		return true, nil
+	case "off":
+		fmt.Fprintln(out, "# IPv6 is left ungoverned: every IPv6 destination is reachable on every port")
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: %q is not auto, on or off", errUsage, mode)
+	}
+}
+
+func parsePorts(values []string) ([]int, error) {
+	ports := make([]int, 0, len(values))
+	for _, value := range values {
+		for field := range strings.SplitSeq(value, ",") {
+			field = strings.TrimSpace(field)
+			if field == "" {
+				continue
+			}
+			port, err := strconv.Atoi(field)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %q is not a port", errUsage, field)
+			}
+			ports = append(ports, port)
+		}
+	}
+	return ports, nil
+}
+
+func parsePrefixes(values []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		for field := range strings.SplitSeq(value, ",") {
+			field = strings.TrimSpace(field)
+			if field == "" {
+				continue
+			}
+			prefix, err := netip.ParsePrefix(field)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %q is not a CIDR prefix", errUsage, field)
+			}
+			prefixes = append(prefixes, prefix.Masked())
+		}
+	}
+	return prefixes, nil
+}
+
+func parseAddrs(values []string) ([]netip.Addr, error) {
+	addrs := make([]netip.Addr, 0, len(values))
+	for _, value := range values {
+		for field := range strings.SplitSeq(value, ",") {
+			field = strings.TrimSpace(field)
+			if field == "" {
+				continue
+			}
+			addr, err := netip.ParseAddr(field)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %q is not an address", errUsage, field)
+			}
+			addrs = append(addrs, addr.Unmap())
+		}
+	}
+	return addrs, nil
+}
+
+func portStrings(ports []int) []string {
+	out := make([]string, len(ports))
+	for i, port := range ports {
+		out[i] = strconv.Itoa(port)
+	}
+	return out
+}
+
+func joinAddrs(addrs []netip.Addr) string {
+	parts := make([]string, len(addrs))
+	for i, addr := range addrs {
+		parts[i] = addr.String()
+	}
+	return strings.Join(parts, ",")
+}
+
+// flagSet is the command line an init container is given.
+func flagSet(opts *settings) []cli.Flag {
+	defaults := netsetup.DefaultConfig()
+	return []cli.Flag{
+		&cli.IntFlag{
+			Name: "proxy-uid", Value: defaults.ProxyUID, Destination: &opts.proxyUID,
+			Usage: "uid the sidecar runs as; its traffic is neither redirected nor dropped",
+		},
+		&cli.IntFlag{
+			Name: "redirect-port", Value: defaults.RedirectPort, Destination: &opts.redirectPort,
+			Usage: "the sidecar's transparent listener port",
+		},
+		&cli.StringSliceFlag{
+			Name: "capture-ports", Value: portStrings(defaults.CapturePorts), Destination: &opts.capturePorts,
+			Usage: "outbound TCP destination ports to redirect",
+		},
+		&cli.StringSliceFlag{
+			Name: "pod-cidrs", Destination: &opts.podCIDRs,
+			Usage: "pod CIDRs; traffic to them is not redirected and the filter DROP still covers it",
+		},
+		&cli.StringSliceFlag{
+			Name: "service-cidrs", Destination: &opts.serviceCIDRs,
+			Usage: "service CIDRs; treated the same as the pod CIDRs",
+		},
+		&cli.StringSliceFlag{
+			Name: "dns-servers", Destination: &opts.dnsServers,
+			Usage: "resolvers outbound DNS may reach; empty reads them from --resolv-conf",
+		},
+		&cli.StringFlag{
+			Name: "resolv-conf", Value: "/etc/resolv.conf", Destination: &opts.resolvConf,
+			Usage: "file the resolvers are read from when --dns-servers names none",
+		},
+		&cli.StringFlag{
+			Name: "ipv6", Value: "auto", Destination: &opts.ipv6,
+			Usage: "program ip6tables: auto follows the kernel, on requires it, off leaves IPv6 ungoverned",
+		},
+		&cli.StringFlag{
+			Name: "iptables", Destination: &opts.iptables,
+			Usage: "iptables binary to use; empty resolves the legacy binary",
+		},
+		&cli.StringFlag{
+			Name: "ip6tables", Destination: &opts.ip6tables,
+			Usage: "ip6tables binary to use; empty resolves the legacy binary",
+		},
+		&cli.StringFlag{
+			Name: "receipt", Value: netsetup.DefaultReceiptPath, Destination: &opts.receipt,
+			Usage: "file recording what was programmed, for the sidecar to check its own containment against",
+		},
+		&cli.BoolFlag{
+			Name: "dry-run", Destination: &opts.dryRun,
+			Usage: "print the rules and exit without applying them",
+		},
+		&cli.BoolFlag{
+			Name: "verify", Destination: &opts.verifyOnly,
+			Usage: "read the tables back and confirm the ruleset is in force, without applying anything",
+		},
+		&cli.BoolFlag{
+			Name: "keep-net-admin", Destination: &opts.keepNetAdmin,
+			Usage: "keep CAP_NET_ADMIN after the rules are in place, instead of dropping it",
+		},
+	}
+}
