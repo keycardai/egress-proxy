@@ -86,13 +86,17 @@ document that contains both.
 |---|---|---|
 | `zone_url` | `EGRESS_PROXY_ZONE_URL` | The Keycard zone. Use an absolute `https` URL without user information. RFC 8414 discovery runs against this URL, and the metadata must name it as the issuer. The proxy verifies the zone with the system roots and `tls.upstream_ca_files`, then refuses to dial an address on the platform deny list. |
 | `client_id` | `EGRESS_PROXY_CLIENT_ID` | The application credential ID from the catalog output. |
-| `workload_token_file` | `EGRESS_PROXY_WORKLOAD_TOKEN_FILE` | The absolute path of the projected ServiceAccount token. This build does not read it. It refuses to start when the identity names this key. |
+| `workload_token_file` | `EGRESS_PROXY_WORKLOAD_TOKEN_FILE` | The absolute path of the projected ServiceAccount token. The proxy re-reads it on every exchange, because the kubelet rotates it. |
 | `client_secret_file` | `EGRESS_PROXY_CLIENT_SECRET_FILE` | The absolute path of a file that holds the application credential secret. The proxy reads it once at start-up, so restart the process after a rotation. The file must be readable by its owner alone. The proxy refuses a file with any group or other permission bit. |
 | `impersonate.user` | `EGRESS_PROXY_IMPERSONATE_USER` | The IAM user public ID for each exchange. The ServiceAccount has the same name, so a manifest sets this value from `spec.serviceAccountName`. |
 
 The document must set exactly one of `workload_token_file` and
-`client_secret_file`. This build reads `client_secret_file` and refuses
-`workload_token_file`.
+`client_secret_file`. The two mechanisms authenticate with different
+authority. Workload identity sends the projected token as an RFC 7523 client
+assertion, and the zone reads a ServiceAccount subject from it, so its policy
+can permit impersonation of exactly one user by exactly one ServiceAccount.
+Use workload identity in a cluster. Use a client secret to reach a zone from
+outside Kubernetes, where no OIDC issuer signs a ServiceAccount token.
 
 The two keys are mutually exclusive, and an environment variable cannot swap
 one for the other. Setting `EGRESS_PROXY_CLIENT_SECRET_FILE` against a

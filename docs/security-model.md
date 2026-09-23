@@ -121,14 +121,17 @@ The proxy writes a credential only at the placement that the endpoint names.
 
 The proxy exchanges for the upstream credential at `identity.zone_url` for
 each request that an endpoint with a credential allows. The exchange
-impersonates `identity.impersonate.user` and uses the client secret at
-`identity.client_secret_file`. This build refuses `identity.workload_token_file`.
+impersonates `identity.impersonate.user`. Exactly one of
+`identity.workload_token_file` and `identity.client_secret_file`
+authenticates it.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| The workload reads the client secret and mints credentials for itself, bypassing the endpoint list. | The proxy reads the file at the configured path and writes it nowhere else. The secret reaches no log line, audit record, `/info` answer, or form parameter because the proxy sends it in HTTP basic credentials. The file must be readable by its owner alone, and the proxy refuses any non-regular file. The pod controls whether the workload can read the path. This repository does not define that pod contract. | `TestReadSecretFileRefusals`, `TestDescribeNamesTheSourceAndNoSecret`, `TestTheWireForm`, `token_exchange.txtar` |
-| `identity.zone_url` resolves into the cluster or onto the metadata address, so the client secret is offered to something that is not the zone. | The exchange uses the platform deny list for the zone connection. It refuses a resolved address on that list before it opens a socket. | `TestADeniedZoneAddressIsNotDialed` |
-| A server that is not the zone answers discovery, takes the client secret, and issues credentials the proxy writes into requests. | The exchange verifies the zone with the system roots and `tls.upstream_ca_files`. It requires TLS 1.2 or later and uses no proxy. RFC 8414 section 3.3 requires the metadata to name the configured zone as its issuer. A mismatch fails the exchange before the proxy posts a secret. | `TestTheZoneIssuerMustMatchTheConfiguredZone` |
+| The proxy names a user it is not entitled to act for. The substitute-user token is unsigned, so the proxy can put any user ID on the wire. | Authority comes from the client authentication, not from the subject token. Under workload identity the zone reads the ServiceAccount from the projected token, which the API server signed and the pod cannot forge, and its policy permits impersonation of exactly one user by exactly one ServiceAccount. A ServiceAccount acting for another user is refused with the OAuth code `access_denied`, which the proxy maps to `exchange_denied` and answers 403. | `TestFailuresAreTwoClasses/the_ServiceAccount_is_not_the_one_the_impersonated_user_is_named_after`, `TestASourceFailureClassIsItsDenialReason`, `workload_identity_exchange.txtar` |
+| The kubelet rotates the projected token and the proxy keeps offering the expired one. | The token file is re-read on every exchange. The client secret is read once instead, so a rotated secret takes effect on the next start. | `TestTheWorkloadTokenIsReadOnEveryExchange` |
+| The workload reads the projected ServiceAccount token or the client secret and mints credentials for itself, bypassing the endpoint list. | The proxy reads each file at the configured path and writes it nowhere else. Neither reaches a log line, an audit record, or an `/info` answer. The secret reaches no form parameter either, because the proxy sends it in HTTP basic credentials. A client secret file must be readable by its owner alone, and the proxy refuses any non-regular file. The pod controls whether the workload can read either path. This repository does not define that pod contract. | `TestReadSecretFileRefusals`, `TestDescribeNamesTheSourceAndNoSecret`, `TestTheWireForm`, `token_exchange.txtar`, `workload_identity_exchange.txtar` |
+| `identity.zone_url` resolves into the cluster or onto the metadata address, so the client authentication is offered to something that is not the zone. | The exchange uses the platform deny list for the zone connection. It refuses a resolved address on that list before it opens a socket. | `TestADeniedZoneAddressIsNotDialed` |
+| A server that is not the zone answers discovery, takes the client authentication, and issues credentials the proxy writes into requests. | The exchange verifies the zone with the system roots and `tls.upstream_ca_files`. It requires TLS 1.2 or later and uses no proxy. RFC 8414 section 3.3 requires the metadata to name the configured zone as its issuer. A mismatch fails the exchange before the proxy posts a secret. | `TestTheZoneIssuerMustMatchTheConfiguredZone` |
 | Metadata that names the configured zone as its issuer points `token_endpoint` at another host or at cleartext, so the client secret goes somewhere else. RFC 8414 section 3.3 binds the issuer and says nothing about `token_endpoint`. | Every request the exchange makes must be https, discovery and the token request alike. A cleartext endpoint reaches no socket. The exchange also refuses to follow a redirect, so a 307 from the token endpoint cannot move the secret to another host or to another port on the same host. | `TestTheTokenEndpointMustBeHTTPS`, `TestTheExchangeRefusesAnUnsafeZone/the_token_endpoint_redirects` |
 | A zone streams a large body inside the exchange budget, which spends the sidecar's memory. | The exchange reads at most 1 MiB from the zone and fails the exchange past that. | `TestTheExchangeRefusesAnUnsafeZone/the_token_response_is_larger_than_the_limit` |
 | A request the endpoint list already denies still spends an exchange, so the zone sees traffic the policy refused. | The exchange runs only after the request decision allows and the endpoint names a credential. A denied request reaches no zone. | `TestTheSourceReachesTheZoneOnlyOnCredential`, `token_exchange.txtar` |
@@ -136,10 +139,6 @@ impersonates `identity.impersonate.user` and uses the client secret at
 | A refusal by the zone's policy is indistinguishable from a zone that could not be reached, so an operator cannot tell a misconfigured policy from an outage, and an agent retries what will never succeed. | The proxy uses separate reason codes. `exchange_denied` means that the zone read its policy and refused, and it answers 403. The zone says so with `access_denied`, `unauthorized_client`, or `invalid_grant`, and each of those is permanent. `exchange_failed` covers every other failure and answers 502 because the proxy does not know what the zone would have said. | `TestFailuresAreTwoClasses`, `TestAPolicyRefusalIsExchangeDenied`, `TestASourceFailureClassIsItsDenialReason`, `token_exchange.txtar` |
 | The credential the zone issued reaches the audit stream or the log. | The record holds the method, the path without its query, and the host. Text on the forward path passes through `credential.Redact`. `/info` and the start-up announcement name the zone, the user, and the mechanism, never the credential or secret. | `TestNoCredentialReachesARecordOrALogLine`, `TestDescribeNamesTheSourceAndNoSecret`, `token_exchange.txtar` |
 | The zone's error text reaches the audit stream. | `decision.error` holds the zone's `error_description` as the zone wrote it. The proxy does not redact that field, and a Keycard zone does not put secrets in it. The 1 MiB response limit bounds how much of it can reach one record. Treat the field as text the zone controls when a zone outside Keycard is configured. | `TestTheExchangeRefusesAnUnsafeZone` |
-
-The substitute-user token is unsigned. The proxy can send any user name, and
-the zone's policy is the only control that can refuse it. A client secret gives
-the zone no ServiceAccount identity to use for that decision.
 
 ### Certificate authority
 
@@ -173,13 +172,15 @@ the zone no ServiceAccount identity to use for that decision.
 - The proxy mints a credential for each request which is not cached. A busy
   resource receives one exchange per request.
 - A rotated client secret takes effect on the next start because the proxy
-  reads the file once.
+  reads the file once. A rotated workload token takes effect on the next
+  exchange.
 - A zone that accepts a client secret for impersonation permits it based on
-  the secret alone. The exchange names no ServiceAccount, so the zone cannot
-  limit the exchange to one user. Anything that holds the secret can act for
-  any user that the zone permits. Bind the application credential to one user
-  in the zone, and treat the secret as equal in power to every credential the
-  exchange can mint.
+  the secret alone. That exchange names no ServiceAccount, so the zone cannot
+  limit it to one user the way the workload identity policy does. Anything
+  that holds the secret can act for any user that the zone permits. Bind the
+  application credential to one user in the zone, and treat the secret as
+  equal in power to every credential the exchange can mint. Use workload
+  identity in a cluster.
 - The proxy does not offer HTTP/2 to the workload. The tunnel negotiates
   `http/1.1` only. gRPC through the proxy is not yet supported. Server-sent
   events (SSE) should work through the proxy.

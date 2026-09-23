@@ -1,8 +1,9 @@
 // Package fakeas is an authorization server fixture for unit and acceptance
 // tests. It answers RFC 8414 discovery and the RFC 8693 token exchange that
-// the proxy posts. It keeps every request for tests to read.
+// the proxy posts, applies the impersonation rule the zone's policy applies,
+// and keeps every request for tests to read.
 //
-// It authenticates clients with client_secret_basic, which this build sends.
+// It authenticates clients with client_secret_basic or a client assertion.
 //
 // It does not verify signatures. Use it as a fixture, not as a zone. The
 // cluster lane exercises the real zone.
@@ -28,9 +29,10 @@ const (
 //
 //nolint:gosec // G101: protocol URNs, not credentials
 const (
-	grantTokenExchange    = "urn:ietf:params:oauth:grant-type:token-exchange"
-	subjectTypeSubstitute = "urn:keycard:params:oauth:token-type:substitute-user"
-	issuedTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
+	grantTokenExchange     = "urn:ietf:params:oauth:grant-type:token-exchange"
+	subjectTypeSubstitute  = "urn:keycard:params:oauth:token-type:substitute-user"
+	assertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	issuedTypeAccessToken  = "urn:ietf:params:oauth:token-type:access_token"
 )
 
 // These are the RFC 6749 section 5.2 error codes that the server returns.
@@ -49,13 +51,20 @@ const expiresIn = 300
 // is empty for an unsigned token.
 const jwtSegments = 3
 
+// defaultNamespace is the ServiceAccount namespace the impersonation rule
+// expects when Options names none.
+const defaultNamespace = "agents"
+
 // Options configures a Server.
 type Options struct {
 	// Credentials maps each resource to the access token that the server issues.
 	// The server returns access_denied for an unmapped resource.
 	Credentials map[string]string
+	// Namespace is the ServiceAccount namespace that the impersonation rule
+	// expects. It defaults to "agents".
+	Namespace string
 	// ClientSecrets maps each client ID to its client_secret_basic secret. An
-	// empty map authenticates no client.
+	// empty map accepts only a client assertion.
 	ClientSecrets map[string]string
 }
 
@@ -67,6 +76,9 @@ type Request struct {
 	// ClientID is the authenticated client ID from basic credentials or the
 	// client_id parameter.
 	ClientID string
+	// Actor is the subject of the client assertion. It is empty when the
+	// request authenticated with a client secret.
+	Actor string
 	// Subject is the user named by the substitute-user token.
 	Subject string
 	// Error is the OAuth error code that the server returned. It is empty for a
@@ -85,6 +97,9 @@ type Server struct {
 // New builds a server. Mount it on any listener. The server reads its issuer
 // from each request, so it needs no address in advance.
 func New(opts Options) *Server {
+	if opts.Namespace == "" {
+		opts.Namespace = defaultNamespace
+	}
 	return &Server{opts: opts}
 }
 
@@ -116,7 +131,7 @@ func (s *Server) metadata(w http.ResponseWriter, r *http.Request) {
 		"issuer":                                issuer,
 		"token_endpoint":                        issuer + TokenPath,
 		"grant_types_supported":                 []string{grantTokenExchange},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_basic"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "private_key_jwt"},
 	})
 }
 
@@ -135,6 +150,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasBasic {
 		record.ClientID = basicID
+	}
+	if r.PostForm.Get("client_assertion_type") == assertionTypeJWTBearer {
+		record.Actor = claimSub(r.PostForm.Get("client_assertion"))
 	}
 
 	value, refusal := s.issue(record, basicSecret, hasBasic)
@@ -177,8 +195,8 @@ func requestShape(r *http.Request) *denial {
 	return nil
 }
 
-// issue checks client authentication, the grant shape, and the resource
-// grant, then returns the credential.
+// issue checks client authentication, the grant shape, the impersonation
+// rule, and the resource grant, then returns the credential.
 func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *denial) {
 	if refusal := s.authenticate(record, secret, hasBasic); refusal != nil {
 		return "", refusal
@@ -193,6 +211,9 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 			Description: "the substitute-user token has no sub claim",
 		}
 	}
+	if refusal := s.impersonation(record); refusal != nil {
+		return "", refusal
+	}
 	resource := record.Form.Get("resource")
 	value, granted := s.opts.Credentials[resource]
 	if !granted {
@@ -205,11 +226,35 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 	return value, nil
 }
 
-// authenticate accepts a client secret that the server knows. A secret names
-// no ServiceAccount, so the server cannot bind the client to the requested
-// user.
+// impersonation applies the rule the zone's policy applies. A ServiceAccount
+// may act only for the user it is named after. A request that authenticated
+// with a client secret names no ServiceAccount, so the rule has nothing to
+// check.
+func (s *Server) impersonation(record Request) *denial {
+	if record.Actor == "" {
+		return nil
+	}
+	want := "system:serviceaccount:" + s.opts.Namespace + ":" + record.Subject
+	if record.Actor != want {
+		return &denial{
+			status:      http.StatusForbidden,
+			Code:        codeAccessDenied,
+			Description: record.Actor + " cannot act for " + record.Subject,
+		}
+	}
+	return nil
+}
+
+// authenticate accepts a client assertion alongside a client_id, or a client
+// secret that the server knows. A token-federation application credential is
+// resolved by client_id, so an assertion on its own does not name a client.
 func (s *Server) authenticate(record Request, secret string, hasBasic bool) *denial {
-	if hasBasic {
+	switch {
+	case record.Form.Get("client_assertion") != "":
+		if record.Actor != "" && record.ClientID != "" {
+			return nil
+		}
+	case hasBasic:
 		if known, ok := s.opts.ClientSecrets[record.ClientID]; ok && known == secret {
 			return nil
 		}
@@ -217,7 +262,7 @@ func (s *Server) authenticate(record Request, secret string, hasBasic bool) *den
 	return &denial{
 		status:      http.StatusUnauthorized,
 		Code:        codeInvalidClient,
-		Description: "the request has no client secret this server knows",
+		Description: "the request authenticates with neither a known secret nor a client assertion",
 	}
 }
 

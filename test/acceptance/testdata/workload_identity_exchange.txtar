@@ -1,0 +1,129 @@
+# The exchange authenticated by the projected ServiceAccount token, end to
+# end with the built binary: the proxy sends the token as a client assertion
+# beside its client_id, the zone reads the ServiceAccount out of it, and a
+# proxy configured for a user its ServiceAccount is not named after is
+# refused with access_denied.
+#
+# The zone here is the fixture in test/fakeas, which verifies no signature.
+# The real zone, whose issuer signs the token, is exercised by the cluster
+# lane.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+fakeas zone https://granted.example/=zone-issued-sekrit
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+chmod 0777 $ADMIN_DIR
+
+# The kubelet projects the token for the pod's own ServiceAccount, which is
+# named after the user the proxy impersonates.
+satoken token system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t
+
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt,$WORK/zone/ca.crt
+env EGRESS_PROXY_WORKLOAD_TOKEN_FILE=$WORK/token
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket names the mechanism and the token path, and carries no
+# token.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"credential_source": "a Keycard token exchange at https://localhost:'
+stdout 'authenticated by the workload token at'
+
+# The exchange succeeds and the credential the zone issued reaches the
+# upstream.
+exec curl -sS --cacert shared-ca/ca.crt -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/granted/repos
+stdout '^hello from upstream /granted/repos$'
+grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-issued-sekrit"' upstream/requests.log
+
+# The zone read the ServiceAccount out of the assertion and the user out of
+# the substitute-user token, and the client_id beside the assertion named
+# the application credential.
+grep 'exchange client=acceptance-app-credential actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
+
+sigterm
+wait proxy
+audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
+
+# The token never reaches the audit stream or the log.
+! stdout 'system:serviceaccount'
+! stderr 'zone-issued-sekrit'
+
+# A proxy that names a user its ServiceAccount is not named after is refused
+# by the zone. The proxy can put any user id on the substitute-user token,
+# and this is what stops it: the API server signs the ServiceAccount half,
+# so the pod cannot forge it.
+freeport WRONG_PROXY_PORT
+shortdir WRONG_ADMIN_DIR
+chmod 0777 $WRONG_ADMIN_DIR
+expand wrong-user.yaml
+
+env EGRESS_PROXY_CONFIG=wrong-user.yaml
+env EGRESS_PROXY_CONNECT=127.0.0.1:$WRONG_PROXY_PORT
+env EGRESS_PROXY_ADMIN=$WRONG_ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/wrong-ca
+exec egress-proxy &wrongproxy&
+waitfile wrong-ca/ca.crt
+waitport 127.0.0.1:$WRONG_PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$WRONG_PROXY_PORT
+exec curl -sS --cacert wrong-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
+stdout '^403$'
+
+# The request never reached the upstream, and the zone refused the exchange
+# rather than issuing a credential for a user this ServiceAccount cannot
+# act for.
+grep -count=1 '^request ' upstream/requests.log
+grep 'actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=someone-else resource=https://granted.example/ error="access_denied"' zone/requests.log
+
+sigterm
+wait wrongproxy
+audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_denied decision.endpoint=localhost:$UPSTREAM_PORT/granted/
+
+-- config.yaml --
+version: 1
+identity:
+  zone_url: "https://localhost:$ZONE_PORT"
+  client_id: "$ZONE_CLIENT_ID"
+  workload_token_file: "/replaced/by/the/environment"
+  impersonate:
+    user: "igmua2g0fwapl21qll7tczdw7t"
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /granted/
+    resource: "https://granted.example/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GRANTED_TOKEN
+-- wrong-user.yaml --
+version: 1
+identity:
+  zone_url: "https://localhost:$ZONE_PORT"
+  client_id: "$ZONE_CLIENT_ID"
+  workload_token_file: "/replaced/by/the/environment"
+  impersonate:
+    user: "someone-else"
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - host: localhost
+    port: $UPSTREAM_PORT
+    path_prefix: /granted/
+    resource: "https://granted.example/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GRANTED_TOKEN

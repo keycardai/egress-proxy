@@ -13,6 +13,7 @@ package acceptance_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,6 +73,7 @@ func TestAcceptance(t *testing.T) {
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"upstream": cmdUpstream,
 			"fakeas":   cmdFakeAS,
+			"satoken":  cmdSAToken,
 			"expand":   cmdExpand,
 			"freeport": cmdFreePort,
 			"shortdir": cmdShortDir,
@@ -180,6 +182,24 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Setenv("ZONE_CLIENT_SECRET", zoneClientSecret)
 }
 
+// cmdSAToken writes a projected ServiceAccount token to a file:
+//
+//	satoken FILE SUBJECT
+//
+// The token is an unsigned JWT whose sub is SUBJECT. The fake zone reads
+// that claim and verifies no signature, so a scenario needs no key.
+func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 2 {
+		ts.Fatalf("usage: satoken FILE SUBJECT")
+	}
+	claims, err := json.Marshal(map[string]string{"sub": args[1]})
+	ts.Check(err)
+	encode := base64.RawURLEncoding.EncodeToString
+	token := encode([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + encode(claims) + "." + encode([]byte("signature"))
+	// The kubelet projects the token at 0644.
+	ts.Check(os.WriteFile(ts.MkAbs(args[0]), []byte(token), 0o644))
+}
+
 // logExchanges writes one line per token request that the zone reads. A
 // scenario can count exchanges for allowed requests and confirm that denied
 // requests make none. The line never includes the issued credential or the
@@ -192,8 +212,8 @@ func logExchanges(zone *fakeas.Server, log io.Writer) http.Handler {
 		seen := len(zone.Requests())
 		zone.ServeHTTP(w, r)
 		for _, request := range zone.Requests()[seen:] {
-			fmt.Fprintf(log, "exchange client=%s subject=%s resource=%s error=%q\n",
-				request.ClientID, request.Subject, request.Form.Get("resource"), request.Error)
+			fmt.Fprintf(log, "exchange client=%s actor=%q subject=%s resource=%s error=%q\n",
+				request.ClientID, request.Actor, request.Subject, request.Form.Get("resource"), request.Error)
 		}
 	})
 }
