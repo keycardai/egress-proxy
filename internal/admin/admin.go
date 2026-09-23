@@ -4,8 +4,8 @@
 // The admin surface is NEVER a TCP port, loopback included, because the proxy
 // may share the pod's network namespace with the workload it governs. In such a
 // configuration the workload could reach any network port that the proxy binds.
-// That workload cannot reach a socket in a directory which only this proxy's
-// uid can traverse. The socket path could be a volume another container also
+// A directory which only this proxy's uid can traverse keeps that workload
+// out of the socket. The socket path could be a volume another container also
 // mounts, so this process sets the directory mode on every start.
 package admin
 
@@ -29,7 +29,7 @@ const (
 	// alone.
 	socketMode fs.FileMode = 0o600
 	dirMode    fs.FileMode = 0o700
-	// maxSocketPath is the longest path a Unix socket address carries on
+	// maxSocketPath is the longest path a Unix socket address holds on
 	// every supported platform: sun_path is 104 bytes on macOS and 108 on
 	// Linux.
 	maxSocketPath = 103
@@ -77,7 +77,7 @@ func New(ctx context.Context, opts Options) (*Server, error) {
 		return nil, fmt.Errorf("%w: %q is not absolute", errSocketPath, path)
 	}
 	if len(path) > maxSocketPath {
-		return nil, fmt.Errorf("%w: %q is %d bytes and a socket address carries at most %d",
+		return nil, fmt.Errorf("%w: %q is %d bytes and a socket address holds at most %d",
 			errSocketPath, path, len(path), maxSocketPath)
 	}
 	if err := prepareDir(filepath.Dir(path)); err != nil {
@@ -140,7 +140,7 @@ func writeText(w http.ResponseWriter, status int, body string) {
 
 // Run answers requests until ctx is cancelled, then shuts down and unlinks
 // the socket. It returns a serve failure, or nil after a shutdown the
-// context asked for. A request carries the run context's values and not its
+// context asked for. A request gets the run context's values and not its
 // cancellation, so cancelling ctx starts the drain rather than ending the
 // requests in flight.
 func (s *Server) Run(ctx context.Context) error {

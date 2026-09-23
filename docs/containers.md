@@ -1,0 +1,171 @@
+# Containers
+
+What this repository ships and what each container it ships needs. Whoever
+composes a pod reads this to place the proxy and the init container
+correctly.
+
+This repository does not decide the pod. The workload container, the volume
+ownership settings and the pod-level namespace settings belong to the
+sandbox composition, which lives with the charts and is checked by their
+lint. Where a requirement below holds only because something outside this
+repository enforces it, the text says so and names the enforcer.
+
+`docs/configuration.md` defines every setting named here.
+`docs/security-model.md` states what each surface defends against.
+
+## The three images
+
+| Image | Built by | What is in it |
+|---|---|---|
+| proxy | `make image-proxy`, ko from `images/proxy/.ko.yaml` | `gcr.io/distroless/static-debian12:nonroot`, the `egress-proxy` binary and the public root certificates it verifies upstreams and the zone against. No shell and no package manager. |
+| netsetup | `make image-netsetup`, `images/netsetup/Dockerfile` with the repository root as its build context | Alpine, the `egress-netsetup` binary, the legacy `iptables` and `ip6tables` binaries with their xtables extension libraries, and a shell. |
+| sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian bookworm-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
+
+`make images` builds all three locally and drives what each one does, under
+`test/images`. Nothing in this repository pushes an image. Publishing is a
+release step.
+
+## The proxy container
+
+Runs `egress-proxy` with no subcommand, which reads the configuration
+document and serves.
+
+**uid.** The proxy runs as a uid of its own, the same one
+`egress-netsetup --proxy-uid` is given. `egress-proxy settings` publishes
+the default, 1337. The capture leaves that uid's own traffic alone, so the
+proxy can reach an upstream. That separation holds only while the workload
+runs as a different uid, which this binary does not check and the chart
+lint does.
+
+The image's own user is the distroless nonroot uid, 65532, so a manifest
+that wants the proxy on the uid the capture exempts sets `runAsUser`
+itself.
+
+**Capabilities.** `NET_BIND_SERVICE`, and only when `listen.transparent`
+names a port below 1024, which the default 1015 is. That port is below 1024
+so an unprivileged workload cannot bind it during a sidecar restart and
+stand in for the proxy, and the capability is what lets the proxy bind it.
+Nothing else is needed: the proxy programs no rule and reads no other
+process.
+
+**Volumes and paths.**
+
+| Path | Setting | What it is |
+|---|---|---|
+| the document | `--config`, `EGRESS_PROXY_CONFIG` | The configuration document, read once at start-up, read-only. |
+| `/shared-ca` | `ca.out_dir` | Where the proxy writes `ca.crt`. The workload reads the same volume and trusts that file. It holds the certificate and nothing else. |
+| the CA state directory | `ca.state_dir` | Where the CA key is held across restarts. It must be memory-backed, and the proxy refuses to start when it is not. NEVER mount it into another container, and NEVER place it under `ca.out_dir`. |
+| `/run/egress/admin.sock` | `listen.admin` | The admin socket. The proxy sets its directory to mode 0700 on every start and refuses to start when the directory does not end up at that mode. |
+| `/run/egress/netsetup.json` | `netsetup.receipt` | What the init container recorded. The proxy reads it and refuses to serve a transparent frontend without it. |
+| the projected token | `identity.workload_token_file` | The ServiceAccount token the exchange authenticates with, when the document names workload identity. |
+| the client secret | `identity.client_secret_file` | The application credential secret, when the document names one. It must be readable by its owner alone. |
+
+Whether the workload can also read the token, the secret or the CA key is a
+property of the pod. The chart lint decides it.
+
+**Probes.** All three run the binary, because the admin surface is a Unix
+socket in this container's mount namespace. An `httpGet` probe has nothing
+to dial, and the image has no shell and no curl to dial it with. ko puts
+the binary at `/ko-app/egress-proxy`, which is the path an `exec` probe
+names.
+
+| Probe | Command | What it says |
+|---|---|---|
+| startup | `/ko-app/egress-proxy probe readyz` | Every frontend is bound and `ca.crt` is written. The kubelet holds the workload until this passes. |
+| readiness | `/ko-app/egress-proxy probe readyz` | The same answer while the process runs. |
+| liveness | `/ko-app/egress-proxy probe healthz` | The process is alive. Liveness NEVER reads `readyz`: a proxy that is still starting would be restarted for it. |
+
+`egress-proxy probe <healthz|readyz|info>` dials the socket named by
+`--admin` or `EGRESS_PROXY_ADMIN`, prints the answer and exits non-zero on
+anything but a 200.
+
+## The netsetup init container
+
+Runs `egress-netsetup`, which programs the capture rules, reads them back,
+gives up `CAP_NET_ADMIN` and writes the receipt. It exits. It is an
+ordinary init container that runs to completion, not a sidecar.
+
+**uid and capabilities.** Root, with `NET_ADMIN`, `NET_RAW` and `SETPCAP`.
+`NET_ADMIN` programs the rules, `NET_RAW` is what the `iptables` binaries
+open their raw socket with, and `SETPCAP` is what lets the process drop
+`NET_ADMIN` from its own bounding set before it writes the receipt.
+
+**Volumes.** The receipt directory, shared with the proxy container and
+memory-backed. The proxy refuses a receipt any other uid can write, and
+refuses one whose directory any other uid can write.
+
+**Settings.** `egress-netsetup` reads flags only and no environment
+variable. The defaults a pod has to agree with are in
+`egress-proxy settings` under `netsetup`: the proxy uid, the redirect port,
+the captured ports and the receipt path. `--proxy-uid` and the proxy
+container's `runAsUser` name the same uid, and `--redirect-port` and
+`listen.transparent` name the same port.
+
+## The sandbox-base image
+
+An agent image builds `FROM` this one, and every client it runs then trusts
+the proxy with nothing in the pod manifest. Three parts of the image do
+that:
+
+1. `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`
+   and `GIT_SSL_CAINFO` all name one bundle. `NODE_EXTRA_CA_CERTS` names
+   the sidecar's certificate directly, because Node bundles its own
+   OpenSSL.
+2. `keycard-sandbox-entrypoint` waits for `/shared-ca/ca.crt`, parses it,
+   installs it as a system anchor and runs `update-ca-certificates`. It
+   refuses to start the agent without it. The wait covers a restart that
+   outlives the sidecar's startup probe.
+3. The agent uid owns `/usr/local/share/ca-certificates` and
+   `/etc/ssl/certs`, so `update-ca-certificates` runs unprivileged.
+
+A variable is set only for a client the image installs. The image installs
+no AWS client, so it sets no `AWS_CA_BUNDLE`. An image built on this one
+that adds a client sets that client's variable itself.
+
+The image mounts `/shared-ca` read-only and needs no capability. `AGENT_UID`
+is a build argument, and an image that changes it is built for a pod that
+runs the workload as that uid.
+
+## The settings the binary accepts
+
+`egress-proxy settings` prints them as JSON, with no document and no socket,
+so a chart lint can read them out of the image it is about to deploy:
+
+    docker run --rm <proxy image> settings
+
+Each entry names the `EGRESS_PROXY_` variable, the flag that fills the same
+setting, what it sets, and the value the document parser applies when
+neither is set. The report also names the probe subcommand and its routes,
+and the netsetup defaults above. `schema` is the version of the shape: a
+field is added without changing it, and a field that changes meaning or
+goes away raises it.
+
+A flag wins over its variable, and both win over the document. The
+endpoints and the `policy` section come from the document alone and have no
+variable, because an audit record has to name every rule that was in force.
+`config.digest` covers the settings after an override applies, and the
+process announces every overridden key on every start.
+
+## What the proxy checks for itself
+
+These are the checks that refuse to serve. They are not a substitute for
+the pod being composed correctly, and each says what it can see from inside
+the container.
+
+- **The netsetup receipt.** With `listen.transparent` set, the proxy reads
+  the receipt before it serves. It refuses a receipt that says the rules
+  were not read back, one whose proxy uid or redirect port disagrees with
+  its own, one that names no address family, one that says
+  `CAP_NET_ADMIN` was kept, and one that any other uid can write. It also
+  refuses to serve while this process holds `CAP_NET_ADMIN`.
+- **`net.ipv4.ip_unprivileged_port_start`.** The redirect target is below
+  1024 so the workload cannot bind it. That rests on the sysctl, so the
+  proxy reads it at start-up rather than trusting the manifest and refuses
+  to start when it is at or below the redirect port. A Kubernetes pod gets
+  the kernel default of 1024. Docker lowers it to 0.
+- **The CA state directory.** The proxy checks the file system type and
+  refuses a `ca.state_dir` that is not memory-backed, and refuses one that
+  overlaps `ca.out_dir`, before any key exists.
+- **The admin socket directory.** Set to mode 0700 on every start, read
+  back, and a directory that does not end up at that mode stops the
+  process.

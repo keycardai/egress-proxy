@@ -82,8 +82,9 @@ e2e:
 	fi
 
 # The three images, built locally. ko builds the proxy straight from the
-# module; the other two are Dockerfiles with the repository root as their
-# build context. Nothing here pushes: publishing is a release step.
+# module. The other two are Dockerfiles, and the netsetup one takes the
+# repository root as its build context. Nothing here pushes: publishing is
+# a release step.
 IMAGE_TAG ?= dev
 
 .PHONY: image-proxy

@@ -5,7 +5,7 @@
 #   make image-sandbox-base
 #   docker build --build-arg AGENT_UID=1000 images/sandbox-base
 #
-# Three parts of the image do the trusting, so the manifest carries none of
+# Three parts of the image do the trusting, so the manifest holds none of
 # it:
 #
 #   1. The environment variables below name one bundle, and every client in
@@ -32,13 +32,15 @@ ARG SHARED_CA_FILE=/shared-ca/ca.crt
 ENV DEBIAN_FRONTEND=noninteractive
 
 # openssl provides the x509 parse the entrypoint validates the certificate
-# with, and ca-certificates provides update-ca-certificates. curl, python3
-# and nodejs are the clients a sandbox reaches an endpoint with.
+# with, and ca-certificates provides update-ca-certificates. curl, python3,
+# nodejs and git are the clients a sandbox reaches an endpoint with. An
+# agent clones and pushes over HTTPS, so git is one of them.
 RUN apt-get update \
 	&& apt-get install --yes --no-install-recommends \
 		ca-certificates \
 		openssl \
 		curl \
+		git \
 		python3 \
 		nodejs \
 	&& rm -rf /var/lib/apt/lists/*
@@ -58,8 +60,11 @@ RUN chmod 0755 /usr/local/bin/keycard-sandbox-entrypoint
 # One bundle, named for every client that reads a variable rather than the
 # system store. SSL_CERT_FILE and SSL_CERT_DIR cover OpenSSL and everything
 # linked against it, REQUESTS_CA_BUNDLE covers Python requests,
-# CURL_CA_BUNDLE covers libcurl, AWS_CA_BUNDLE covers botocore and the AWS
-# CLI, and GIT_SSL_CAINFO covers git.
+# CURL_CA_BUNDLE covers libcurl, and GIT_SSL_CAINFO covers git.
+#
+# NEVER name a bundle for a client this image does not install. A variable
+# for an absent client reads as a promise the image does not keep. An image
+# built FROM this one that adds such a client sets its variable itself.
 #
 # Node bundles its own OpenSSL and ignores the system store unless
 # --use-openssl-ca tells it to read it. NODE_EXTRA_CA_CERTS names the
@@ -69,7 +74,6 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
 	SSL_CERT_DIR=/etc/ssl/certs \
 	REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
 	CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
-	AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
 	GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt \
 	NODE_EXTRA_CA_CERTS=${SHARED_CA_FILE} \
 	NODE_OPTIONS=--use-openssl-ca \

@@ -86,7 +86,7 @@ These are settled and load-bearing. Changing one is a design change rather
 than a refactor, and it changes `docs/security-model.md` with it.
 
 - **goproxy handles the CONNECT line and nothing else.** It cannot serve the
-  loop inside a tunnel: v1.9.1 dereferences a nil URL when a request carries
+  loop inside a tunnel: v1.9.1 dereferences a nil URL when a request has
   an asterisk-form target and a `Host` with a port, inside a goroutine it
   starts itself, so no recover outside goproxy reaches it. An allowed tunnel
   is hijacked, TLS is terminated on a goroutine of ours that recovers, and
@@ -131,6 +131,19 @@ than a refactor, and it changes `docs/security-model.md` with it.
   directory is memory-backed with a filesystem-type check rather than
   trusting the manifest, and refuses a path that overlaps the output
   directory. The output directory holds the certificate and nothing else.
+- **The binary publishes what it accepts and judges no manifest.**
+  `egress-proxy settings` prints the `EGRESS_PROXY_` names, the flag each
+  one fills and the defaults in force, all read from `flagSet` and the
+  document parser at run time. The pod composition and the lint that
+  enforces it live with the charts, so NEVER add a manifest reader here. A
+  setting added to the flag set is published on the next build, and the
+  chart lint reads it out of the image.
+- **Readiness covers every listener.** `/readyz` answers 200 only after the
+  CONNECT listener and the transparent sockets are bound and `ca.crt` is
+  written. The kubelet releases the workload on that answer, so a frontend
+  bound later would leave the workload's first captured connection refused.
+  The probe is the binary itself, because the admin surface is a socket and
+  the proxy image has no shell.
 
 ## Tests
 
@@ -203,7 +216,7 @@ The gates and what each enforces:
   file linted on the host alone goes unlinted on a macOS workstation and
   fails in CI instead.
 - **Licenses** (`scripts/check-licenses.sh`): every module in the build list
-  carries a license on the SPDX allow-list in that script: Apache-2.0, MIT,
+  has a license on the SPDX allow-list in that script: Apache-2.0, MIT,
   BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0. GPL, LGPL and AGPL are off it.
   MPL-2.0 is allowed because its obligations attach to the MPL-licensed
   files, which a Go module dependency leaves unmodified and unvendored.

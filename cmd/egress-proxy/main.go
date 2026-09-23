@@ -41,7 +41,8 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // envPrefix is the prefix of every environment variable this command reads.
-// The manifest lint refuses any other variable with this prefix on the proxy
+// `egress-proxy settings` publishes the names, so a chart lint outside this
+// repository can refuse any other variable with this prefix on the proxy
 // container.
 const envPrefix = config.EnvPrefix
 
@@ -189,8 +190,8 @@ func env(name string) cli.ValueSourceChain {
 }
 
 // command builds the command line. Running it with no subcommand serves
-// the proxy. A subcommand is an operator tool that serves nothing: probe
-// reads this process's admin socket.
+// the proxy. A subcommand serves nothing: probe reads this process's admin
+// socket, and settings prints what the binary accepts.
 func command(stdout, stderr io.Writer, action func(context.Context, flags) error) *cli.Command {
 	var opts flags
 	return &cli.Command{
@@ -205,7 +206,7 @@ func command(stdout, stderr io.Writer, action func(context.Context, flags) error
 		ErrWriter:       stderr,
 		HideHelpCommand: true,
 		Flags:           flagSet(&opts),
-		Commands:        []*cli.Command{probeCommand(&opts, stdout)},
+		Commands:        []*cli.Command{probeCommand(&opts, stdout), settingsCommand(stdout)},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if opts.configPath == "" {
 				return errNoConfig
@@ -216,9 +217,11 @@ func command(stdout, stderr io.Writer, action func(context.Context, flags) error
 	}
 }
 
-// errNoConfig is the refusal when the serve path gets no document. The flag
-// is not marked required, because urfave/cli checks a required root flag
-// before it dispatches a subcommand, and probe reads no document.
+// errNoConfig is the refusal when the serve path gets no document. The
+// serve path checks the path itself and the flag holds no Required, so
+// probe and settings, which read no document, run without one. The check
+// here is the tighter of the two: Required only asks whether the flag was
+// set, and --config="" would pass it.
 var errNoConfig = errors.New("--config or EGRESS_PROXY_CONFIG names the configuration document, and neither is set")
 
 // process represents the configured components which make up the proxy process.
@@ -234,7 +237,9 @@ type process struct {
 	// certPath is the CA certificate the workload trusts. Readiness checks
 	// that it is on disk.
 	certPath string
-	// listening turns true once the CONNECT frontend is bound.
+	// listening turns true once every frontend this process runs is bound:
+	// the CONNECT listener, and the capture sockets when listen.transparent
+	// is set.
 	listening atomic.Bool
 }
 
@@ -437,14 +442,15 @@ func (p *process) info() any {
 // process serves.
 var errNotReady = errors.New("egress-proxy is starting")
 
-// ready decides /readyz. It answers once the CONNECT listener is bound and
+// ready decides /readyz. It answers once every frontend is bound and
 // ca.crt is on ca.out_dir, which are the two things the workload needs
 // before it makes its first request. The sidecar's startup probe reads it,
 // so the agent container does not start before the certificate it must
-// trust exists.
+// trust exists, and never while the port the capture redirects to is
+// unbound.
 func (p *process) ready() error {
 	if !p.listening.Load() {
-		return fmt.Errorf("%w: the CONNECT listener is not bound", errNotReady)
+		return fmt.Errorf("%w: the frontend listeners are not bound", errNotReady)
 	}
 	if _, err := os.Stat(p.certPath); err != nil {
 		return fmt.Errorf("%w: %s is not readable: %w", errNotReady, p.certPath, err)
@@ -524,21 +530,10 @@ func uncaptured(captured, cleartext []int) []int {
 // serve runs the proxy service until a signal arrives or a component
 // fails on a fatal error. On shutdown, each server drains within its grace period.
 //
-// Returns once both servers have stopped.
+// Returns once every server has stopped.
 func (p *process) serve(ctx context.Context) error {
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", p.cfg.Listen.Connect)
+	listener, captured, err := p.bind(ctx)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
-	}
-	p.listening.Store(true)
-	p.logger.Info("serving",
-		slog.String("connect", listener.Addr().String()),
-		slog.String("admin", p.admin.Path()))
-
-	captured, err := p.captureListeners(ctx)
-	if err != nil {
-		// Tear down the listener we've opened so far, on the way out to a crash.
-		_ = listener.Close()
 		return err
 	}
 	group, ctx := errgroup.WithContext(ctx)
@@ -568,6 +563,26 @@ func version() string {
 		return "devel"
 	}
 	return info.Main.Version
+}
+
+// bind opens every socket the process serves on and then reports
+// readiness. The order is the contract: /readyz answers 200 only after the
+// transparent sockets are bound, so the kubelet never releases the workload
+// while the port the capture redirects to refuses connections.
+func (p *process) bind(ctx context.Context) (net.Listener, []net.Listener, error) {
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", p.cfg.Listen.Connect)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
+	}
+	captured, err := p.captureListeners(ctx)
+	if err != nil {
+		return nil, nil, errors.Join(err, listener.Close())
+	}
+	p.listening.Store(true)
+	p.logger.Info("serving",
+		slog.String("connect", listener.Addr().String()),
+		slog.String("admin", p.admin.Path()))
+	return listener, captured, nil
 }
 
 // captureListeners binds one transparent frontend socket per address family,

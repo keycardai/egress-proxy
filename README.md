@@ -30,7 +30,8 @@ it, so a pod needs no shell and no curl to probe the proxy:
     ./egress-proxy --admin /tmp/egress-admin.sock probe info
 
 `docs/configuration.md` describes every key of the document and every reason
-code in the audit stream. `docs/security-model.md` states what the proxy
+code in the audit stream. `docs/containers.md` states what the containers
+this repository ships need. `docs/security-model.md` states what the proxy
 enforces and what it does not.
 
 ## Build

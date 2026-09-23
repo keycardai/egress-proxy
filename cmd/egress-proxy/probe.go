@@ -21,6 +21,14 @@ import (
 // probes when the socket accepts and the process never answers.
 const probeTimeout = 5 * time.Second
 
+// probeName is the subcommand a manifest's probe runs.
+const probeName = "probe"
+
+// maxProbeBody bounds what a probe reads off the socket. /info is a few
+// kilobytes. The request context bounds a socket that accepts and never
+// answers, and this bounds one that answers without stopping.
+const maxProbeBody = 1 << 20
+
 // probeRoutes are the admin routes this subcommand dials, in help order.
 func probeRoutes() []string { return []string{"healthz", "readyz", "info"} }
 
@@ -33,11 +41,11 @@ var errProbe = errors.New("probe")
 //
 // This is how the kubelet, an operator and the cluster lane reach the admin
 // surface. That surface is a socket in the proxy's mount namespace and
-// never a port, so an httpGet probe cannot reach it, and the image carries
-// no shell and no curl.
+// never a port, so an httpGet probe has nothing to dial, and the image has
+// no shell and no curl to dial it with.
 func probeCommand(opts *flags, stdout io.Writer) *cli.Command {
 	return &cli.Command{
-		Name:      "probe",
+		Name:      probeName,
 		Usage:     "dial the admin socket, print one route's answer and exit non-zero on anything but a 200",
 		ArgsUsage: "<" + strings.Join(probeRoutes(), "|") + ">",
 		Description: "Reads the socket named by --admin or " + config.EnvPrefix + "ADMIN, the same\n" +
@@ -86,7 +94,7 @@ func runProbe(ctx context.Context, route, socket string, stdout io.Writer) error
 		return fmt.Errorf("%w: %s on %s: %w", errProbe, route, socket, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProbeBody))
 	if err != nil {
 		return fmt.Errorf("%w: %s on %s: %w", errProbe, route, socket, err)
 	}

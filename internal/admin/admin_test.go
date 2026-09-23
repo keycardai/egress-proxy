@@ -186,7 +186,7 @@ func TestNewReplacesAStaleSocket(t *testing.T) {
 }
 
 // TestReadyz pins the two answers a startup probe reads. The kubelet holds
-// the agent container until this route answers 200, so a 503 has to carry
+// the agent container until this route answers 200, so a 503 has to give
 // the reason an operator needs.
 func TestReadyz(t *testing.T) {
 	t.Parallel()

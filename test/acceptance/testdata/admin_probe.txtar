@@ -1,0 +1,72 @@
+# The admin surface through the built binary, the way the kubelet and a
+# chart lint drive it.
+#
+# The admin socket is in the proxy's mount namespace and never a port, so
+# the probe subcommand is the only way in. readyz fails while the process
+# is starting and passes once every frontend is bound and ca.crt is
+# written, which is what holds the workload container back. settings needs
+# neither the socket nor a document, because a lint reads it out of the
+# image before anything runs.
+
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+
+# Nothing is listening yet, so every route fails and the failure names the
+# socket it dialled.
+! exec egress-proxy probe readyz
+stderr 'probe: readyz on .*admin\.sock'
+! exec egress-proxy probe healthz
+stderr 'probe: healthz on .*admin\.sock'
+
+# A route the admin socket does not serve is refused before anything is
+# dialled. The probe knows the routes it has.
+! exec egress-proxy probe metrics
+stderr '"metrics" is not a route'
+! exec egress-proxy probe
+stderr 'name one route: healthz, readyz, info'
+
+# settings answers with no document and no socket. A variable the flag set
+# reads is in it with the default the parser applies, the endpoints are
+# not, and the netsetup values a pod has to match are there too.
+exec egress-proxy settings
+stdout '"env": "EGRESS_PROXY_ADMIN"'
+stdout '"default": "/run/egress/admin.sock"'
+! stdout 'EGRESS_PROXY_ENDPOINTS'
+stdout '"proxy_uid": 1337'
+stdout '"redirect_port": 1015'
+stdout '"subcommand": "probe"'
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+# Every route answers once the process serves. The probe reads the same
+# EGRESS_PROXY_ADMIN the serving process read, because both run in the
+# proxy's container.
+exec egress-proxy probe healthz
+stdout '^ok$'
+exec egress-proxy probe readyz
+stdout '^ok$'
+exec egress-proxy probe info
+stdout '"sandbox_id": "acceptance"'
+stdout '"credential_source": "none"'
+
+sigterm
+wait proxy
+
+# The socket goes with the process, so a probe after the stop fails again.
+# A kubelet reading a stale answer would keep sending traffic to a proxy
+# that is gone.
+! exec egress-proxy probe readyz
+stderr 'probe: readyz on .*admin\.sock'
+
+-- config.yaml --
+version: 1
+endpoints:
+  - host: example.com

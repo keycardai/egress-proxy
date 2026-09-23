@@ -22,7 +22,7 @@ decide what the proxy allows. Each audit record attributes that decision to the
 document digest. An override can hide a decision-affecting value from that
 attribution, so these values cannot come from another source.
 
-Every record also carries `config.digest`, which covers the settings after an
+Every record also holds `config.digest`, which covers the settings after an
 override applies. Read it with `document.digest` to distinguish the mounted
 file from the settings in force. See "What the digests identify" below.
 
@@ -42,7 +42,7 @@ The parser rejects these errors:
 
 ### What the digests identify
 
-Every audit record carries two digests. Each value contains `sha256:` followed
+Every audit record holds two digests. Each value contains `sha256:` followed
 by the hexadecimal SHA-256 digest of a document in RFC 8785 canonical JSON.
 
 `document.digest` identifies the mounted file. `config.digest` identifies what
@@ -132,7 +132,7 @@ that the endpoint list denies.
 | `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
 
 The admin socket answers `GET /healthz` with `ok` while the process is
-alive. It answers `GET /readyz` with `ok` once the CONNECT listener is bound
+alive. It answers `GET /readyz` with `ok` once every frontend is bound
 and `ca.crt` is written to `ca.out_dir`, and with 503 and the reason before
 that. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
@@ -147,9 +147,15 @@ at mode 0700, so no other uid in the pod can reach the socket. Keep
 `egress-proxy probe <healthz|readyz|info>` dials that socket, prints the
 answer and exits non-zero on anything but a 200. It reads the same `--admin`
 and `EGRESS_PROXY_ADMIN` the serving process reads, because it runs in the
-same container. The proxy image carries no shell and no curl, so this
-subcommand is how the kubelet's probes, an operator and the cluster lane
-reach the admin surface.
+same container. The proxy image has no shell and no curl, so this subcommand
+is how the kubelet's probes, an operator and the cluster lane reach the
+admin surface.
+
+`egress-proxy settings` prints the settings this binary accepts as JSON,
+with no document and no socket: every variable in the table above, the flag
+that fills the same setting, and the default the parser applies. It also
+prints the probe routes and the netsetup defaults a pod has to match.
+`docs/containers.md` says what reads it.
 
 ### `netsetup`
 
@@ -282,7 +288,7 @@ connections and requests.
 The proxy decides on the escaped path, the bytes it forwards upstream. An
 escaped character is not a separator, so `/a%2Fb` is one segment named `a/b`
 and the prefix `/a/` does not cover it. The proxy refuses a path whose
-escaped or decoded form carries dot segments, so `/api/%2e%2e/secret`, which
+escaped or decoded form holds dot segments, so `/api/%2e%2e/secret`, which
 an upstream that decodes first reads as `/secret`, is rejected with
 `malformed_request`.
 
@@ -332,7 +338,7 @@ The proxy writes the credential after it removes the hop-by-hop headers that
 the workload named in `Connection`. A workload cannot name the placement
 header there and have the credential dropped on the way out.
 
-No credential reaches a log line or an audit record. A record carries the
+No credential reaches a log line or an audit record. A record holds the
 method, the path without its query, and the host. The proxy redacts credentials
 from request error text. It suppresses raw ReverseProxy diagnostics and reports
 incomplete responses in the audit record. Static-file parse errors name the
@@ -344,29 +350,29 @@ The proxy writes one JSON line to stdout for every decision. `scope` is
 `connection` for the decision made when a CONNECT arrives or when the
 transparent frontend recovers a captured connection's destination. It is
 `request` for each request inside the tunnel. `connection_id` joins the two
-records. A captured connection also carries `destination.original_address`,
+records. A captured connection also names `destination.original_address`,
 the address the client opened before the redirect rewrote it. That field
 identifies a captured connection in the audit stream.
 `decision.reason` has one of these values:
 
 | Reason | Verdict | Scope | Meaning |
 |---|---|---|---|
-| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never carries an allow. |
+| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never gets an allow. |
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. |
 | `cleartext_not_forwarded` | deny | both | The connection or request carries cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
 | `no_sni` | deny | connection | The TLS handshake named no server, either inside a tunnel or on a captured connection whose ClientHello had no `server_name`. RFC 6066 section 3 forbids an IP literal there, so a client connecting straight to an address sends none. |
 | `not_redirected` | deny | connection | The destination recovered from a connection on the transparent listener is that listener's own address, so the connection was opened to the proxy rather than redirected into it. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
-| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
+| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
 | `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it refused the exchange for a reason that is not its policy, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
-| `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and the tunnel carries no request. |
+| `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and no request crosses the tunnel. |
 
-A refusal carries its reason in the `X-Keycard-Deny-Reason` header. It carries
+A refusal names its reason in the `X-Keycard-Deny-Reason` header. It holds
 the connection or request ID in `X-Keycard-Request-Id`. The proxy uses status
 403 for a policy refusal, 400 for a malformed or non-proxy request, and 502
 when a dependency fails. `upstream_failed` and `exchange_failed` both answer

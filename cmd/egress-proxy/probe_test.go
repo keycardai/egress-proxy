@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +111,45 @@ func TestProbeWithNoSocket(t *testing.T) {
 	assert.Empty(t, out.String(), "nothing is printed when there is no answer")
 }
 
+// TestProbeBoundsTheAnswer covers an answer that never ends. The kubelet
+// runs this path every period, so the probe reads a bounded body and
+// returns.
+func TestProbeBoundsTheAnswer(t *testing.T) {
+	t.Parallel()
+	path := socketPath(t)
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", path)
+	require.NoError(t, err, "listen on the fake admin socket")
+	t.Cleanup(func() { _ = listener.Close() })
+	go serveEndlessBody(listener)
+
+	var out strings.Builder
+	require.NoError(t, runProbe(t.Context(), "healthz", path, &out), "probe healthz")
+	assert.Len(t, out.String(), maxProbeBody, "the probe read past the cap")
+}
+
+// serveEndlessBody answers every connection with a 200 whose body never
+// ends, which is what a socket taken over by something else can do.
+func serveEndlessBody(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = conn.Close() }()
+			if _, err := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"); err != nil {
+				return
+			}
+			chunk := bytes.Repeat([]byte("o"), 4096)
+			for {
+				if _, err := conn.Write(chunk); err != nil {
+					return
+				}
+			}
+		}()
+	}
+}
+
 // TestProbeReadsTheSameSettingTheServerReads covers the flag and the
 // variable that name the socket. The probe runs in the proxy's container,
 // so a manifest that moves the socket moves it for both.
@@ -121,6 +163,6 @@ func TestProbeReadsTheSameSettingTheServerReads(t *testing.T) {
 	})
 	require.NoError(t, cmd.Run(t.Context(), []string{"egress-proxy", "--config", "/x"}), "Run")
 	assert.Equal(t, "/env/admin.sock", adminSocket(&opts), "the probe reads EGRESS_PROXY_ADMIN")
-	assert.Equal(t, "/run/egress/admin.sock", adminSocket(&flags{}),
+	assert.Equal(t, "/run/egress/admin/admin.sock", adminSocket(&flags{}),
 		"the probe falls back to the same default the document does")
 }

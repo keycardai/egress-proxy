@@ -43,7 +43,7 @@ cp "$ca_file" "$anchor"
 chmod 0644 "$anchor"
 # Rebuilds /etc/ssl/certs/ca-certificates.crt and the hash links beside it,
 # which is what SSL_CERT_FILE, SSL_CERT_DIR, CURL_CA_BUNDLE,
-# REQUESTS_CA_BUNDLE, AWS_CA_BUNDLE and GIT_SSL_CAINFO all name.
+# REQUESTS_CA_BUNDLE and GIT_SSL_CAINFO all name.
 update-ca-certificates >&2
 
 log "the proxy CA is trusted; starting $1"
