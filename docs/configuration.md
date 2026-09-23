@@ -102,7 +102,10 @@ The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
 `document_digest`, `overridden`, the listen and limit settings, the CA output
 directory and expiry, the endpoint hosts, the cluster ranges, and the deny
-list exceptions. The socket has mode 0600 in a directory with mode 0700.
+list exceptions. The socket has mode 0600 in a directory with mode 0700. The proxy sets that
+directory mode on every start and refuses to start when the directory does
+not end up at mode 0700, so no other uid in the pod can reach the socket.
+Keep `ca.out_dir` out of that directory: the workload cannot traverse it.
 
 ### `ca`
 
@@ -148,7 +151,7 @@ change it.
 | Key | Default | Description |
 |---|---|---|
 | `cluster_cidrs` | `[]` | The pod and service ranges for this cluster in CIDR form. The proxy adds these ranges to the platform deny list. |
-| `deny_list_exceptions` | `[]` | Ranges that the platform deny list no longer covers. This setting alone can shorten the list. The proxy reports every exception as a warning at start-up. It rejects an exception that covers `169.254.169.254`. |
+| `deny_list_exceptions` | `[]` | Ranges that the platform deny list no longer covers. This setting alone can shorten the list, and an entry can be as broad as `0.0.0.0/1`. The proxy rejects only an exception that covers `169.254.169.254`. It reports every exception as a warning at start-up and on `/info`, and `config.digest` covers the set. |
 
 The binary contains the platform deny list. It includes loopback, RFC 1918,
 link-local ranges that contain the cloud metadata address, shared address
@@ -157,6 +160,12 @@ DNS-over-HTTPS resolvers. The proxy rejects a document that names a covered
 host at start-up. It also rejects an allowed name at dial time when the name
 resolves into a covered range, with `deny_always`. Exceptions apply only to
 addresses. A covered host name remains covered inside an excepted range.
+
+The metadata address is the only range an exception cannot remove. Everything
+else in the list is a default that the document can drop, in one entry or
+several, so review `deny_list_exceptions` the way you review the endpoint
+list. A sidecar announces the set it is running at start-up and reports it on
+`/info`.
 
 ### `endpoints`
 

@@ -115,7 +115,7 @@ func LoadOrNew(stateDir string, opts Options) (*Authority, bool, error) {
 
 // load reads the authority from dir. A missing file reads as fs.ErrNotExist.
 // Any other problem with the material reads as errMaterial.
-func load(dir string, opts Options) (*Authority, error) { //nolint:cyclop // breaking this up doesn't aid readability
+func load(dir string, opts Options) (*Authority, error) {
 	opts = opts.withDefaults()
 	keyPEM, err := os.ReadFile(filepath.Join(dir, keyFileName)) //nolint:gosec // G304: dir is ca.state_dir
 	if err != nil {
@@ -145,20 +145,35 @@ func load(dir string, opts Options) (*Authority, error) { //nolint:cyclop // bre
 	if !key.PublicKey.Equal(authority.cert.PublicKey) {
 		return nil, fmt.Errorf("%w: the key does not match the certificate", errMaterial)
 	}
-	if now := opts.Now(); !now.Before(authority.cert.NotAfter.Add(-renewBefore)) {
-		return nil, fmt.Errorf("%w: the certificate expires at %s", errMaterial,
-			authority.cert.NotAfter.Format(time.RFC3339))
+	if err := checkCertificate(authority.cert, opts.Now()); err != nil {
+		return nil, err
 	}
-	if !authority.cert.IsCA {
-		return nil, fmt.Errorf("%w: not a CA certificate", errMaterial)
+	return authority, nil
+}
+
+// checkCertificate refuses a stored CA certificate that cannot serve as the
+// authority at now. The validity window must be open at now, with the whole
+// renewal window still ahead of it, and the certificate must be able to sign
+// leaves that verify.
+func checkCertificate(cert *x509.Certificate, now time.Time) error {
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("%w: the certificate is not valid until %s", errMaterial,
+			cert.NotBefore.Format(time.RFC3339))
+	}
+	if !now.Before(cert.NotAfter.Add(-renewBefore)) {
+		return fmt.Errorf("%w: the certificate expires at %s", errMaterial,
+			cert.NotAfter.Format(time.RFC3339))
+	}
+	if !cert.IsCA {
+		return fmt.Errorf("%w: not a CA certificate", errMaterial)
 	}
 	// x509.CreateCertificate does not check the parent's key usage. A
 	// certificate without KeyUsageCertSign mints leaves that every client
 	// rejects at chain verification, so refuse it at load.
-	if authority.cert.KeyUsage&x509.KeyUsageCertSign == 0 {
-		return nil, fmt.Errorf("%w: the certificate cannot sign certificates", errMaterial)
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return fmt.Errorf("%w: the certificate cannot sign certificates", errMaterial)
 	}
-	return authority, nil
+	return nil
 }
 
 // store writes the key and certificate to dir. It creates each file with its

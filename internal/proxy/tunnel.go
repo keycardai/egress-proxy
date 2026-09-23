@@ -126,10 +126,7 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 	defer cancel()
 	tlsConn := tls.Server(client, s.tlsConfig(state))
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		s.logger.Info("tunnel handshake failed",
-			slog.String("connection_id", state.connectionID),
-			slog.String("authority", net.JoinHostPort(state.host, strconv.Itoa(state.port))),
-			slog.String("error", err.Error()))
+		s.logHandshakeFailure(state, err)
 		s.closeConn(tlsConn, state, "handshake")
 		return
 	}
@@ -145,6 +142,27 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 	if !s.intake.push(&tunnelConn{Conn: tlsConn, state: state}) {
 		s.closeConn(tlsConn, state, "shutdown")
 	}
+}
+
+// logHandshakeFailure reports a handshake that did not complete. A handshake
+// that spends the whole budget holds a connection slot against
+// limits.max_connections for HandshakeTimeout, so enough of them at once
+// reach the cap and the proxy stops accepting tunnels. That case logs at
+// warning level. Every other failure returns the slot as soon as the client
+// errors, so it logs at info level. Neither case carries an audit record,
+// because the connection-scoped allow lands only once the tunnel is up.
+func (s *Server) logHandshakeFailure(state *tunnel, err error) {
+	attrs := []any{
+		slog.String("connection_id", state.connectionID),
+		slog.String("authority", net.JoinHostPort(state.host, strconv.Itoa(state.port))),
+		slog.String("error", err.Error()),
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		s.logger.Warn("tunnel handshake timed out and held a connection slot for the whole budget",
+			append(attrs, slog.Duration("handshake_timeout", s.opts.HandshakeTimeout))...)
+		return
+	}
+	s.logger.Info("tunnel handshake failed", attrs...)
 }
 
 // closeConn closes a tunnel's connection. It logs a close that fails for any

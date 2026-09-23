@@ -41,9 +41,19 @@ unprivileged workload.
   evaluate.
 - The platform deny list takes precedence over the document. The proxy
   rejects a document that names a covered host at start-up. It rejects a
-  permitted name that resolves into a covered range at dial time. Operators
-  can configure exceptions, and the proxy reports them at every start. An
-  exception can never cover the cloud metadata address.
+  permitted name that resolves into a covered range at dial time.
+- `policy.deny_list_exceptions` can remove any address range from the
+  platform deny list except the cloud metadata address `169.254.169.254`.
+  That one address is the whole floor. A single entry can remove several
+  ranges at once: `0.0.0.0/1` removes loopback, `10.0.0.0/8`, shared
+  address space and `0.0.0.0/8` together. A document can also except the
+  link-local range around the metadata address by naming the prefixes on
+  either side of it. Treat the setting as an operator decision that widens
+  reachability, and review it the way you review the endpoint list.
+  An exception applies to addresses alone, so every compiled host name
+  stays denied inside an excepted range, including the metadata names and
+  the DNS-over-HTTPS resolvers. The proxy logs a warning for each exception
+  on every start, `/info` lists them, and `config.digest` covers them.
 - The proxy verifies upstream TLS with the system roots and
   `tls.upstream_ca_files`. It requires TLS 1.2 or later and never uses another
   proxy.
@@ -62,6 +72,7 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 |---|---|---|
 | A workload crashes the sidecar with a malformed request. goproxy v1.9.1 dereferences a nil URL on an asterisk-form target inside a tunnel when `Host` carries a port. The library starts the handler in its own goroutine, so recovery outside that goroutine cannot catch the panic. | The loop inside the tunnel belongs to net/http, which recovers once per connection. `OPTIONS *` reaches the handler and is rejected with `malformed_request`. The TLS handshake runs in a proxy-owned goroutine that recovers. goproxy handles only the CONNECT line. | `TestCrashersAreRefusedAndTheProcessKeepsServing`, `TestACleartextPrefaceInATunnelClosesIt` |
 | A workload opens connections until the sidecar runs out of file descriptors. | `limits.max_connections` caps simultaneous connections on the listener. Further accepts wait until a connection ends. | `TestConnectionCap` |
+| A workload holds the connection cap by opening tunnels and then stalling the TLS handshake. | The handshake inside a tunnel has a ten-second budget. A handshake that spends it is closed, and the proxy logs it at warning level with the connection id and the authority, so the operator can see a client that holds slots this way. | `TestHandshakeFailureLogging`, `TestConnectionCap` |
 | A workload holds slow or silent connections open. | `limits.idle_timeout` closes a connection that neither reads nor writes on the frontend and inside a tunnel. The proxy limits a request head to 10 seconds and a TLS handshake to 10 seconds. | `TestIdleConnectionsAreClosed` |
 | A workload pins the connection cap with requests to an upstream that never answers. The idle limit does not apply while a request waits on an upstream. | Four budgets bound an upstream that goes quiet: the dial, the TLS handshake, `limits.response_header_timeout` for the response head, and `limits.idle_timeout` on the upstream connection for a body that stops arriving. A request that exceeds one is rejected with `upstream_failed`, which frees the frontend connection. No budget bounds a whole request, because a server-sent event stream is a long request that is working. | `TestAStalledUpstreamIsBoundedByTheResponseHeaderTimeout`, `TestResponsesStream` |
 | An origin-form request reaches the listener and probes for a service that the proxy does not provide. | The listener provides no service of its own. It rejects the request with `not_a_proxy_request` and writes an audit record. The admin socket provides health and information endpoints. | `TestCleartextAndNonProxyRequests` |
@@ -76,6 +87,7 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 | Escaping hides a path from the decision. The proxy judges one form and the upstream reads another, so `/api/%2e%2e/secret` passes a prefix check and reaches `/api/secret`, or `/a%2Fb` is judged as a child of `/a/` and arrives as one segment. | The decision reads the escaped path, the bytes the upstream receives, so the match and the forwarded request cannot disagree. Both that form and its decoded form must be in shortest form, which refuses escaped dot segments. A prefix must hold only characters a path carries unescaped. | `TestMatcherDecisions`, `TestAnEscapedPathReachesTheUpstreamUnchanged`, `TestDeniedRequestsInsideAnAllowedTunnel`, `connect_allow_deny.txtar` |
 | DNS points an allowed name at a cluster or metadata address. | The dialer checks every resolved address against the deny list before it opens a socket. A match returns `deny_always` and opens no connection. | `TestANameResolvingIntoADeniedRangeIsRefusedAtTheDial` |
 | A document widens the platform list by naming a covered host or excepting the metadata address. | The proxy rejects both cases at start-up. | `TestCompileRefusals`, `TestDenyListRefusesAnExceptionCoveringTheMetadataAddress` |
+| An exception opens more of the platform deny list than the operator meant to open, such as `0.0.0.0/1`. | The proxy accepts it. The only range it refuses to except is the cloud metadata address. Each exception is a warning in the start-up log, `/info` lists the set in force, and `config.digest` covers it, so an audit record names the deny list the decision used. | `TestDenyListAddresses`, `TestConfigDigestCoversTheEffectiveSettings`, `connect_allow_deny.txtar` |
 | An endpoint names an address in a spelling that is not an IP literal, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. | A host must be a DNS name of ASCII labels whose last label is not all digits. The endpoint list refuses the rest at start-up, and the dial guard refuses the address whatever the name. | `TestParseRefusals`, `TestANameResolvingIntoADeniedRangeIsRefusedAtTheDial` |
 | An endpoint carries a path prefix that covers more than it names, such as an empty prefix or one with dot segments. | Compile validates every prefix itself, so a list assembled outside the document parser gets the same refusal. | `TestCompileRefusals` |
 | A listed host runs another service on another port, and the workload reaches it because the document named only the host. | An endpoint covers one port, 443 unless it names another. The connection decision matches the CONNECT port against the endpoint list, and a port no endpoint names is refused with `no_matching_endpoint` before any leaf is minted. | `TestDeniedConnections`, `TestMatcherDecisions`, `connect_allow_deny.txtar` |
@@ -96,6 +108,7 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 | Threat | Mitigation | Test |
 |---|---|---|
 | The workload reads the sandbox allowlist or probes health over loopback. | The admin surface uses a Unix socket in the proxy mount namespace. The socket has mode 0600 in a directory with mode 0700. The proxy rejects a relative path and a TCP address. | `TestServerAnswersHealthAndInfo`, `TestNewRefusals` |
+| A container sharing the socket volume connects to the admin socket, or unlinks it and binds its own. | The socket directory is set to mode 0700 on every start, because a mounted directory already exists and keeps the mode the container runtime gave it. The proxy refuses to start when the directory does not end up at 0700. The directory mode also covers the window between the bind, which honors the process umask, and the chmod of the socket to 0600. | `TestNewSetsTheDirectoryMode`, `TestCheckDirMode` |
 | A wrong socket path causes the proxy to delete a file at start-up. | The proxy unlinks only an existing socket. Any other object at the path stops the process. | `TestNewRefusals`, `TestNewReplacesAStaleSocket` |
 
 ### Configuration document
@@ -115,12 +128,17 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 - The proxy closes a cleartext preface inside a tunnel without sending a
   response. The proxy terminates TLS on every tunnel. Bytes that are not a TLS
   handshake fail the handshake, and the proxy closes the connection. The proxy
-  logs the failure. A handshake that fails for a reason the policy did not
-  decide carries no audit record, because the connection-scoped allow is
-  written only once the tunnel is established.
+  logs the failure at info level. A client that stalls rather than failing
+  holds the connection, and its slot against `limits.max_connections`, for the
+  ten-second handshake budget. That case logs at warning level. A handshake
+  that fails for a reason the policy did not decide carries no audit record in
+  either case, because the connection-scoped allow is written only once the
+  tunnel is established.
 - An idle timeout does not limit a request in flight. A response that is still
   transferring is not idle. A stalled upstream keeps its connection until the
   workload or upstream closes it.
 - goproxy discards bytes buffered after the CONNECT head. A client that sends
-  its ClientHello before it reads the 200 loses those bytes, and the handshake
-  fails. Clients wait for the 200, as RFC 9110 section 9.3.6 describes.
+  its ClientHello before it reads the 200 loses those bytes. The handshake then
+  waits for a ClientHello that already went missing and spends the whole
+  budget, which is the warning above. Clients wait for the 200, as RFC 9110
+  section 9.3.6 describes.

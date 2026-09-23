@@ -3,7 +3,9 @@
 // The admin surface is NEVER a TCP port, loopback included, because the proxy
 // may share the pod's network namespace with the workload it governs. In such a
 // configuration the workload could reach any network port that the proxy binds.
-// It cannot reach a socket in the proxy's own mount namespace.
+// That workload cannot reach a socket in a directory which only this proxy's
+// uid can traverse. The socket path could be a volume another container also
+// mounts, so this process sets the directory mode on every start.
 package admin
 
 import (
@@ -59,8 +61,8 @@ func New(ctx context.Context, path string, info func() any, logger *slog.Logger)
 		return nil, fmt.Errorf("%w: %q is %d bytes and a socket address carries at most %d",
 			errSocketPath, path, len(path), maxSocketPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), dirMode); err != nil {
-		return nil, fmt.Errorf("admin: create %s: %w", filepath.Dir(path), err)
+	if err := prepareDir(filepath.Dir(path)); err != nil {
+		return nil, err
 	}
 	if err := removeStaleSocket(path); err != nil {
 		return nil, err
@@ -69,6 +71,9 @@ func New(ctx context.Context, path string, info func() any, logger *slog.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("admin: listen on %s: %w", path, err)
 	}
+	// Listen creates the socket with the process umask applied, so the socket
+	// is world-connectable until the chmod below. The directory mode is what
+	// closes that window: no other uid can traverse into it.
 	if err := os.Chmod(path, socketMode); err != nil {
 		return nil, errors.Join(fmt.Errorf("admin: set mode on %s: %w", path, err), listener.Close(), removeSocket(path))
 	}
@@ -137,6 +142,35 @@ func (s *Server) stop(ctx context.Context) {
 	if err := removeSocket(s.path); err != nil {
 		s.logger.Warn("admin: unlinking the socket", slog.String("error", err.Error()))
 	}
+}
+
+// prepareDir creates the socket's directory and leaves it traversable by the
+// proxy's uid alone. MkdirAll applies dirMode only to a directory it creates,
+// and a directory the container runtime mounted already exists, often at mode
+// 0777, so the mode is set on every start.
+func prepareDir(dir string) error {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		return fmt.Errorf("admin: create %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, dirMode); err != nil {
+		return fmt.Errorf("admin: set mode on %s: %w", dir, err)
+	}
+	return checkDirMode(dir)
+}
+
+// checkDirMode refuses a socket directory another uid can traverse. Such a uid
+// can unlink the socket and bind its own in its place, so the admin surface
+// would answer for something the proxy does not control.
+func checkDirMode(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("admin: stat %s: %w", dir, err)
+	}
+	if perm := info.Mode().Perm(); perm != dirMode {
+		return fmt.Errorf("%w: the socket directory %s has mode %#o and must have mode %#o",
+			errSocketPath, dir, perm, dirMode)
+	}
+	return nil
 }
 
 // removeSocket unlinks the socket if it exists.

@@ -14,6 +14,11 @@ upstream upstream
 freeport PROXY_PORT
 shortdir ADMIN_DIR
 
+# A mounted emptyDir arrives at mode 0777, and the proxy binds the admin
+# socket in it. The directory mode is what keeps another container in the
+# pod off the socket, so the proxy sets it before it binds.
+chmod 0777 $ADMIN_DIR
+
 # The upstream binds a port the script cannot know in advance, and an
 # endpoint names one port, so the document is written with $UPSTREAM_PORT and
 # expanded before the proxy reads it.
@@ -78,12 +83,19 @@ stdout 'X-Keycard-Deny-Reason: credential_unavailable'
 exec curl -sS -o /dev/null -w '%{http_code}' --path-as-is --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello/%2e%2e/secret
 stdout '^400$'
 
+# The socket directory reaches mode 0700 whatever mode it was mounted with.
+[exec:ls] exec ls -ld $ADMIN_DIR
+[exec:ls] stdout '^drwx------'
+
 # The admin socket answers.
 exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/healthz
 stdout '^ok$'
 exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
 stdout '"sandbox_id": "acceptance"'
 stdout '"overridden": \['
+# The exceptions this document makes are reportable, because they remove
+# platform ranges that would otherwise be denied.
+stdout '"deny_list_exceptions": \[\s*"127.0.0.0/8",\s*"::1/128"\s*\]'
 
 # The refused destinations never reached the upstream.
 grep -count=1 '^request ' upstream/requests.log

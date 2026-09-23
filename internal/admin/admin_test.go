@@ -97,6 +97,29 @@ func TestRunReturnsNilOnCancellation(t *testing.T) {
 	require.NoError(t, server.Run(ctx), "Run")
 }
 
+// TestNewSetsTheDirectoryMode covers the directory a container runtime
+// mounted: it exists before the proxy starts, so MkdirAll leaves its mode
+// alone and the mode has to be set on every start.
+func TestNewSetsTheDirectoryMode(t *testing.T) {
+	t.Parallel()
+	path := socketPath(t)
+	dir := filepath.Dir(path)
+	//nolint:gosec // the fixture stands in for a directory a container runtime mounted
+	require.NoError(t, os.Chmod(dir, 0o777), "stand in for a mounted emptyDir")
+
+	server, err := admin.New(t.Context(), path, func() any { return nil }, nil)
+	require.NoError(t, err, "admin.New")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_ = server.Run(ctx)
+	})
+
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "socket directory mode")
+}
+
 func TestNewRefusals(t *testing.T) {
 	t.Parallel()
 	occupied := socketPath(t)
@@ -109,6 +132,11 @@ func TestNewRefusals(t *testing.T) {
 		{name: "relative path", path: "admin.sock", wantErr: "is not absolute"},
 		{name: "path too long", path: "/" + strings.Repeat("x", 110), wantErr: "at most 103"},
 		{name: "a file that is not a socket", path: occupied, wantErr: "is not a socket"},
+		{
+			name:    "the directory is a file",
+			path:    filepath.Join(occupied, "admin.sock"),
+			wantErr: "admin: create",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

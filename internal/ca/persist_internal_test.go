@@ -104,6 +104,15 @@ func TestLoadChecksMaterial(t *testing.T) {
 			spoil:   func(c *x509.Certificate) { c.NotAfter = testNow().Add(renewBefore / 2) },
 			wantErr: "the certificate expires at",
 		},
+		{
+			name:    "a certificate whose validity has not started",
+			spoil:   func(c *x509.Certificate) { c.NotBefore = testNow().Add(time.Minute) },
+			wantErr: "the certificate is not valid until",
+		},
+		{
+			name:  "a certificate valid from this instant",
+			spoil: func(c *x509.Certificate) { c.NotBefore = testNow() },
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
