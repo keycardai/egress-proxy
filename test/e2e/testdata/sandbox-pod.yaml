@@ -1,0 +1,135 @@
+# The sandbox pod the cluster e2e test drives: the init container that programs
+# the capture, the proxy sidecar, and the agent container that makes the
+# requests. Rendered as a Go template, once per sandbox.
+#
+# ca.out_dir, the admin socket directory and the receipt directory are each a
+# directory inside a volume rather than the mount point. A mount point belongs
+# to root at mode 0777. The proxy sets the mode on ca.out_dir and on the admin
+# socket directory at every start, and refuses a receipt directory any other uid
+# can write.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  serviceAccountName: {{ .ServiceAccount }}
+  securityContext:
+    # The redirect target is below 1024 so the workload cannot bind it, and
+    # the proxy refuses to start unless the kernel agrees. containerd sets
+    # this sysctl to 0 in a pod sandbox, so the pod puts it back at the
+    # kernel default.
+    sysctls:
+      - name: net.ipv4.ip_unprivileged_port_start
+        value: "1024"
+  initContainers:
+    - name: netsetup
+      image: {{ .NetsetupImage }}
+      imagePullPolicy: IfNotPresent
+      args:
+        - --receipt=/run/egress/netsetup/netsetup.json
+        - --proxy-uid={{ .ProxyUID }}
+        - --ipv6=off
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+          add: ["NET_ADMIN", "NET_RAW", "SETPCAP"]
+      volumeMounts:
+        - name: egress-run
+          mountPath: /run/egress
+    # A sidecar: an init container that keeps running, so the kubelet holds
+    # the agent container until the startup probe passes.
+    - name: proxy
+      image: {{ .ProxyImage }}
+      imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      env:
+        - name: EGRESS_PROXY_CONFIG
+          value: /etc/keycard/config/config.yaml
+        - name: EGRESS_PROXY_SANDBOX_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: EGRESS_PROXY_ADMIN
+          value: /run/egress/admin/admin.sock
+      securityContext:
+        runAsUser: {{ .ProxyUID }}
+        runAsGroup: {{ .ProxyUID }}
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+          add: ["NET_BIND_SERVICE"]
+      startupProbe:
+        exec:
+          command: ["/ko-app/egress-proxy", "probe", "readyz"]
+        periodSeconds: 2
+        failureThreshold: 30
+      readinessProbe:
+        exec:
+          command: ["/ko-app/egress-proxy", "probe", "readyz"]
+        periodSeconds: 5
+      livenessProbe:
+        exec:
+          command: ["/ko-app/egress-proxy", "probe", "healthz"]
+        periodSeconds: 10
+      volumeMounts:
+        - name: egress-run
+          mountPath: /run/egress
+        - name: shared-ca
+          mountPath: /shared-ca
+        - name: config
+          mountPath: /etc/keycard/config
+          readOnly: true
+        - name: fixture-ca
+          mountPath: /etc/keycard/fixture-ca
+          readOnly: true
+        - name: keycard-token
+          mountPath: /var/run/secrets/keycard
+          readOnly: true
+  containers:
+    - name: agent
+      image: {{ .SandboxImage }}
+      imagePullPolicy: IfNotPresent
+      args: ["sleep", "infinity"]
+      env:
+        - name: KEYCARD_CA_FILE
+          value: /shared-ca/out/ca.crt
+        # The placeholder the workload holds for the credentialed endpoint.
+        # The proxy replaces it, so it never reaches the upstream.
+        - name: UPSTREAM_TOKEN
+          value: {{ .Placeholder }}
+      securityContext:
+        runAsUser: {{ .AgentUID }}
+        runAsGroup: {{ .AgentUID }}
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: shared-ca
+          mountPath: /shared-ca
+          readOnly: true
+  volumes:
+    - name: egress-run
+      emptyDir:
+        medium: Memory
+    - name: shared-ca
+      emptyDir: {}
+    - name: config
+      configMap:
+        name: {{ .ConfigMap }}
+    - name: fixture-ca
+      configMap:
+        name: fixture-ca
+    - name: keycard-token
+      projected:
+        defaultMode: 0644
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: keycard
+              expirationSeconds: 3600

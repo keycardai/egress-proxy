@@ -69,8 +69,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      # netsetup_ruleset programs legacy iptables and ip6tables inside a
-      # container, and a container cannot load a kernel module.
+      # Ensure all kernel modules needed for network intercepts are loaded.
       - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
       - run: make acceptance
 
@@ -86,11 +85,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      # TestNetsetupImage applies the ruleset inside a container, and a
-      # container cannot load a kernel module.
+      # Ensure all kernel modules needed for network intercepts are loaded.
       - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
       - run: make images
 
+  # Test the egress-proxy in a k3d cluster. This builds the images, creates a
+  # k3d cluster, imports them and drives a request from inside the agent
+  # container.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -101,4 +102,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: install k3d
+        env:
+          K3D_VERSION: v5.9.0
+          K3D_SHA256: 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
+        run: |
+          curl -fsSL -o k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          echo "${K3D_SHA256}  k3d" | sha256sum --check
+          sudo install -m 0755 k3d /usr/local/bin/k3d
+          rm k3d
+          k3d version
+      # Ensure all kernel modules needed by netsetup are loaded.
+      - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
       - run: make e2e

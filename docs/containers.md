@@ -121,10 +121,15 @@ names.
 | readiness | `/ko-app/egress-proxy probe readyz` | The same answer while the process runs. |
 | liveness | `/ko-app/egress-proxy probe healthz` | The process is alive. Liveness NEVER reads `readyz`: a proxy that is still starting would be restarted for it. |
 
-`egress-proxy probe <healthz|readyz|info>` dials the socket named by
-`--admin` or `EGRESS_PROXY_ADMIN`, prints the answer and exits non-zero on
-anything but a 200. It does not read the document, so a pod that moves
-the socket sets `EGRESS_PROXY_ADMIN`.
+`egress-proxy probe <healthz|readyz|info>` connects to the admin socket,
+prints the response, and exits non-zero unless the status is 200. It gets
+the socket path from `--admin` or `EGRESS_PROXY_ADMIN`, or uses the
+default. It does not read the configuration document.
+
+To move the socket, set `EGRESS_PROXY_ADMIN` on the proxy container. If you
+set `listen.admin` in the document instead, the proxy listens on the new
+path but the probe still connects to the default. The startup probe fails
+and the workload never starts.
 
 ## The netsetup init container
 

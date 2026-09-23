@@ -10,7 +10,7 @@ help:
 	@echo "lint            golangci-lint (with the depguard import gate), the version go.mod pins"
 	@echo "checks          license allow-list, NOTICE freshness and govulncheck"
 	@echo "acceptance      the acceptance tests under test/acceptance, which drive the built binary"
-	@echo "e2e             the cluster lanes under test/e2e"
+	@echo "e2e             the e2e tests under test/e2e, on a k3d cluster"
 	@echo "images          build the three images locally and check each one"
 	@echo "notice          regenerate NOTICE from the build list"
 	@echo "tidy            go mod tidy"
@@ -20,10 +20,10 @@ help:
 build:
 	$(GO) build ./...
 
-# The acceptance tests are behind a build tag, so vet names it to cover them.
+# The test suites behind a build tag are named here, so vet covers them too.
 .PHONY: vet
 vet:
-	$(GO) vet -tags acceptance ./...
+	$(GO) vet -tags acceptance,e2e,images ./...
 
 # The gate self-tests under test/gates run the gate scripts against their
 # negative fixtures, so this target builds the tools. -short skips them.
@@ -71,15 +71,14 @@ notice:
 acceptance:
 	$(GO) test -tags acceptance -count=1 ./test/acceptance/...
 
-# The k3d lanes on sigs.k8s.io/e2e-framework. The lanes are behind the e2e
-# build tag so `go test ./...` never starts a cluster.
+# The e2e tests, on sigs.k8s.io/e2e-framework with support/k3d. It builds
+# the images, creates a k3d cluster, imports them, applies a sandbox pod and
+# drives requests from inside the agent container. It is behind the e2e
+# build tag so `go test ./...` never starts a cluster, and it skips with a
+# message when Docker or k3d is missing.
 .PHONY: e2e
 e2e:
-	@if [ -d test/e2e ]; then \
-		$(GO) test -tags e2e -count=1 -timeout 30m ./test/e2e/...; \
-	else \
-		echo "e2e: no lanes under test/e2e yet"; \
-	fi
+	$(GO) test -tags e2e -count=1 ./test/e2e/...
 
 # The three images, built locally. ko builds the proxy straight from the
 # module. The other two are Dockerfiles, and the netsetup one takes the

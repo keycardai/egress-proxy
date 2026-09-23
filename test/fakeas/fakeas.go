@@ -5,14 +5,13 @@
 //
 // It authenticates clients with client_secret_basic or a client assertion, and
 // refuses a request that sends both.
-//
-// It does not verify signatures. Use it as a fixture, not as a zone. The
-// cluster lane exercises the real zone.
 package fakeas
 
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -116,6 +115,26 @@ func (s *Server) Requests() []Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Request(nil), s.requests...)
+}
+
+// LogExchanges wraps a server and writes one line per token request it
+// read, in the order the server read them. A test counts the exchanges an
+// allowed request made and reads back which user and resource the zone was
+// asked for.
+//
+// The line NEVER holds the issued credential or the client secret.
+func LogExchanges(zone *Server, log io.Writer) http.Handler {
+	var mu sync.Mutex
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen := len(zone.Requests())
+		zone.ServeHTTP(w, r)
+		for _, request := range zone.Requests()[seen:] {
+			fmt.Fprintf(log, "exchange client=%s actor=%q subject=%s resource=%s error=%q\n",
+				request.ClientID, request.Actor, request.Subject, request.Form.Get("resource"), request.Error)
+		}
+	})
 }
 
 // ServeHTTP routes discovery and token requests. It returns 404 for every

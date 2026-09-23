@@ -68,6 +68,27 @@ unprivileged workload.
 - The audit stream cannot be turned off. It is the process stdout, with one
   JSON object per decision and the `sandbox_id` and document digest.
 
+## What the e2e tests prove
+
+`make e2e` runs the request path in a k3d cluster with the images this
+repository ships. The init container installs the capture rules and the
+proxy runs as a sidecar. The agent container sends requests with no proxy
+variable set, so requests reach the proxy only through the capture. The
+tests add no mitigation. They check that the mitigations below work
+together in a pod. Table rows they cover list `TestRequestPath`.
+
+The zone and the upstream have cluster addresses. These are RFC 1918
+addresses, which the platform deny list blocks, so the sandbox document
+lists the pod and service ranges in `policy.deny_list_exceptions`. The tests
+check that the proxy reports these exceptions in its start-up log and in
+`probe info`.
+
+The sidecar runs as uid 1337 with `drop: ["ALL"]` and
+`add: ["NET_BIND_SERVICE"]`, as `docs/containers.md` describes. The
+workload runs as uid 1000, so the capture rules can tell the two apart.
+The proxy binds the redirect port below 1024. This shows that the file
+capability and the pod grant work together.
+
 ## Surfaces and threats
 
 ### CONNECT listener
@@ -193,7 +214,7 @@ The proxy writes a credential only at the placement that the endpoint names.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| A workload sends its own value at the placement and reaches the upstream with it, or keeps a value the proxy must replace. | The placement wins. A header placement replaces every value under that header name. A query placement replaces every value under that parameter name. | `TestWriterReplacesWhatTheWorkloadSent`, `TestCredentialInjection` |
+| A workload sends its own value at the placement and reaches the upstream with it, or keeps a value the proxy must replace. | The placement wins. A header placement replaces every value under that header name. A query placement replaces every value under that parameter name. | `TestWriterReplacesWhatTheWorkloadSent`, `TestCredentialInjection`, `TestRequestPath` |
 | A workload names the placement header in `Connection`, so the proxy writes a credential that the reverse proxy then drops as hop-by-hop. | The proxy writes the credential after the reverse proxy removes the headers named by `Connection`. | `TestCredentialInjection` |
 | A credential holding a carriage return or newline splits the outbound request head and injects a header. | The proxy refuses a credential with a control character when it loads the source and when the source returns one. It denies the request with `credential_unavailable`. | `TestValidate`, `TestLoadStaticFileRefusals` |
 | A header placement names a header that the connection, the proxy, or the upstream trusts, such as `Host`. `net/http` writes `Host` from the request target, so the credential would not reach the wire. | `credential.NewWriter` refuses banned names. The document parser and endpoints built in code get the same refusal. The list includes the hop-by-hop headers in RFC 9110 section 7.6.1, `Content-Length`, `Host`, `Forwarded`, and the `x-forwarded-` and `sec-` families. `Authorization` is allowed. | `TestNewWriterRefusesABannedHeaderName`, `TestNewWriterAcceptsAHeaderName`, config `a header placement naming Host` |
@@ -213,7 +234,7 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| The proxy names a user it cannot act for. The substitute-user token is unsigned, so the proxy can put any user ID on the wire. | The zone gets authority from client authentication, not from the subject token. Workload identity sends a projected token signed by the API server. The zone reads the ServiceAccount from it, and its policy allows that ServiceAccount to impersonate one user. The API server signs the token, so the pod cannot forge one for another ServiceAccount. The cluster lane covers that signature; `test/fakeas` verifies none. The zone refuses another user with OAuth code `access_denied`. The proxy maps it to `exchange_denied` and returns 403. | `TestFailuresAreTwoClasses/the_ServiceAccount_is_not_the_one_the_impersonated_user_is_named_after`, `TestASourceFailureClassIsItsDenialReason`, `workload_identity_exchange.txtar` |
+| The proxy names a user it cannot act for. The substitute-user token is unsigned, so the proxy can put any user ID on the wire. | The zone gets authority from client authentication, not from the subject token. Workload identity sends a projected token signed by the API server. The zone reads the ServiceAccount from it, and its policy allows that ServiceAccount to impersonate one user. The API server signs the token, so the pod cannot forge one for another ServiceAccount. The e2e tests cover that signature. `test/fakeas` does not verify it. The zone refuses another user with OAuth code `access_denied`. The proxy maps it to `exchange_denied` and returns 403. | `TestFailuresAreTwoClasses/the_ServiceAccount_is_not_the_one_the_impersonated_user_is_named_after`, `TestASourceFailureClassIsItsDenialReason`, `workload_identity_exchange.txtar`, `TestRequestPath` |
 | The kubelet rotates the projected token and the proxy keeps offering the expired one. | The token file is read again for every exchange. The kubelet rewrites the projected token once it passes 80% of its lifetime, which defaults to one hour, and does not restart the pod. It writes the new token to a timestamped directory and renames the `..data` symlink onto it, so a read never sees a partial write ([`AtomicWriter.Write`](https://github.com/kubernetes/kubernetes/blob/v1.34.5/pkg/volume/util/atomic_writer.go#L86-L140)). A writer that rewrites the path in place instead would make an exchange fail with `exchange_failed` until the write completes. A rotated client secret takes effect after the next start because the proxy reads it once. | `TestTheWorkloadTokenIsReadOnEveryExchange` |
 | The token path is a FIFO or another non-regular file, and a read of it never returns. The proxy stops before it binds a listener, or an exchange outlives its budget, because the file read takes no context. | The proxy stats the path at start-up and refuses anything that is not a regular file no larger than 64 KiB. | `TestCheckTokenFileRefusals`, `TestNewRefusals/a_workload_token_file_that_is_not_a_regular_file` |
 | The projected token becomes unreadable while the process runs. | Any failure to read the file denies. The proxy sends no exchange request without client authentication. | `TestFailuresAreTwoClasses/the_kubelet_removed_the_projected_token`, `TestFailuresAreTwoClasses/the_projected_token_is_empty`, `TestFailuresAreTwoClasses/the_projected_token_holds_only_whitespace` |
@@ -222,7 +243,7 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
 | A server that is not the zone answers discovery, takes the client authentication, and issues credentials the proxy writes into requests. | The exchange verifies the zone with the system roots and `tls.upstream_ca_files`. It requires TLS 1.2 or later and uses no proxy. RFC 8414 section 3.3 requires the metadata to name the configured zone as its issuer. A mismatch fails the exchange before the proxy posts a secret. | `TestTheZoneIssuerMustMatchTheConfiguredZone` |
 | Metadata that names the configured zone as its issuer points `token_endpoint` at another host or at cleartext, so the client secret goes somewhere else. RFC 8414 section 3.3 binds the issuer and says nothing about `token_endpoint`. | Every request the exchange makes must be https, discovery and the token request alike. A cleartext endpoint reaches no socket. The exchange also refuses to follow a redirect, so a 307 from the token endpoint cannot move the secret to another host or to another port on the same host. | `TestTheTokenEndpointMustBeHTTPS`, `TestTheExchangeRefusesAnUnsafeZone/the_token_endpoint_redirects` |
 | A zone streams a large body inside the exchange budget, which spends the sidecar's memory. | The exchange reads at most 1 MiB from the zone and fails the exchange past that. | `TestTheExchangeRefusesAnUnsafeZone/the_token_response_is_larger_than_the_limit` |
-| A request the endpoint list already denies still spends an exchange, so the zone sees traffic the policy refused. | The exchange runs only after the request decision allows and the endpoint names a credential. A denied request reaches no zone. | `TestTheSourceReachesTheZoneOnlyOnCredential`, `token_exchange.txtar` |
+| A request the endpoint list already denies still spends an exchange, so the zone sees traffic the policy refused. | The exchange runs only after the request decision allows and the endpoint names a credential. A denied request reaches no zone. | `TestTheSourceReachesTheZoneOnlyOnCredential`, `token_exchange.txtar`, `TestRequestPath` |
 | A zone that accepts the connection and then goes quiet holds the request and its slot against `limits.max_connections` indefinitely. | `limits.exchange_timeout` bounds one exchange, including discovery. The dial and TLS handshake to the zone each have five seconds inside this budget. A request that spends the budget is denied with `exchange_failed`. | `TestFailuresAreTwoClasses/the_zone_accepts_the_request_and_never_answers` |
 | A refusal by the zone's policy is indistinguishable from a zone that could not be reached, so an operator cannot tell a misconfigured policy from an outage, and an agent retries what will never succeed. | The proxy uses separate reason codes. `exchange_denied` means that the zone read its policy and refused, and it answers 403. The zone says so with `access_denied`, `unauthorized_client`, or `invalid_grant`, and each of those is permanent. `exchange_failed` covers every other failure and answers 502 because the proxy does not know what the zone would have said. | `TestFailuresAreTwoClasses`, `TestAPolicyRefusalIsExchangeDenied`, `TestASourceFailureClassIsItsDenialReason`, `token_exchange.txtar` |
 | The credential the zone issued reaches the audit stream or the log. | The record holds the method, the path without its query, and the host. Text on the forward path passes through `credential.Redact`. `/info` and the start-up announcement name the zone, the user, and the mechanism, never the credential or secret. | `TestNoCredentialReachesARecordOrALogLine`, `TestDescribeNamesTheSourceAndNoSecret`, `token_exchange.txtar` |

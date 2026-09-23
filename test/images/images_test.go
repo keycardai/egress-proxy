@@ -52,10 +52,8 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	// The proxy image is built once for the whole lane, so it is removed
 	// here rather than by one test's cleanup.
-	for _, image := range []string{proxyImageRef, proxyKoImageRef} {
-		if err := exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run(); err != nil {
-			log.Printf("failed to remove image %q: %v", image, err)
-		}
+	if err := exec.CommandContext(context.Background(), "docker", "rmi", "-f", proxyImageRef).Run(); err != nil {
+		log.Printf("failed to remove image %q: %v", proxyImageRef, err)
 	}
 	os.Exit(code)
 }
@@ -99,12 +97,8 @@ func docker(t *testing.T, timeout time.Duration, args ...string) string {
 	return string(out)
 }
 
-// The two references `make image-proxy` leaves behind: the image ko loads
-// and the image the setcap step builds from it.
-const (
-	proxyImageRef   = "egress-proxy:" + tag
-	proxyKoImageRef = "ko.local:" + tag + "-ko"
-)
+// proxyImageRef is the reference `make image-proxy` leaves behind.
+const proxyImageRef = "egress-proxy:" + tag
 
 // buildProxyImage runs the target a release runs, so the lane drives the
 // image the Makefile produces rather than one it assembled itself. It runs
@@ -123,6 +117,21 @@ var buildProxyImage = sync.OnceValue(func() error { //nolint:gochecknoglobals //
 	}
 	return nil
 })
+
+// makeImage runs one Makefile image target and returns the reference it left
+// behind.
+func makeImage(t *testing.T, target, name string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), buildTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "make", target, "IMAGE_TAG="+tag)
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "make %s:\n%s", target, out)
+	image := name + ":" + tag
+	removeImage(t, image)
+	return image
+}
 
 // proxyImage is the reference `make image-proxy` tagged.
 func proxyImage(t *testing.T) string {
@@ -362,9 +371,7 @@ func buildFromStdin(t *testing.T, image, dockerfile string, args ...string) {
 // resolves the legacy iptables binaries the ruleset needs.
 func TestNetsetupImage(t *testing.T) {
 	t.Parallel()
-	image := "egress-netsetup:" + tag
-	removeImage(t, image)
-	docker(t, buildTimeout, "build", "-f", "images/netsetup/Dockerfile", "-t", image, ".")
+	image := makeImage(t, "image-netsetup", "egress-netsetup")
 
 	// --dry-run prints the ruleset and applies nothing, so this needs no
 	// capability and no network namespace of its own.
@@ -418,9 +425,7 @@ const sharedCAMount = config.DefaultCAOutDir
 //nolint:paralleltest,tparallel // the subtests share one image and run in sequence
 func TestSandboxBaseImage(t *testing.T) {
 	t.Parallel()
-	image := "sandbox-base:" + tag
-	removeImage(t, image)
-	docker(t, buildTimeout, "build", "-t", image, "images/sandbox-base")
+	image := makeImage(t, "image-sandbox-base", "sandbox-base")
 
 	// The agent runs as the uid the contract names, with no capability.
 	// openssl verify against the rebuilt bundle proves the entrypoint

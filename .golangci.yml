@@ -5,6 +5,11 @@ version: "2"
 
 run:
   tests: true
+  # Report every path relative to the go.mod of the module being linted, so
+  # a path in an exclusion rule below means the same thing wherever the
+  # checkout lives. The default is relative to this file's directory, which
+  # puts a fixture module outside the repository behind a long ../ prefix.
+  relative-path-mode: gomod
 
 linters:
   default: all
@@ -36,8 +41,14 @@ linters:
             - pkg: github.com/keycardlabs/
               desc: internal Keycard modules cannot ship in this repository; use the public github.com/keycardai/ modules
         # Fixtures under test/ mint credentials and answer as an authorization
-        # server. NEVER import one outside a _test.go file, which would put it
-        # in the shipped binary.
+        # server. NEVER import one from cmd/ or internal/, which would put it
+        # in a shipped binary.
+        #
+        # depguard matches a files glob against the absolute path, so NEVER
+        # name a directory of the tree in one: the glob would then read the
+        # path the repository is checked out under. The exemption for files
+        # under test/ is an exclusion rule below, on the module-relative
+        # path.
         no-test-fixtures-in-shipped-code:
           list-mode: lax
           files:
@@ -74,6 +85,11 @@ linters:
   exclusions:
     generated: lax
     rules:
+      # These are build-tagged tests, where fixtures are appropriate.
+      - path: ^test/
+        linters:
+          - depguard
+        text: no-test-fixtures-in-shipped-code
       # A test reads and writes paths it built itself, so the file-inclusion,
       # file-permission and subprocess rules have nothing to say about it.
       - path: _test\.go
