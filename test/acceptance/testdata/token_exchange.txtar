@@ -1,6 +1,6 @@
 # The built binary uses an impersonating token exchange. It mints a credential
 # per request, writes it at the configured placement, records zone refusals as
-# access_denied, records incomplete exchanges as exchange_failed, and skips
+# exchange_denied, records incomplete exchanges as exchange_failed, and skips
 # the exchange for a request that the endpoint list denies.
 #
 # The zone here is the fixture in test/fakeas. The real zone is exercised by
@@ -38,7 +38,7 @@ waitport 127.0.0.1:$PROXY_PORT
 
 env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
 
-# The admin socket names the exchange, zone, and impersonated user. It carries
+# The admin socket names the exchange, zone, and impersonated user. It shows
 # neither the client secret nor an issued credential.
 exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
 stdout '"credential_source": "a Keycard token exchange at https://localhost:'
@@ -52,7 +52,8 @@ exec curl -sS --cacert shared-ca/ca.crt -H 'Authorization: Bearer placeholder' h
 stdout '^hello from upstream /granted/repos$'
 
 # No zone policy grants this endpoint resource. The zone answers
-# access_denied, and the request never reaches the upstream.
+# access_denied, the proxy denies with exchange_denied, and the request never
+# reaches the upstream.
 exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
 stdout '^403$'
 
@@ -82,7 +83,7 @@ stderr 'a Keycard token exchange at https://localhost:'
 
 # Each decision has a record. The two failure classes have separate reasons.
 audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
-audit stdout scope=request request.path=/refused/thing decision.verdict=deny decision.reason=access_denied decision.endpoint=localhost:$UPSTREAM_PORT/refused/
+audit stdout scope=request request.path=/refused/thing decision.verdict=deny decision.reason=exchange_denied decision.endpoint=localhost:$UPSTREAM_PORT/refused/
 audit stdout scope=request request.path=/unlisted/thing decision.verdict=deny decision.reason=no_matching_endpoint
 
 # The audit stream and log contain no credential or secret.

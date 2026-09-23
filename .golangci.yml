@@ -35,6 +35,16 @@ linters:
           deny:
             - pkg: github.com/keycardlabs/
               desc: internal Keycard modules cannot ship in this repository; use the public github.com/keycardai/ modules
+        # Fixtures under test/ mint credentials and answer as an authorization
+        # server. NEVER import one outside a _test.go file, which would put it
+        # in the shipped binary.
+        no-test-fixtures-in-shipped-code:
+          list-mode: lax
+          files:
+            - "!$test"
+          deny:
+            - pkg: github.com/keycardai/egress-proxy/test/
+              desc: test fixtures never ship; import them from a _test.go file only
     errcheck:
       # A failed write to stdout or stderr has nowhere to be reported.
       exclude-functions:

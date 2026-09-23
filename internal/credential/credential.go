@@ -48,9 +48,10 @@ var (
 var (
 	// ErrUnavailable means that the source has no credential for the resource.
 	ErrUnavailable = errors.New("no credential for this resource")
-	// ErrAccessDenied means that the authorization server refused the exchange
-	// because its policy does not permit it.
-	ErrAccessDenied = errors.New("the authorization server denied the exchange")
+	// ErrExchangeDenied means that the authorization server refused the
+	// exchange because its policy does not permit it. The refusal is
+	// permanent, so a retry returns the same answer.
+	ErrExchangeDenied = errors.New("the authorization server denied the exchange")
 	// ErrExchangeFailed means that the exchange did not complete. The source
 	// does not know whether the credential would have been granted.
 	ErrExchangeFailed = errors.New("the token exchange failed")

@@ -338,8 +338,8 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name: "the zone's policy refused the exchange", err: credential.ErrAccessDenied,
-			wantReason: policy.ReasonAccessDenied, wantStatus: http.StatusForbidden,
+			name: "the zone's policy refused the exchange", err: credential.ErrExchangeDenied,
+			wantReason: policy.ReasonExchangeDenied, wantStatus: http.StatusForbidden,
 		},
 		{
 			name: "the exchange did not complete", err: credential.ErrExchangeFailed,

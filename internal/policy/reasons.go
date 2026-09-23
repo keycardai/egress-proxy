@@ -50,13 +50,14 @@ const (
 	// this process has no source for it. The proxy refuses the request, so
 	// the placeholder the workload holds never reaches the upstream.
 	ReasonCredentialUnavailable Reason = "credential_unavailable" //nolint:gosec // G101: a reason code, not a credential
-	// ReasonAccessDenied means that the authorization server refused the token
-	// exchange. Its policy does not permit the configured user on the endpoint
-	// resource.
-	ReasonAccessDenied Reason = "access_denied"
+	// ReasonExchangeDenied means that the authorization server refused the
+	// token exchange. Its policy does not permit the configured user on the
+	// endpoint resource, or it does not permit this client to impersonate.
+	// The refusal is permanent, so a retry returns the same answer.
+	ReasonExchangeDenied Reason = "exchange_denied"
 	// ReasonExchangeFailed means that the token exchange did not complete.
 	// Discovery failed, the zone was unreachable, the exchange exceeded its
-	// budget, or the zone returned an error other than access_denied.
+	// budget, or the zone returned an error that is not a policy refusal.
 	ReasonExchangeFailed Reason = "exchange_failed"
 	// ReasonUpstreamFailed means an allowed request produced no response
 	// from the upstream.

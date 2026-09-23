@@ -182,8 +182,8 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 
 // logExchanges writes one line per token request that the zone reads. A
 // scenario can count exchanges for allowed requests and confirm that denied
-// requests make none. The line never carries the issued credential or client
-// secret.
+// requests make none. The line never includes the issued credential or the
+// client secret.
 func logExchanges(zone *fakeas.Server, log io.Writer) http.Handler {
 	var mu sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

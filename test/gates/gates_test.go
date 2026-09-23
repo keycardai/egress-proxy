@@ -72,7 +72,19 @@ func TestGates(t *testing.T) {
 			},
 		},
 		{
-			name:       "import gate passes the same module without the banned file",
+			name:     "import gate rejects a test fixture imported from a non-test file",
+			script:   lintScript,
+			fixture:  "banned-import",
+			args:     []string{"--build-tags", "gate_negative"},
+			wantExit: 1,
+			wantOutput: []string{
+				"shipped.go:5:8: import 'github.com/keycardai/egress-proxy/test/fakeas' is not allowed " +
+					"from list 'no-test-fixtures-in-shipped-code'",
+				"(depguard)",
+			},
+		},
+		{
+			name:       "import gate passes the same module without the banned files",
 			script:     lintScript,
 			fixture:    "banned-import",
 			wantExit:   0,

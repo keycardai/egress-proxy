@@ -144,7 +144,7 @@ type Sandbox struct {
 // performs a token exchange on the impersonated user's behalf.
 // Exactly one of WorkloadTokenFile and ClientSecretFile authenticates the
 // exchange. A workload token lets the zone read a ServiceAccount subject. A
-// client secret carries no ServiceAccount subject.
+// client secret gives the zone no ServiceAccount subject.
 type Identity struct {
 	ZoneURL           string `json:"zone_url"`
 	ClientID          string `json:"client_id"`
@@ -760,8 +760,8 @@ func (id *Identity) validate(found *problems) {
 }
 
 // validateClientAuth requires exactly one client authentication mechanism.
-// The mechanisms carry different authority, so a record must identify which
-// one the zone used.
+// The two mechanisms give the zone different authority, so a record must
+// identify which one the zone used.
 func (id *Identity) validateClientAuth(found *problems) {
 	switch {
 	case id.WorkloadTokenFile == "" && id.ClientSecretFile == "":

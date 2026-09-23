@@ -190,7 +190,7 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 		return "", &denial{
 			status:      http.StatusBadRequest,
 			Code:        codeInvalidGrant,
-			Description: "the substitute-user token carries no sub",
+			Description: "the substitute-user token has no sub claim",
 		}
 	}
 	resource := record.Form.Get("resource")
@@ -217,7 +217,7 @@ func (s *Server) authenticate(record Request, secret string, hasBasic bool) *den
 	return &denial{
 		status:      http.StatusUnauthorized,
 		Code:        codeInvalidClient,
-		Description: "the request carries no client secret this server knows",
+		Description: "the request has no client secret this server knows",
 	}
 }
 
@@ -241,7 +241,7 @@ func grantShape(form url.Values) *denial {
 		return &denial{
 			status:      http.StatusBadRequest,
 			Code:        codeInvalidRequest,
-			Description: "a substitute-user exchange carries no actor_token",
+			Description: "a substitute-user exchange sends no actor_token",
 		}
 	}
 	return nil

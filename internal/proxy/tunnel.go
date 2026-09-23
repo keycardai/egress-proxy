@@ -397,8 +397,8 @@ func (s *Server) decideRequest(
 // says which class a failure is in, so nothing here reads a message.
 func credentialReason(err error) policy.Reason {
 	switch {
-	case errors.Is(err, credential.ErrAccessDenied):
-		return policy.ReasonAccessDenied
+	case errors.Is(err, credential.ErrExchangeDenied):
+		return policy.ReasonExchangeDenied
 	case errors.Is(err, credential.ErrExchangeFailed):
 		return policy.ReasonExchangeFailed
 	default:
@@ -596,7 +596,7 @@ func statusFor(reason policy.Reason) int {
 		// audit record and never a response.
 		return http.StatusInternalServerError
 	case policy.ReasonDenyAlways, policy.ReasonNoMatchingEndpoint, policy.ReasonHostMismatch, policy.ReasonNoSNI,
-		policy.ReasonCredentialUnavailable, policy.ReasonAccessDenied:
+		policy.ReasonCredentialUnavailable, policy.ReasonExchangeDenied:
 		return http.StatusForbidden
 	case policy.ReasonEndpointAllowed:
 		// An allow never reaches this function. The case is here because

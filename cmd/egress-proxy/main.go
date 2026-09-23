@@ -340,8 +340,7 @@ func credentialSource(cfg *config.Config, deny *policy.DenyList, roots *x509.Cer
 
 // tokenExchange builds a source that mints a credential for each request
 // against the zone. It reads the client secret once, so a rotated secret
-// takes effect after restart. It reads the projected workload token for each
-// exchange because the kubelet rotates the file while the process runs.
+// takes effect after restart.
 func tokenExchange(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (*exchange.Source, error) {
 	var secret string
 	if cfg.Identity.ClientSecretFile != "" {

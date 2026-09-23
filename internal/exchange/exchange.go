@@ -17,9 +17,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"syscall"
 	"time"
 
@@ -32,9 +34,23 @@ import (
 // token. The type is the vendor media type that the zone reads.
 const substituteUserHeader = `{"typ":"vnd.kc.su+jwt","alg":"none"}`
 
-// accessDenied is the OAuth error code that the zone returns when its policy
-// refuses the exchange.
-const accessDenied = "access_denied"
+// These are the OAuth error codes that mean the zone refused on policy. The
+// zone returns access_denied when its policy does not grant the resource,
+// unauthorized_client when this client may not impersonate, and invalid_grant
+// when the user is unknown or not impersonatable. Each refusal is permanent.
+const (
+	codeAccessDenied       = "access_denied"
+	codeUnauthorizedClient = "unauthorized_client"
+	codeInvalidGrant       = "invalid_grant"
+)
+
+// schemeHTTPS is the only scheme the exchange connects with. The client
+// secret goes to the zone, so cleartext would put it on the wire.
+const schemeHTTPS = "https"
+
+// maxResponseSize limits a response from the zone. An access token that a
+// request header can hold is far smaller, so a larger body is a zone fault.
+const maxResponseSize = 64 << 10
 
 // DefaultTimeout is the budget for one exchange when Options sets no value.
 // It covers discovery and the token request.
@@ -50,11 +66,14 @@ const (
 var (
 	errConfigure = errors.New("configure the token exchange")
 	errDenied    = errors.New("the address is on the platform deny list")
+	errCleartext = errors.New("the zone must be https")
+	errRedirect  = errors.New("the zone redirected the exchange")
+	errTooLarge  = errors.New("the zone answered with more than 64 KiB")
 )
 
 // Options configures a Source. ClientSecret authenticates the client.
 type Options struct {
-	// ZoneURL is the issuer URL for RFC 8414 discovery.
+	// ZoneURL is the issuer URL for RFC 8414 discovery. It must be https.
 	ZoneURL string
 	// ClientID is the application credential that the proxy uses.
 	ClientID string
@@ -89,6 +108,9 @@ type Source struct {
 // New builds the source without reading from the network. If the zone is
 // unreachable at start-up, requests fail instead of stopping the process.
 func New(opts Options) (*Source, error) {
+	if err := opts.checkZoneURL(); err != nil {
+		return nil, err
+	}
 	application, describe, err := opts.application()
 	if err != nil {
 		return nil, err
@@ -101,10 +123,17 @@ func New(opts Options) (*Source, error) {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	httpClient := &http.Client{Transport: opts.transport(), Timeout: timeout}
+	httpClient := &http.Client{
+		Transport: guard{base: opts.transport()},
+		Timeout:   timeout,
+		// Discovery names the token endpoint. A redirect away from it would
+		// move the client secret to another host.
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("%w to %s", errRedirect, req.URL.Redacted())
+		},
+	}
 	clientOpts := []oauth.TokenExchangeClientOption{oauth.WithTokenExchangeHTTPClient(httpClient)}
-	// A client secret supplies its basic-auth pair here. An assertion supplies
-	// no pair and puts the assertion on the form instead.
+	// A client secret authenticates with its basic-auth pair.
 	if auth := application.Auth(opts.ZoneURL); auth != nil {
 		clientOpts = append(clientOpts, oauth.WithClientCredentials(auth.ClientID, auth.ClientSecret))
 	}
@@ -118,6 +147,20 @@ func New(opts Options) (*Source, error) {
 	}, nil
 }
 
+// checkZoneURL refuses a zone that the exchange must not offer the secret to.
+// internal/config applies the same rule, and this check covers a Source that
+// another caller builds.
+func (o Options) checkZoneURL() error {
+	parsed, err := url.Parse(o.ZoneURL)
+	if err != nil {
+		return fmt.Errorf("%w: identity.zone_url does not parse: %w", errConfigure, err)
+	}
+	if parsed.Scheme != schemeHTTPS {
+		return fmt.Errorf("%w: %w, not %q", errConfigure, errCleartext, o.ZoneURL)
+	}
+	return nil
+}
+
 // application builds the client credential and the phrase that Describe uses.
 // The interface lets the workload identity mechanism provide another form.
 //
@@ -125,6 +168,8 @@ func New(opts Options) (*Source, error) {
 func (o Options) application() (oauth.ApplicationCredential, string, error) {
 	switch {
 	case o.WorkloadTokenFile != "":
+		// TODO: drop this refusal with the branch that reads the projected
+		// token and authenticates the exchange with it.
 		return nil, "", fmt.Errorf(
 			"%w: it names identity.workload_token_file, which this build does not read; "+
 				"authenticate with identity.client_secret_file", errConfigure,
@@ -164,8 +209,61 @@ func (o Options) transport() *http.Transport {
 	}
 }
 
+// guard refuses a cleartext request and limits the size of every response.
+// Discovery and the token request both go through it, so metadata that names
+// an http token_endpoint reaches no socket.
+type guard struct {
+	base http.RoundTripper
+}
+
+func (g guard) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme != schemeHTTPS {
+		return nil, fmt.Errorf("%w: %s", errCleartext, req.URL.Redacted())
+	}
+	response, err := g.base.RoundTrip(req)
+	if err != nil {
+		return nil, fmt.Errorf("reach the zone: %w", err)
+	}
+	response.Body = &limitedBody{body: response.Body, left: maxResponseSize}
+	return response, nil
+}
+
+// limitedBody reads at most maxResponseSize bytes and fails past that. It
+// reads one byte beyond the limit to tell a body at the limit from a longer
+// one.
+type limitedBody struct {
+	body io.ReadCloser
+	left int64
+}
+
+func (b *limitedBody) Read(buf []byte) (int, error) {
+	if b.left < 0 {
+		return 0, errTooLarge
+	}
+	if int64(len(buf)) > b.left+1 {
+		buf = buf[:b.left+1]
+	}
+	read, err := b.body.Read(buf)
+	b.left -= int64(read)
+	if b.left < 0 {
+		return 0, errTooLarge
+	}
+	if err != nil {
+		//nolint:wrapcheck // io.EOF must stay unwrapped so a reader stops
+		return read, err
+	}
+	return read, nil
+}
+
+func (b *limitedBody) Close() error {
+	if err := b.body.Close(); err != nil {
+		return fmt.Errorf("close the zone response: %w", err)
+	}
+	return nil
+}
+
 // Credential exchanges for the resource's access token. It returns
-// credential.ErrAccessDenied or credential.ErrExchangeFailed for a failure.
+// credential.ErrExchangeDenied or credential.ErrExchangeFailed for a failure.
 // The proxy maps each error to the denial reason with the same name.
 func (s *Source) Credential(ctx context.Context, resource string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -194,22 +292,30 @@ func (s *Source) Describe() string {
 }
 
 // classify maps an exchange failure to the Source error vocabulary. A zone
-// policy refusal is access_denied. Every other failure is exchange_failed.
-// The proxy cannot know the zone's answer for those failures.
+// policy refusal is exchange_denied, which denies with 403, because a retry
+// gets the same answer. Every other failure is exchange_failed, which denies
+// with 502. The proxy does not know the zone's answer for those.
 func classify(err error) error {
 	var oauthErr *oauth.OAuthError
-	if errors.As(err, &oauthErr) && oauthErr.ErrorCode == accessDenied {
-		return fmt.Errorf("%w: %s", credential.ErrAccessDenied, oauthErr.Message)
+	if errors.As(err, &oauthErr) && refusedOnPolicy(oauthErr.ErrorCode) {
+		return fmt.Errorf("%w: %s", credential.ErrExchangeDenied, oauthErr.Message)
 	}
 	return fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)
 }
 
+// refusedOnPolicy reports whether an OAuth error code means the zone read its
+// policy and said no.
+func refusedOnPolicy(code string) bool {
+	switch code {
+	case codeAccessDenied, codeUnauthorizedClient, codeInvalidGrant:
+		return true
+	default:
+		return false
+	}
+}
+
 // substituteUserToken builds the unsigned JWT that names the impersonated
 // user. The trailing dot marks the absent signature segment.
-//
-// TokenExchangeClient.Impersonate does not send a client_id form parameter. A
-// token-federation application credential needs that parameter, so the
-// exchange builds the form here.
 func substituteUserToken(user string) (string, error) {
 	if user == "" {
 		return "", fmt.Errorf("%w: it names no user to impersonate", errConfigure)
