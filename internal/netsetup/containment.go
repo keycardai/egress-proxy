@@ -182,7 +182,7 @@ func receiptAgeProblems(receipt Receipt, request ContainmentRequest) []string {
 	var found problems
 	switch {
 	case receipt.VerifiedAt.IsZero():
-		found.addf("the receipt carries no verified_at, so there is no saying when the tables were read back. " +
+		found.addf("the receipt has no verified_at, so there is no saying when the tables were read back. " +
 			"Re-run the init container")
 	case receipt.VerifiedAt.After(now):
 		found.addf("the receipt says the rules were verified at %s and it is now %s. A receipt dated in the "+

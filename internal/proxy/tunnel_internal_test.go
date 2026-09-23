@@ -45,7 +45,7 @@ func (s *recordingSink) all() []audit.Record {
 	return append([]audit.Record(nil), s.records...)
 }
 
-// unmintableHost carries a character an IA5String cannot hold, so
+// unmintableHost has a character an IA5String cannot hold, so
 // x509.CreateCertificate refuses the SAN and the authority cannot mint a
 // leaf for it. It is the reachable way to fail a mint for a name the policy
 // allowed.
@@ -53,7 +53,7 @@ const unmintableHost = "аpple.com"
 
 // TestGetCertificateRecordsAMintFailure covers the arm of the handshake
 // where policy allows the name and the mint fails anyway. It calls
-// GetCertificate directly, because crypto/tls will not carry this server
+// GetCertificate directly, because crypto/tls will not keep this server
 // name over the wire.
 func TestGetCertificateRecordsAMintFailure(t *testing.T) {
 	t.Parallel()
@@ -382,7 +382,7 @@ func (e textError) Error() string { return string(e) }
 // TestEmitForwardedRedactsTheCredential covers every arm that puts upstream
 // text on a record. A header placement puts the credential on the wire as
 // the workload would read it, and a query placement percent-encodes it into
-// the URL, so an error naming that URL carries the escaped form.
+// the URL, so an error naming that URL shows the escaped form.
 func TestEmitForwardedRedactsTheCredential(t *testing.T) {
 	t.Parallel()
 	const secret = "a b=c+d"
@@ -449,8 +449,8 @@ func TestEmitForwardedRedactsTheCredential(t *testing.T) {
 			line, err := json.Marshal(records[0])
 			require.NoError(t, err, "marshal the record")
 			assert.Contains(t, string(line), credential.Marker, "the record says the text was redacted")
-			assert.NotContains(t, string(line), secret, "the record carries the credential")
-			assert.NotContains(t, string(line), escaped, "the record carries the escaped credential")
+			assert.NotContains(t, string(line), secret, "the record holds the credential")
+			assert.NotContains(t, string(line), escaped, "the record holds the escaped credential")
 		})
 	}
 }
@@ -495,7 +495,7 @@ func TestAFailedCredentialWriteDenies(t *testing.T) {
 		wantStatus int
 		wantReason policy.Reason
 		wantTrips  int64
-		// wantVerdict is the verdict the record carries. An allowed forward
+		// wantVerdict is the verdict on the record. An allowed forward
 		// keeps the verdict the decision put on the record.
 		wantVerdict policy.Verdict
 	}{
@@ -554,8 +554,8 @@ func TestAFailedCredentialWriteDenies(t *testing.T) {
 			}
 			line, err := json.Marshal(records[0])
 			require.NoError(t, err, "marshal the record")
-			assert.NotContains(t, string(line), secret, "an audit record carries the credential")
-			assert.NotContains(t, logs.String(), secret, "a log line carries the credential")
+			assert.NotContains(t, string(line), secret, "an audit record holds the credential")
+			assert.NotContains(t, logs.String(), secret, "a log line holds the credential")
 		})
 	}
 }

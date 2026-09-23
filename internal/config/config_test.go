@@ -69,7 +69,7 @@ func TestParseNormalizesTheEndpointHost(t *testing.T) {
 		{name: "in mixed case", host: "PyPI.ORG", wantHost: "pypi.org"},
 		{name: "padded", host: " pypi.org. ", wantHost: "pypi.org"},
 		// One trailing dot is the root label. A second one is an empty
-		// label, which no name can carry. Normalization drops a single dot,
+		// label, which no name can hold. Normalization drops a single dot,
 		// so the host still holds the empty label when it is validated.
 		{name: "with two trailing dots", host: "pypi.org..", wantErr: "must be a DNS name"},
 		{name: "with three trailing dots", host: "pypi.org...", wantErr: "must be a DNS name"},
@@ -524,7 +524,7 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 }
 
 // TestParseRefusesInvalidEndpoints covers the host forms, ports and path
-// prefixes an endpoint can carry. A host must be a DNS name, so every
+// prefixes an endpoint can name. A host must be a DNS name, so every
 // spelling of an address is refused here.
 func TestParseRefusesInvalidEndpoints(t *testing.T) {
 	t.Parallel()
@@ -703,7 +703,7 @@ func TestParseEndpointIdentity(t *testing.T) {
 }
 
 // TestParseRefusesInvalidCredentials covers the credential source and the
-// placement that carries it.
+// placement that names it.
 func TestParseRefusesInvalidCredentials(t *testing.T) {
 	t.Parallel()
 	endpoint := func(fields string) string {

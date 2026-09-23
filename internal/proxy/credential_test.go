@@ -90,7 +90,7 @@ func httpbinUpstream() http.Handler {
 }
 
 // byPath matches the request-scoped record for a path. Every case uses a
-// path of its own, because an allowed response carries no request id.
+// path of its own, because an allowed response has no request id.
 func byPath(path string) func(audit.Record) bool {
 	return func(record audit.Record) bool {
 		return record.Scope == audit.ScopeRequest && record.Request != nil && record.Request.Path == path
@@ -226,7 +226,7 @@ func TestCredentialInjection(t *testing.T) {
 }
 
 // TestCredentialRefusals covers every way a credential can be missing. Each
-// one denies, so a request never leaves carrying whatever the workload had
+// one denies, so a request never leaves with whatever the workload had
 // at the placement.
 func TestCredentialRefusals(t *testing.T) {
 	t.Parallel()
@@ -308,10 +308,10 @@ func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	for _, record := range []audit.Record{allowed, failed} {
 		line, err := json.Marshal(record)
 		require.NoError(t, err, "marshal the record")
-		assert.NotContains(t, string(line), querySecret, "an audit record carries the credential")
+		assert.NotContains(t, string(line), querySecret, "an audit record holds the credential")
 	}
 	logged := h.logs.String()
-	assert.NotContains(t, logged, querySecret, "a log line carries the credential")
+	assert.NotContains(t, logged, querySecret, "a log line holds the credential")
 	assert.Contains(t, logged, "refused a request", "the proxy logged nothing, so the assertion above proves nothing")
 }
 

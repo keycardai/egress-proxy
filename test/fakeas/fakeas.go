@@ -84,7 +84,7 @@ type Request struct {
 	// Actor is the subject of the client assertion. It is empty when the
 	// request uses a client secret.
 	Actor string
-	// HasBasic reports whether the request carried an Authorization header with
+	// HasBasic reports whether the request sent an Authorization header with
 	// basic credentials.
 	HasBasic bool
 	// Subject is the user named by the substitute-user token.

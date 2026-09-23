@@ -19,7 +19,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/proxy"
 )
 
-// redirectedFrom is the pre-redirect address a captured connection carries
+// redirectedFrom is the pre-redirect address a captured connection has
 // on its audit record. The proxy records it and never dials it.
 //
 //nolint:gochecknoglobals // a fixture the cases share
@@ -68,7 +68,7 @@ func TestARedirectedConnectionIsDecidedAndForwarded(t *testing.T) {
 	}, connection.Destination, "the connection record names the pre-redirect address")
 	request := h.sink.find(t, "the allowed request", byReason(audit.ScopeRequest, policy.ReasonEndpointAllowed))
 	assert.Equal(t, address.String(), request.Destination.OriginalAddress,
-		"the request record carries the connection's pre-redirect address")
+		"the request record holds the connection's pre-redirect address")
 	assert.Equal(t, connection.ConnectionID, request.ConnectionID, "the request joins its connection")
 }
 
@@ -79,7 +79,7 @@ func TestARedirectedConnectionIsDecidedAndForwarded(t *testing.T) {
 const cleartextHost = "cleartext.test"
 
 // TestRedirectedConnectionsAreRefused pins the reason on every captured
-// connection the proxy will not carry, and what the workload is told.
+// connection the proxy will not forward, and what the workload is told.
 func TestRedirectedConnectionsAreRefused(t *testing.T) {
 	t.Parallel()
 	h := start(t, harnessOptions{endpoints: func(port int) []policy.Endpoint {
@@ -137,7 +137,7 @@ func TestRedirectedConnectionsAreRefused(t *testing.T) {
 		{
 			// The endpoint list covers this host on this port, so the
 			// connection decision allows it and the refusal comes from the
-			// rule that carries nothing cleartext. The reason separates this
+			// rule that forwards nothing cleartext. The reason separates this
 			// case from the one above, where no endpoint covers the port.
 			name: "a cleartext connection to a name and port an endpoint covers",
 			dst: proxy.Redirected{

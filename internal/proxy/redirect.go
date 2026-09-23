@@ -26,10 +26,10 @@ type Redirected struct {
 	// so a name that resolves into a denied range is still caught by the
 	// dial guard.
 	Address netip.AddrPort
-	// Cleartext says the connection carries HTTP rather than TLS.
+	// Cleartext says the connection is HTTP rather than TLS.
 	Cleartext bool
 	// Refusal is a reason the frontend settled before this call. A
-	// connection carrying one is denied with that reason and read no
+	// connection with one is denied with that reason and read no
 	// further.
 	Refusal policy.Reason
 }
@@ -137,7 +137,7 @@ func (s *Server) writeDenyConn(conn net.Conn, status int, reason policy.Reason, 
 const denyWriteBound = 5 * time.Second
 
 // addressText renders a recovered destination, empty for the zero value a
-// CONNECT tunnel carries.
+// CONNECT tunnel has.
 func addressText(addr netip.AddrPort) string {
 	if !addr.IsValid() {
 		return ""

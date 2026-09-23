@@ -18,7 +18,7 @@ import (
 // recordHeaderLen is the TLS record header, RFC 8446 section 5.1.
 const recordHeaderLen = 5
 
-// maxRecordPayload is the largest payload one TLS record carries.
+// maxRecordPayload is the largest payload one TLS record can hold.
 const maxRecordPayload = 1 << 14
 
 // clientHello is the bytes a real crypto/tls client sends for a
@@ -37,8 +37,8 @@ func clientHello(t *testing.T, config *tls.Config) []byte {
 	return buf[:n]
 }
 
-// refragment rewrites a handshake carried in one TLS record as two records
-// carrying half of it each, which RFC 8446 section 5.1 permits and clients
+// refragment rewrites a handshake sent in one TLS record as two records
+// with half of it each, which RFC 8446 section 5.1 permits and clients
 // do.
 func refragment(t *testing.T, record []byte) []byte {
 	t.Helper()

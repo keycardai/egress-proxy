@@ -24,7 +24,7 @@ import (
 const defaultPeekTimeout = 10 * time.Second
 
 // The options a Frontend cannot be built without. The process reads all
-// three from the document, which carries a default for each, so a zero here
+// three from the document, which has a default for each, so a zero here
 // is a caller that never asked what bound it wanted.
 var (
 	errNoHandler        = errors.New("transparent: no handler to serve a redirected connection with")
@@ -52,7 +52,7 @@ type Options struct {
 	PeekTimeout time.Duration
 	// MaxConnections caps simultaneous connections across every listener
 	// this frontend serves. It is required. This frontend and the CONNECT
-	// frontend each carry their own count against it.
+	// frontend each keep their own count against it.
 	MaxConnections int
 	// IdleTimeout closes a connection that neither reads nor writes for
 	// this long. It is required.
@@ -242,7 +242,7 @@ func (f *Frontend) destination(
 	}
 	host, named, ok := splitAuthority(name, port)
 	if !ok || named != port {
-		// The name carries a port the connection was not opened to, so the
+		// The name gives a port the connection was not opened to, so the
 		// two disagree about the destination.
 		f.logger.Info("a redirected connection named a port the connection was not opened to",
 			slog.String("address", original.String()),
@@ -251,7 +251,7 @@ func (f *Frontend) destination(
 		return dst
 	}
 	// RFC 6066 section 3 forbids an IP literal in server_name, and a Host
-	// header may carry one. A name that is an address must be the address
+	// header may give one. A name that is an address must be the address
 	// the connection was opened to.
 	if literal, parseErr := netip.ParseAddr(host); parseErr == nil && literal.Unmap() != original.Addr().Unmap() {
 		f.logger.Info("a redirected connection named an address the connection was not opened to",
@@ -273,7 +273,7 @@ func (f *Frontend) name(ctx context.Context, reader *bufio.Reader, cleartext boo
 	return PeekServerName(ctx, reader)
 }
 
-// splitAuthority reads a name that may carry a port, defaulting to the port
+// splitAuthority reads a name that may have a port, defaulting to the port
 // the connection was opened to. It reports false for a port outside 1 to
 // 65535.
 func splitAuthority(authority string, defaultPort int) (string, int, bool) {
