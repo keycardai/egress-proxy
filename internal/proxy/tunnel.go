@@ -44,6 +44,9 @@ type tunnel struct {
 	host         string
 	port         int
 	sni          string
+	// address is the pre-redirect destination of a connection the
+	// transparent frontend recovered, empty on a CONNECT tunnel.
+	address string
 }
 
 // tunnelConn is a decrypted tunnel that the tunnel server accepts. The
@@ -90,7 +93,7 @@ func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goprox
 		s.opts.Audit.Emit(audit.Record{
 			ConnectionID: state.connectionID,
 			Scope:        audit.ScopeConnection,
-			Destination:  audit.Destination{Host: state.host, Port: state.port},
+			Destination:  audit.Destination{Host: state.host, Port: state.port, OriginalAddress: state.address},
 			Decision:     auditDecision(decision),
 		})
 		s.logger.Info("refused a connection",
@@ -139,7 +142,7 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 	s.opts.Audit.Emit(audit.Record{
 		ConnectionID: state.connectionID,
 		Scope:        audit.ScopeConnection,
-		Destination:  audit.Destination{Host: state.host, Port: state.port, SNI: state.sni},
+		Destination:  audit.Destination{Host: state.host, Port: state.port, SNI: state.sni, OriginalAddress: state.address},
 		Decision:     audit.Decision{Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed},
 	})
 	if !s.intake.push(&tunnelConn{Conn: tlsConn, state: state}) {
@@ -218,8 +221,10 @@ func (s *Server) tlsConfig(state *tunnel) *tls.Config {
 				s.opts.Audit.Emit(audit.Record{
 					ConnectionID: state.connectionID,
 					Scope:        audit.ScopeConnection,
-					Destination:  audit.Destination{Host: state.host, Port: state.port, SNI: sni},
-					Decision:     audit.Decision{Verdict: policy.VerdictDeny, Reason: reason},
+					Destination: audit.Destination{
+						Host: state.host, Port: state.port, SNI: sni, OriginalAddress: state.address,
+					},
+					Decision: audit.Decision{Verdict: policy.VerdictDeny, Reason: reason},
 				})
 				return nil, refusal
 			}
@@ -229,7 +234,9 @@ func (s *Server) tlsConfig(state *tunnel) *tls.Config {
 				s.opts.Audit.Emit(audit.Record{
 					ConnectionID: state.connectionID,
 					Scope:        audit.ScopeConnection,
-					Destination:  audit.Destination{Host: state.host, Port: state.port, SNI: sni},
+					Destination: audit.Destination{
+						Host: state.host, Port: state.port, SNI: sni, OriginalAddress: state.address,
+					},
 					Decision: audit.Decision{
 						Verdict: policy.VerdictDeny,
 						Reason:  policy.ReasonCertificateUnavailable,
@@ -294,7 +301,7 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 		ConnectionID: state.connectionID,
 		RequestID:    requestID,
 		Scope:        audit.ScopeRequest,
-		Destination:  audit.Destination{Host: state.sni, Port: state.port, SNI: state.sni},
+		Destination:  audit.Destination{Host: state.sni, Port: state.port, SNI: state.sni, OriginalAddress: state.address},
 		Request:      &audit.RequestInfo{Method: r.Method, Path: r.URL.EscapedPath(), Host: r.Host},
 	}
 	fwd := &forward{host: state.sni, port: state.port, requestID: requestID}
@@ -523,15 +530,17 @@ func isType[E error](err error) bool {
 }
 
 // handlePlain refuses a request that reached the proxy in absolute form
-// over cleartext. Endpoints name HTTPS destinations, so a cleartext request
-// matches none. The deny list still names the more specific reason.
+// over cleartext.
+//
+// The matcher runs before the cleartext rule so that a denied host keeps the
+// more specific reason. Only an allow becomes cleartext_not_forwarded.
 func (s *Server) handlePlain(r *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	requestID := newID()
 	host, port, _ := splitAuthority(r.URL.Host)
 	decision := s.opts.Matcher.Connection(host, port)
 	reason := decision.Reason
 	if decision.Allowed() {
-		reason = policy.ReasonNoMatchingEndpoint
+		reason = policy.ReasonCleartextNotForwarded
 	}
 	s.opts.Audit.Emit(audit.Record{
 		RequestID:   requestID,
@@ -596,7 +605,8 @@ func statusFor(reason policy.Reason) int {
 		// audit record and never a response.
 		return http.StatusInternalServerError
 	case policy.ReasonDenyAlways, policy.ReasonNoMatchingEndpoint, policy.ReasonHostMismatch, policy.ReasonNoSNI,
-		policy.ReasonCredentialUnavailable, policy.ReasonExchangeDenied:
+		policy.ReasonCleartextNotForwarded, policy.ReasonNotRedirected, policy.ReasonCredentialUnavailable,
+		policy.ReasonExchangeDenied:
 		return http.StatusForbidden
 	case policy.ReasonEndpointAllowed:
 		// An allow never reaches this function. The case is here because

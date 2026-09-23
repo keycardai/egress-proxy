@@ -17,6 +17,15 @@ func limitListener(listener net.Listener, maxConnections int, timeout time.Durat
 	return netutil.LimitListener(&idleListener{Listener: listener, timeout: timeout}, maxConnections)
 }
 
+// IdleConn gives a connection the same idle bound the CONNECT frontend
+// applies to its own. The transparent frontend wraps each connection with
+// it after it has read the original destination off the socket, because a
+// wrapper with no way back to the TCP connection hides the getsockopt that
+// reads it.
+func IdleConn(conn net.Conn, timeout time.Duration) net.Conn {
+	return &idleConn{Conn: conn, timeout: timeout}
+}
+
 type idleListener struct {
 	net.Listener
 

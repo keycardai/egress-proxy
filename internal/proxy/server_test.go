@@ -918,9 +918,20 @@ func TestCleartextAndNonProxyRequests(t *testing.T) {
 		wantReason policy.Reason
 	}{
 		{
-			name:       "an absolute-form cleartext request to a listed host",
+			// No endpoint names port 443 on this host, so the matcher
+			// decides this one and the cleartext rule never runs.
+			name:       "an absolute-form cleartext request to a listed host on a port no endpoint covers",
 			raw:        "GET http://" + upstreamHost + "/ok/x HTTP/1.1\r\nHost: " + upstreamHost + "\r\n\r\n",
 			wantStatus: http.StatusForbidden, wantReason: policy.ReasonNoMatchingEndpoint,
+		},
+		{
+			// The authority names an endpoint, so the matcher allows and
+			// the refusal comes from the rule that forwards nothing
+			// cleartext. Only that rule produces this reason here.
+			name: "an absolute-form cleartext request to a listed host and port",
+			raw: "GET http://" + h.upstreamAuthority() + "/ok/x HTTP/1.1\r\nHost: " +
+				h.upstreamAuthority() + "\r\n\r\n",
+			wantStatus: http.StatusForbidden, wantReason: policy.ReasonCleartextNotForwarded,
 		},
 		{
 			name:       "an absolute-form cleartext request to a denied host",

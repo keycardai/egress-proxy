@@ -254,8 +254,9 @@ an upstream that decodes first reads as `/secret`, is rejected with
 
 Two endpoints with the same `host`, `port` and `path_prefix` are rejected.
 The same host and prefix on two ports are two endpoints, not a repeat.
-Endpoints name HTTPS destinations, so a cleartext `http://` request through
-the proxy matches no endpoint and is rejected with `no_matching_endpoint`.
+The proxy forwards nothing cleartext. A cleartext `http://` request is
+rejected with `cleartext_not_forwarded`, and declaring the host on port 80
+does not change that.
 
 #### `endpoints[].credential`
 
@@ -314,7 +315,8 @@ each request inside the tunnel. `connection_id` joins the two records.
 |---|---|---|---|
 | `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never carries an allow. |
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
-| `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. The proxy also uses this reason for every cleartext request. |
+| `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. |
+| `cleartext_not_forwarded` | deny | both | The connection or request carries cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
 | `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
