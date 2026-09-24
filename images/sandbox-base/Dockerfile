@@ -26,8 +26,11 @@ FROM ${BASE_IMAGE}
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 ARG AGENT_USER=agent
-# The volume the sidecar writes its certificate to, mounted read-only here.
-ARG SHARED_CA_FILE=/shared-ca/ca.crt
+# The certificate the sidecar publishes, mounted read-only here. The path
+# is the proxy's own default for ca.out_dir with ca.crt under it. NEVER
+# change one without the other: a pod built from the two defaults has to
+# start.
+ARG SHARED_CA_FILE=/shared-ca/out/ca.crt
 
 ENV DEBIAN_FRONTEND=noninteractive
 

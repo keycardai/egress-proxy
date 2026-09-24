@@ -146,16 +146,24 @@ that:
    and `GIT_SSL_CAINFO` all name one bundle. `NODE_EXTRA_CA_CERTS` names
    the sidecar's certificate directly, because Node bundles its own
    OpenSSL.
-2. `keycard-sandbox-entrypoint` waits for `/shared-ca/ca.crt`, parses it,
-   installs it as a system anchor and runs `update-ca-certificates`. It
-   refuses to start the agent without it. The wait covers a restart that
-   outlives the sidecar's startup probe.
+2. `keycard-sandbox-entrypoint` waits for the file `KEYCARD_CA_FILE`
+   names, parses it, installs it as a system anchor and runs
+   `update-ca-certificates`. It refuses to start the agent without it. The
+   wait covers a restart that outlives the sidecar's startup probe.
 3. The agent uid owns `/usr/local/share/ca-certificates` and
    `/etc/ssl/certs`, so `update-ca-certificates` runs unprivileged.
 
 A variable is set only for a client the image installs. The image installs
 no AWS client, so it sets no `AWS_CA_BUNDLE`. An image built on this one
 that adds a client sets that client's variable itself.
+
+`KEYCARD_CA_FILE` and `NODE_EXTRA_CA_CERTS` default to
+`/shared-ca/out/ca.crt`, which is `ca.out_dir` above with `ca.crt` under
+it. A pod that takes both defaults needs no environment variable of its
+own. Move one and the agent waits for a file the sidecar never writes and
+exits 69, so a pod that sets `ca.out_dir` sets `KEYCARD_CA_FILE` to match.
+`test/images` pins the two paths together by mounting the certificate at
+the published default with no variable set.
 
 The pod mounts `/shared-ca` read-only and the image needs no capability.
 `AGENT_UID`

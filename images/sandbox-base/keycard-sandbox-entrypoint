@@ -12,7 +12,7 @@
 # one whose operator cannot tell a refusal from a misconfiguration.
 set -eu
 
-ca_file=${KEYCARD_CA_FILE:-/shared-ca/ca.crt}
+ca_file=${KEYCARD_CA_FILE:-/shared-ca/out/ca.crt}
 timeout=${KEYCARD_CA_TIMEOUT:-120}
 anchor=${KEYCARD_CA_ANCHOR:-/usr/local/share/ca-certificates/keycard-egress.crt}
 

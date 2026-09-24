@@ -362,9 +362,15 @@ func TestNetsetupImage(t *testing.T) {
 	assert.NotContains(t, version, "nf_tables", "no binary the lane resolves uses the nf_tables backend")
 }
 
+// sharedCAMount is where the lane mounts the certificate the sidecar
+// publishes. It is the proxy's own default for ca.out_dir, and no case
+// sets KEYCARD_CA_FILE, so the entrypoint finding the file is what pins
+// the image default and the published default to one path.
+const sharedCAMount = config.DefaultCAOutDir
+
 // TestSandboxBaseImage builds the base image and drives its entrypoint
-// against a fake /shared-ca, which is what the sidecar mounts in a pod. The
-// cases share one image, so they run one after the other.
+// against a fake ca.out_dir, which is what the sidecar mounts in a pod.
+// The cases share one image, so they run one after the other.
 //
 //nolint:paralleltest,tparallel // the subtests share one image and run in sequence
 func TestSandboxBaseImage(t *testing.T) {
@@ -383,10 +389,10 @@ func TestSandboxBaseImage(t *testing.T) {
 			"--user", "1000:1000", "--cap-drop", "ALL", "--read-only",
 			"--tmpfs", "/tmp", "--tmpfs", "/etc/ssl/certs:uid=1000,gid=1000",
 			"--tmpfs", "/usr/local/share/ca-certificates:uid=1000,gid=1000",
-			"-v", shared+":/shared-ca:ro", image,
-			"/bin/sh", "-c", "openssl verify -CAfile \"$SSL_CERT_FILE\" /shared-ca/ca.crt")
+			"-v", shared+":"+sharedCAMount+":ro", image,
+			"/bin/sh", "-c", "openssl verify -CAfile \"$SSL_CERT_FILE\" "+sharedCAMount+"/ca.crt")
 		assert.Contains(t, out, "the proxy CA is trusted", "the entrypoint says what it did")
-		assert.Contains(t, out, "/shared-ca/ca.crt: OK", "the rebuilt bundle verifies the proxy CA")
+		assert.Contains(t, out, sharedCAMount+"/ca.crt: OK", "the rebuilt bundle verifies the proxy CA")
 	})
 
 	// GIT_SSL_CAINFO names the bundle the entrypoint rebuilt, so git trusts
@@ -419,7 +425,7 @@ func TestSandboxBaseImage(t *testing.T) {
 					"--tmpfs", "/tmp:uid=1000,gid=1000",
 					"--tmpfs", "/etc/ssl/certs:uid=1000,gid=1000",
 					"--tmpfs", "/usr/local/share/ca-certificates:uid=1000,gid=1000",
-					"-v", shared+":/shared-ca:ro", "-v", tc.leaf+":/tls:ro",
+					"-v", shared+":"+sharedCAMount+":ro", "-v", tc.leaf+":/tls:ro",
 					image, "/bin/sh", "-c", gitOverHTTPS).CombinedOutput()
 				if tc.wantErr {
 					require.Error(t, err, "git took a leaf nothing in the bundle signed:\n%s", out)
@@ -437,7 +443,7 @@ func TestSandboxBaseImage(t *testing.T) {
 		defer cancel()
 		wait := exec.CommandContext(ctx, "docker", "run", "--rm",
 			"--user", "1000:1000", "-e", "KEYCARD_CA_TIMEOUT=2",
-			"-v", t.TempDir()+":/shared-ca:ro", image, "/bin/sh", "-c", "echo the agent started")
+			"-v", t.TempDir()+":"+sharedCAMount+":ro", image, "/bin/sh", "-c", "echo the agent started")
 		out, err := wait.CombinedOutput()
 		require.Error(t, err, "the entrypoint started the agent with no certificate:\n%s", out)
 		assert.Contains(t, string(out), "did not appear within 2s", "the refusal says what it waited for")
@@ -484,7 +490,7 @@ git ls-remote https://localhost:8443/repo.git
 `
 
 // httpsFixture writes what the container mounts: the authority the sidecar
-// would publish at /shared-ca, and a leaf for localhost that the server in
+// would publish at ca.out_dir, and a leaf for localhost that the server in
 // the container presents. It returns the two directories.
 func httpsFixture(t *testing.T) (string, string) {
 	t.Helper()
