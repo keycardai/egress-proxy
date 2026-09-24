@@ -177,6 +177,12 @@ so a chart lint can read them out of the image it is about to deploy:
 
     docker run --rm <proxy image> settings
 
+The capability the image holds applies to this subcommand as much as to
+serving: the kernel refuses the execve with `cap_net_bind_service` outside
+the bounding set. Docker's default set has `NET_BIND_SERVICE`, so the
+command above works as written, and a lint that runs the image under
+`drop: ["ALL"]` adds `NET_BIND_SERVICE` back or reads nothing.
+
 Each entry names the `EGRESS_PROXY_` variable, the flag that fills the same
 setting, what it sets, and the value the document parser applies when
 neither is set. A duration default is a JSON number of whole seconds, so
