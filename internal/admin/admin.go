@@ -193,8 +193,9 @@ func (s *Server) stop(ctx context.Context) {
 
 // prepareDir creates the socket's directory and leaves it traversable by the
 // proxy's uid alone. MkdirAll applies dirMode only to a directory it creates,
-// and a directory the container runtime mounted already exists, often at mode
-// 0777, so the mode is set on every start.
+// and a restart finds the one an earlier start left behind, so the mode is
+// set on every start. Only the owner may set it: listen.admin must name a
+// directory this process creates inside a volume, never the mount point.
 func prepareDir(dir string) error {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("admin: create %s: %w", dir, err)

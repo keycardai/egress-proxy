@@ -33,13 +33,21 @@ import (
 )
 
 // Defaults for the process settings.
+//
+// Every default path names a directory inside a mount rather than the mount
+// point. A mount point belongs to root at mode 0777, and the proxy runs as a
+// uid of its own: it sets the mode on the admin socket directory and on
+// ca.out_dir at every start, which only the owner may do. NEVER default one
+// of these to a mount point. The admin socket directory and the receipt
+// directory are also separate, because the proxy takes the first to 0700 and
+// the init container writes the second as root.
 const (
 	DefaultConnect = "127.0.0.1:3128"
 	DefaultAdmin   = "/run/egress/admin/admin.sock"
 	// DefaultCleartextPort is the captured port read as cleartext HTTP when
 	// listen.cleartext_ports is empty.
 	DefaultCleartextPort  = 80
-	DefaultCAOutDir       = "/shared-ca"
+	DefaultCAOutDir       = "/shared-ca/out"
 	DefaultLeafTTL        = 24 * time.Hour
 	DefaultCacheSize      = 1024
 	DefaultMaxConnections = 1024

@@ -30,9 +30,9 @@ identity:
 #   cleartext_ports: [80]               # captured ports use HTTP. Other ports use TLS
 #   admin: "/run/egress/admin/admin.sock" # EGRESS_PROXY_ADMIN; a Unix socket, never a port
 # netsetup:
-#   receipt: "/run/egress/netsetup.json"  # EGRESS_PROXY_NETSETUP_RECEIPT: read when listen.transparent_port is set
+#   receipt: "/run/egress/netsetup/netsetup.json" # EGRESS_PROXY_NETSETUP_RECEIPT: read when listen.transparent_port is set
 # ca:
-#   out_dir: "/shared-ca"               # EGRESS_PROXY_CA_OUT_DIR; receives ca.crt and nothing else
+#   out_dir: "/shared-ca/out"           # EGRESS_PROXY_CA_OUT_DIR; receives ca.crt and nothing else
 #   state_dir: ""                       # EGRESS_PROXY_CA_STATE_DIR; a memory-backed volume holding the CA across restarts
 #   leaf_ttl: "24h"                     # EGRESS_PROXY_LEAF_TTL
 #   cache_size: 1024                    # EGRESS_PROXY_CACHE_SIZE

@@ -55,12 +55,21 @@ process.
 | Path | Setting | What it is |
 |---|---|---|
 | the document | `--config`, `EGRESS_PROXY_CONFIG` | The configuration document, read once at start-up, read-only. |
-| `/shared-ca` | `ca.out_dir` | Where the proxy writes `ca.crt`. The workload reads the same volume and trusts that file. It holds the certificate and nothing else. |
+| `/shared-ca/out` | `ca.out_dir` | Where the proxy writes `ca.crt`. The workload reads the same volume and trusts that file. It holds the certificate and nothing else. |
 | the CA state directory | `ca.state_dir` | Where the CA key is held across restarts. It must be memory-backed, and the proxy refuses to start when it is not. NEVER mount it into another container, and NEVER place it under `ca.out_dir`. |
-| `/run/egress/admin.sock` | `listen.admin` | The admin socket. The proxy sets its directory to mode 0700 on every start and refuses to start when the directory does not end up at that mode. |
-| `/run/egress/netsetup.json` | `netsetup.receipt` | What the init container recorded. The proxy reads it and refuses to serve a transparent frontend without it. |
+| `/run/egress/admin/admin.sock` | `listen.admin` | The admin socket. The proxy sets its directory to mode 0700 on every start and refuses to start when the directory does not end up at that mode. |
+| `/run/egress/netsetup/netsetup.json` | `netsetup.receipt` | What the init container recorded. The proxy reads it and refuses to serve a transparent frontend without it. |
 | the projected token | `identity.workload_token_file` | The ServiceAccount token the exchange authenticates with, when the document names workload identity. |
 | the client secret | `identity.client_secret_file` | The application credential secret, when the document names one. It must be readable by its owner alone. |
+
+Every path the proxy sets a mode on is a directory inside a volume, never
+the mount point. The kubelet creates a mount point owned by root at mode
+0777, and the proxy runs as a uid of its own, so a chmod of the mount point
+fails with EPERM and the sidecar never starts. Mount the volume and let the
+proxy create `out` and `admin` under it. The receipt directory is separate
+from the admin socket directory: the proxy takes the admin socket directory
+to 0700, and the init container writes the receipt as root into a directory
+the proxy has to traverse.
 
 Whether the workload can also read the token, the secret or the CA key is a
 property of the pod. The chart lint decides it.

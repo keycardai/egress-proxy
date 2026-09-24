@@ -162,7 +162,7 @@ duration default is a whole number of seconds, so `--leaf-ttl` publishes
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `receipt` | `/run/egress/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it only when `listen.transparent_port` is set. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. |
+| `receipt` | `/run/egress/netsetup/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it only when `listen.transparent_port` is set. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. Keep it out of the admin socket directory, which the proxy takes to mode 0700. |
 
 The proxy reads the receipt before it serves requests. It refuses to start if
 the active rules differ from the receipt: the rules were not verified, the
@@ -184,7 +184,7 @@ environment variables, so the pod spec shows the whole ruleset.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `out_dir` | `/shared-ca` | `--ca-out-dir`, `EGRESS_PROXY_CA_OUT_DIR` | The directory where the proxy writes `ca.crt` before it listens. The file has mode 0644, and the directory has mode 0755. The workload mounts the directory read-only and installs the file. The directory contains only the certificate. |
+| `out_dir` | `/shared-ca/out` | `--ca-out-dir`, `EGRESS_PROXY_CA_OUT_DIR` | The directory where the proxy writes `ca.crt` before it listens. The file has mode 0644, and the directory has mode 0755. The proxy sets that mode at every start, so this must be a directory the proxy creates inside the shared volume rather than the mount point, which belongs to root. The workload mounts the volume read-only and installs the file. The directory holds only the certificate. |
 | `state_dir` | unset | `--ca-state-dir`, `EGRESS_PROXY_CA_STATE_DIR` | The directory that stores the CA key and certificate across a restart. This keeps the same authority that a running workload already trusts. The path must use a memory-backed volume, such as `emptyDir` with `medium: Memory`. The process checks that the directory uses tmpfs, rejects other file systems, and rejects a path that overlaps `out_dir`. When unset, the proxy keeps the authority only in memory. A restart then creates a new authority. Linux only. |
 | `leaf_ttl` | `24h` | `--leaf-ttl`, `EGRESS_PROXY_LEAF_TTL` | How long a minted leaf certificate stays valid. A leaf never outlives the authority, which lives for 30 days. |
 | `cache_size` | `1024` | `--cache-size`, `EGRESS_PROXY_CACHE_SIZE` | The number of minted leaf certificates that the proxy keeps. The proxy uses an LRU keyed by server name. |

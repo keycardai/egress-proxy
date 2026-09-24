@@ -52,8 +52,10 @@ const (
 	// DefaultReceiptPath is where the init container writes what it
 	// programmed and where the sidecar reads it. It is on an emptyDir with
 	// medium Memory that the two containers share and the workload does not
-	// mount.
-	DefaultReceiptPath = "/run/egress/netsetup.json"
+	// mount. It is a directory of its own inside that volume: the init
+	// container writes it as root, and the proxy takes the admin socket
+	// directory next to it to mode 0700.
+	DefaultReceiptPath = "/run/egress/netsetup/netsetup.json"
 )
 
 // maxMultiportPorts is the number of ports one multiport match accepts. The

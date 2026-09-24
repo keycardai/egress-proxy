@@ -31,8 +31,8 @@ func TestParseAppliesDefaults(t *testing.T) {
 		// Zero disables the transparent frontend.
 		{"listen.transparent_port", cfg.Listen.TransparentPort, 0},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
-		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup.json"},
-		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca"},
+		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup/netsetup.json"},
+		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca/out"},
 		{"ca.state_dir", cfg.CA.StateDir, ""},
 		{"ca.leaf_ttl", cfg.CA.LeafTTL.Duration(), 24 * time.Hour},
 		{"ca.cache_size", cfg.CA.CacheSize, 1024},

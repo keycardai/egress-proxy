@@ -33,7 +33,7 @@ stderr 'name one route: healthz, readyz, info'
 # values a pod has to match are there too.
 exec egress-proxy settings
 stdout '"env": "EGRESS_PROXY_ADMIN"'
-stdout '"default": "/run/egress/admin.sock"'
+stdout '"default": "/run/egress/admin/admin.sock"'
 stdout '"proxy_uid": 1337'
 stdout '"redirect_port": 1015'
 stdout '"subcommand": "probe"'
