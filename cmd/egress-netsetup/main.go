@@ -3,11 +3,22 @@
 // It runs as an init container with NET_ADMIN and SETPCAP, gives both up
 // once the rules are in place, and exits.
 //
-// Re-running it installs the same rules rather than a second copy: each
-// chain it owns is flushed before it is refilled, and each OUTPUT jump is
+// A run that puts the whole ruleset in force writes a receipt, a JSON file on
+// the emptyDir that the init container and the sidecar are intended to share.
+// It names the proxy uid, the redirect port, the capture ports and the families
+// programmed, a digest of the ruleset, and whether CAP_NET_ADMIN went. The
+// sidecar runs without that capability and cannot read the tables, so the
+// receipt is how it checks its own containment against rules it has no way to
+// see. netsetup.Receipt holds the format and what makes the file trustworthy.
+//
+// Re-running installs the same rules rather than a second copy: each chain
+// it owns is flushed before it is refilled, and each OUTPUT jump is
 // appended only when it is absent. A run that fails part way leaves the
 // chains stricter than the finished ruleset, never looser, unlinks the
 // receipt and exits non-zero.
+//
+// --dry-run prints the ruleset and --verify reads the tables back. Neither
+// writes the receipt.
 package main
 
 import (
@@ -27,7 +38,7 @@ import (
 )
 
 func main() {
-	if err := command(os.Stdout).Run(context.Background(), os.Args); err != nil {
+	if err := command(os.Stdout, nil).Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "egress-netsetup: %v\n", err)
 		os.Exit(1)
 	}
@@ -51,13 +62,31 @@ type settings struct {
 	keepNetAdmin bool
 }
 
+// opener resolves the handle and the binary for one address family. A nil
+// opener uses the real iptables binary, which is what every caller outside
+// a test passes.
+type opener func(ctx context.Context, family netsetup.Family, override string) (netsetup.Tables, netsetup.Tool, error)
+
+// openTables resolves the legacy iptables binary for a family.
+//
+//nolint:ireturn // the interface is the seam a test substitutes a recorded ruleset at
+func openTables(ctx context.Context, family netsetup.Family, override string) (netsetup.Tables, netsetup.Tool, error) {
+	return netsetup.Open(ctx, family, override) //nolint:wrapcheck // eachFamily names the family that failed
+}
+
 // command builds the command line.
 //
 // NEVER give a flag here an environment variable source. An init container's
 // settings are its arguments, so a manifest review reads the whole ruleset
-// off the pod spec.
-func command(out io.Writer) *cli.Command {
+// off the pod spec. A variable can take its value from a ConfigMap or Secret
+// the spec only references, and envFrom imports every key from one without
+// the spec naming any of them. Source:
+// https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
+func command(out io.Writer, open opener) *cli.Command {
 	var opts settings
+	if open == nil {
+		open = openTables
+	}
 	return &cli.Command{
 		Name:  "egress-netsetup",
 		Usage: "programs the sandbox egress rules with iptables-legacy",
@@ -68,7 +97,9 @@ func command(out io.Writer) *cli.Command {
 		HideVersion:     true,
 		HideHelpCommand: true,
 		Flags:           flagSet(&opts),
-		Action:          func(ctx context.Context, cmd *cli.Command) error { return run(ctx, cmd, opts, out) },
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			return run(ctx, cmd, opts, open, out)
+		},
 	}
 }
 
@@ -76,23 +107,41 @@ func command(out io.Writer) *cli.Command {
 // from the tables.
 var errUsage = errors.New("egress-netsetup")
 
-func run(ctx context.Context, cmd *cli.Command, opts settings, out io.Writer) error {
+func run(ctx context.Context, cmd *cli.Command, opts settings, open opener, out io.Writer) error {
 	if cmd.Args().Len() > 0 {
 		return fmt.Errorf("%w: unexpected argument %q", errUsage, cmd.Args().First())
+	}
+	if err := opts.validate(); err != nil {
+		return err
 	}
 	cfg, err := opts.config(out)
 	if err != nil {
 		return err
 	}
-	if opts.dryRun {
+	switch {
+	case opts.dryRun:
 		return dryRun(cfg, out)
+	case opts.verifyOnly:
+		return verify(ctx, cfg, opts, open, out)
 	}
 	// NEVER let a failure past this point leave an earlier run's receipt in
 	// place. The receipt is the sidecar's only evidence of its own
 	// containment, and one written before the rules were flushed says they
 	// are in force when they are not.
-	if err := program(ctx, cfg, opts, out); err != nil {
+	if err := program(ctx, cfg, opts, open, out); err != nil {
 		return errors.Join(err, netsetup.RemoveReceipt(opts.receipt))
+	}
+	return nil
+}
+
+// validate rejects a command line that asks for two different runs.
+func (s settings) validate() error {
+	if s.dryRun && s.verifyOnly {
+		return fmt.Errorf("%w: --dry-run prints the ruleset and --verify reads the tables back. Give one",
+			errUsage)
+	}
+	if s.verifyOnly && s.keepNetAdmin {
+		return fmt.Errorf("%w: --verify drops no capability, so --keep-net-admin has nothing to keep", errUsage)
 	}
 	return nil
 }
@@ -140,34 +189,72 @@ func dryRun(cfg netsetup.Config, out io.Writer) error {
 	return nil
 }
 
-// program applies and verifies the ruleset on every family, gives up
-// CAP_NET_ADMIN and writes the receipt. Every failure it returns leaves the
-// receipt to be unlinked by the caller.
-func program(ctx context.Context, cfg netsetup.Config, opts settings, out io.Writer) error {
+// eachFamily opens the tool for every family the configuration programs and
+// runs action against it. It returns the rulesets it built, in family order.
+func eachFamily(
+	ctx context.Context,
+	cfg netsetup.Config,
+	opts settings,
+	open opener,
+	out io.Writer,
+	action func(handle netsetup.Tables, built netsetup.Program) error,
+) ([]netsetup.Program, error) {
 	programs := make([]netsetup.Program, 0, len(cfg.Families()))
 	for _, family := range cfg.Families() {
 		built, err := cfg.Program(family)
 		if err != nil {
-			return fmt.Errorf("netsetup: %w", err)
+			return nil, fmt.Errorf("netsetup: %w", err)
 		}
 		programs = append(programs, built)
 		override := opts.iptables
 		if family == netsetup.FamilyIPv6 {
 			override = opts.ip6tables
 		}
-		handle, tool, err := netsetup.Open(ctx, family, override)
+		handle, tool, err := open(ctx, family, override)
 		if err != nil {
-			return fmt.Errorf("netsetup: %w", err)
+			return nil, fmt.Errorf("netsetup: %w", err)
 		}
 		fmt.Fprintf(out, "# %s: %s (%s)\n", family, tool.Path, tool.Version)
-		if !opts.verifyOnly {
+		if err := action(handle, built); err != nil {
+			return nil, fmt.Errorf("netsetup: %w", err)
+		}
+	}
+	return programs, nil
+}
+
+// verify reads the tables back on every family and reports whether the
+// ruleset this command line describes is in force.
+//
+// NEVER let it write the receipt or drop a capability. A --verify run
+// programs nothing, so a receipt it wrote would give the sidecar evidence of
+// a containment this process never established, and one written here would
+// replace a receipt that correctly says CAP_NET_ADMIN is still held.
+func verify(ctx context.Context, cfg netsetup.Config, opts settings, open opener, out io.Writer) error {
+	programs, err := eachFamily(ctx, cfg, opts, open, out,
+		func(handle netsetup.Tables, built netsetup.Program) error {
+			return netsetup.Verify(handle, built, out)
+		})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "# --verify: the ruleset is in force: %s. Nothing was written\n",
+		netsetup.RulesetDigest(programs))
+	return nil
+}
+
+// program applies and verifies the ruleset on every family, gives up
+// CAP_NET_ADMIN and writes the receipt. Every failure it returns leaves the
+// receipt to be unlinked by the caller.
+func program(ctx context.Context, cfg netsetup.Config, opts settings, open opener, out io.Writer) error {
+	programs, err := eachFamily(ctx, cfg, opts, open, out,
+		func(handle netsetup.Tables, built netsetup.Program) error {
 			if err := netsetup.Apply(handle, built, out); err != nil {
-				return fmt.Errorf("netsetup: %w", err)
+				return err //nolint:wrapcheck // eachFamily names the family that failed
 			}
-		}
-		if err := netsetup.Verify(handle, built, out); err != nil {
-			return fmt.Errorf("netsetup: %w", err)
-		}
+			return netsetup.Verify(handle, built, out)
+		})
+	if err != nil {
+		return err
 	}
 	receipt := netsetup.NewReceipt(cfg, programs, true, time.Now())
 	if err := dropNetAdmin(opts.keepNetAdmin, &receipt, out); err != nil {
@@ -345,7 +432,8 @@ func flagSet(opts *settings) []cli.Flag {
 		},
 		&cli.BoolFlag{
 			Name: "verify", Destination: &opts.verifyOnly,
-			Usage: "read the tables back and confirm the ruleset is in force, without applying anything",
+			Usage: "read the tables back and confirm the ruleset is in force; " +
+				"writes no receipt, drops no capability and applies nothing",
 		},
 		&cli.BoolFlag{
 			Name: "keep-net-admin", Destination: &opts.keepNetAdmin,
