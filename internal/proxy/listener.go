@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -69,6 +70,19 @@ func (c *idleConn) Write(p []byte) (int, error) {
 
 func (c *idleConn) SetDeadline(t time.Time) error {
 	return errors.Join(c.SetReadDeadline(t), c.SetWriteDeadline(t))
+}
+
+// CloseWrite half-closes the connection, telling the peer this side has
+// finished writing. net.Conn has no CloseWrite, so embedding the interface
+// hides the one *net.TCPConn defines. This forward puts it back. A
+// connection with no half-close, such as a pipe, reports
+// errors.ErrUnsupported.
+func (c *idleConn) CloseWrite() error {
+	closer, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return fmt.Errorf("%w: %T has no CloseWrite", errors.ErrUnsupported, c.Conn)
+	}
+	return closer.CloseWrite() //nolint:wrapcheck // net.Conn errors are read by type
 }
 
 func (c *idleConn) SetReadDeadline(t time.Time) error {

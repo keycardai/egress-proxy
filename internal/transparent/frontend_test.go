@@ -152,6 +152,25 @@ func TestTheFrontendRecoversWhatAConnectionWasOpenedTo(t *testing.T) {
 			wantRefusal: policy.ReasonCleartextNotForwarded,
 		},
 		{
+			// The frontend records the name byte for byte, so the host it
+			// decides against is the host the TLS termination derives from
+			// the same ClientHello. Stripping a bracket that has no pair
+			// would make the two disagree.
+			name:     "a TLS connection naming a server that ends in a stray bracket",
+			original: "192.0.2.77:443", head: clientHello(t, &tls.Config{
+				ServerName: "upstream.test]", MinVersion: tls.VersionTLS12,
+			}),
+			wantHost: "upstream.test]", wantPort: 443,
+		},
+		{
+			// A matched pair is still removed, so a bracketed IPv6 literal
+			// is the address the connection was opened to.
+			name:     "a cleartext connection naming a bracketed IPv6 literal",
+			original: "[2001:db8::1]:80",
+			head:     []byte("GET /p HTTP/1.1\r\nHost: [2001:db8::1]\r\n\r\n"),
+			wantHost: "2001:db8::1", wantPort: 80, wantClear: true,
+		},
+		{
 			name:     "a connection opened to the listener rather than redirected into it",
 			original: "", head: hello,
 			wantRefusal: policy.ReasonNotRedirected,
@@ -309,5 +328,67 @@ func waitConn(t *testing.T, handed <-chan net.Conn) net.Conn {
 	case <-time.After(10 * time.Second):
 		require.FailNow(t, "the frontend handed on no connection")
 		return nil
+	}
+}
+
+// TestARefusalReachesAClientThatIsStillSending drives the orderly close the
+// frontend makes on a refusal, through a real TCP connection with unread
+// data in its receive buffer. Closing such a socket sends RST, and the RST
+// discards whatever was written to it, which on a refusal is the reason the
+// workload was meant to read.
+func TestARefusalReachesAClientThatIsStillSending(t *testing.T) {
+	t.Parallel()
+	const refusal = "HTTP/1.1 403 Forbidden\r\n" +
+		"X-Keycard-Deny-Reason: no_matching_endpoint\r\nContent-Length: 0\r\n\r\n"
+	drained := make(chan bool, 1)
+	front, err := transparent.New(transparent.Options{
+		MaxConnections: 4,
+		IdleTimeout:    30 * time.Second,
+		PeekTimeout:    2 * time.Second,
+		CleartextPorts: []int{80},
+		OriginalDst: func(net.Conn) (netip.AddrPort, error) {
+			return netip.MustParseAddrPort("192.0.2.77:80"), nil
+		},
+		Handler: func(conn net.Conn, _ proxy.Redirected) {
+			drainer, drains := conn.(interface{ DrainOnClose() })
+			if drains {
+				drainer.DrainOnClose()
+			}
+			_, _ = io.WriteString(conn, refusal)
+			_ = conn.Close()
+			drained <- drains
+		},
+	})
+	require.NoError(t, err, "build the frontend")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	var group errgroup.Group
+	group.Go(func() error { return front.Serve(ctx, listener) })
+	t.Cleanup(func() {
+		cancel()
+		assert.NoError(t, group.Wait(), "Serve after cancellation")
+	})
+
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	require.NoError(t, err, "dial the frontend")
+	t.Cleanup(func() { _ = conn.Close() })
+	// The head names the destination, then a body the proxy never reads
+	// leaves the receive buffer non-empty at the close.
+	_, err = io.WriteString(conn, "POST /p HTTP/1.1\r\nHost: upstream.test\r\nContent-Length: 65536\r\n\r\n")
+	require.NoError(t, err, "send the request head")
+	_, err = conn.Write(make([]byte, 64<<10))
+	require.NoError(t, err, "send a body the proxy never reads")
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)), "deadline on the read")
+	got, err := io.ReadAll(conn)
+	require.NoError(t, err, "the refusal arrives without a reset")
+	assert.Equal(t, refusal, string(got), "the whole refusal reached the client")
+
+	select {
+	case drains := <-drained:
+		assert.True(t, drains, "the frontend hands on a connection that can close in order")
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the frontend handed on no connection")
 	}
 }

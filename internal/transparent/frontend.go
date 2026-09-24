@@ -11,7 +11,6 @@ import (
 	"net/netip"
 	"runtime/debug"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -118,6 +117,9 @@ func New(options Options) (*Frontend, error) {
 // does not receive, so a frontend that cannot accept leaves the workload
 // contained rather than free.
 func (f *Frontend) Serve(ctx context.Context, listener net.Listener) error {
+	// The listener is closed on every return, not only on cancellation, so an
+	// accept that failed for its own reason does not leave the socket bound.
+	defer func() { _ = listener.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	defer stop()
 	var reading sync.WaitGroup
@@ -276,13 +278,25 @@ func (f *Frontend) name(ctx context.Context, reader *bufio.Reader, cleartext boo
 func splitAuthority(authority string, defaultPort int) (string, int, bool) {
 	host, rawPort, err := net.SplitHostPort(authority)
 	if err != nil {
-		return strings.Trim(authority, "[]"), defaultPort, true
+		return unbracket(authority), defaultPort, true
 	}
 	port, err := strconv.Atoi(rawPort)
 	if err != nil || port < 1 || port > 65535 {
 		return "", 0, false
 	}
 	return host, port, true
+}
+
+// unbracket removes the brackets around an IPv6 literal. Only a matched pair
+// is removed, so the host the frontend decides against is the host the TLS
+// termination derives from the same bytes. NEVER strip one bracket without
+// the other: the two would then disagree about the destination, and the
+// decision would be recorded against a name the handshake never saw.
+func unbracket(authority string) string {
+	if len(authority) >= 2 && authority[0] == '[' && authority[len(authority)-1] == ']' {
+		return authority[1 : len(authority)-1]
+	}
+	return authority
 }
 
 // sameAddress reports whether a recovered destination is the address the
