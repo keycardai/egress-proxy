@@ -58,9 +58,10 @@ type fakeZone struct {
 func newZone(t *testing.T, front http.HandlerFunc) *fakeZone {
 	t.Helper()
 	fixture := fakeas.New(fakeas.Options{
-		Credentials:   map[string]string{resource: granted},
-		ClientSecrets: map[string]string{clientID: clientSecret},
-		Namespace:     namespace,
+		Credentials:      map[string]string{resource: granted},
+		ClientSecrets:    map[string]string{clientID: clientSecret},
+		AssertionClients: []string{clientID},
+		Namespace:        namespace,
 	})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front != nil && r.URL.Path == fakeas.TokenPath {
@@ -92,22 +93,29 @@ func (z *fakeZone) source(t *testing.T, adjust ...func(*exchange.Options)) *exch
 	return source
 }
 
-// workloadIdentity switches a source onto the projected token for subject.
-func workloadIdentity(t *testing.T, subject string) func(*exchange.Options) {
+// workloadIdentity switches a source onto the projected token for subject. It
+// also returns the token file path, so a test can rotate or break the file.
+func workloadIdentity(t *testing.T, subject string) (func(*exchange.Options), string) {
 	t.Helper()
 	path := tokenFile(t, subject)
 	return func(o *exchange.Options) {
 		o.ClientSecret = ""
 		o.WorkloadTokenFile = path
-	}
+	}, path
 }
 
 // tokenFile writes a projected token whose sub is subject and returns its
 // path.
 func tokenFile(t *testing.T, subject string) string {
 	t.Helper()
+	return writeToken(t, unsignedJWT(t, subject))
+}
+
+// writeToken writes content to a token file and returns its path.
+func writeToken(t *testing.T, content string) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "token")
-	require.NoError(t, os.WriteFile(path, []byte(unsignedJWT(t, subject)), 0o600), "write the token file")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600), "write the token file")
 	return path
 }
 
@@ -138,12 +146,17 @@ func TestTheWireForm(t *testing.T) {
 		wantAbsent []string
 		// wantActor is the ServiceAccount that the zone reads from the assertion.
 		wantActor string
+		// wantBasic reports whether the request must carry basic credentials.
+		// The form alone cannot tell the mechanisms apart, because client_id is
+		// the same value in both.
+		wantBasic bool
 	}{
 		{
 			name: "workload identity sends the projected token as a client assertion",
 			adjust: func(t *testing.T) func(*exchange.Options) {
 				t.Helper()
-				return workloadIdentity(t, serviceAccount)
+				apply, _ := workloadIdentity(t, serviceAccount)
+				return apply
 			},
 			//nolint:gosec // G101: protocol URNs, not credentials
 			wantForm: map[string]string{
@@ -159,6 +172,8 @@ func TestTheWireForm(t *testing.T) {
 			},
 			wantAbsent: []string{"actor_token", "actor_token_type", "client_secret", "scope", "audience"},
 			wantActor:  serviceAccount,
+			// RFC 6749 section 2.3: a client sends one authentication method.
+			wantBasic: false,
 		},
 		{
 			name: "a client secret authenticates with basic credentials and no assertion",
@@ -175,6 +190,7 @@ func TestTheWireForm(t *testing.T) {
 				"client_assertion", "client_assertion_type", "client_secret", "client_id",
 				"actor_token", "actor_token_type", "scope", "audience",
 			},
+			wantBasic: true,
 		},
 	}
 	for _, tc := range tests {
@@ -202,6 +218,7 @@ func TestTheWireForm(t *testing.T) {
 			}
 			assert.Len(t, form, len(tc.wantForm), "the form holds exactly the parameters pinned above")
 			assert.Equal(t, clientID, requests[0].ClientID, "the client the zone authenticated")
+			assert.Equal(t, tc.wantBasic, requests[0].HasBasic, "basic credentials on the request")
 			assert.Equal(t, tc.wantActor, requests[0].Actor, "the acting ServiceAccount")
 			assert.Equal(t, user, requests[0].Subject, "the impersonated user")
 		})
@@ -221,7 +238,9 @@ func substituteUser(t *testing.T, subject string) string {
 // TestFailuresAreTwoClasses records the reason for each failure. A zone
 // policy refusal is exchange_denied. Every other failure is exchange_failed.
 // Each case points the source at the fixture, so the exchange count says
-// whether the zone was asked for a token.
+// whether the zone was asked for a token. A case that breaks the projected
+// token wants zero exchanges: an unreadable token must deny rather than post
+// a request the client did not authenticate.
 func TestFailuresAreTwoClasses(t *testing.T) {
 	t.Parallel()
 
@@ -232,6 +251,12 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 		// tokenSubject selects workload identity and sets this subject in the
 		// projected token.
 		tokenSubject string
+		// clientID overrides the application credential that the source names.
+		clientID string
+		// breakToken damages the projected token after New has read it, so the
+		// failure comes from the exchange and not from start-up. It selects
+		// workload identity on its own.
+		breakToken func(t *testing.T, path string)
 		// stall holds the token endpoint open until the case ends, so only
 		// the budget can end the exchange.
 		stall bool
@@ -243,6 +268,8 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 		timeout     time.Duration
 		resource    string
 		wantErr     error
+		// wantMessage names the failure in the error text. Empty checks no text.
+		wantMessage string
 		// wantExchange is the number of token requests the fixture recorded.
 		wantExchange int
 	}{
@@ -265,6 +292,44 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			// authenticate, so the zone did not read policy.
 			wantErr:      credential.ErrExchangeFailed,
 			wantExchange: 1,
+		},
+		{
+			name:         "the zone does not know the client that the assertion names",
+			tokenSubject: serviceAccount,
+			clientID:     "not-an-application-credential",
+			// invalid_client is not a policy denial.
+			wantErr:      credential.ErrExchangeFailed,
+			wantExchange: 1,
+		},
+		{
+			name: "the kubelet removed the projected token",
+			breakToken: func(t *testing.T, path string) {
+				t.Helper()
+				require.NoError(t, os.Remove(path), "remove the token file")
+			},
+			wantErr:      credential.ErrExchangeFailed,
+			wantMessage:  "reading token file",
+			wantExchange: 0,
+		},
+		{
+			name: "the projected token is empty",
+			breakToken: func(t *testing.T, path string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(path, nil, 0o600), "truncate the token file")
+			},
+			wantErr:      credential.ErrExchangeFailed,
+			wantMessage:  "token file is empty",
+			wantExchange: 0,
+		},
+		{
+			name: "the projected token holds only whitespace",
+			breakToken: func(t *testing.T, path string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(path, []byte(" \n\t\n"), 0o600), "blank the token file")
+			},
+			wantErr:      credential.ErrExchangeFailed,
+			wantMessage:  "token file is empty",
+			wantExchange: 0,
 		},
 		{
 			name:         "discovery finds no metadata",
@@ -301,16 +366,15 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			// Closing the listener waits for the stalled handler, so let it
 			// go first. Cleanups run in reverse order of registration.
 			t.Cleanup(func() { close(release) })
-			adjust := []func(*exchange.Options){func(o *exchange.Options) {
-				if tc.secret != "" {
-					o.ClientSecret = tc.secret
-				}
-				o.Timeout = tc.timeout
-			}}
-			if tc.tokenSubject != "" {
-				adjust = append(adjust, workloadIdentity(t, tc.tokenSubject))
+			adjust := []func(*exchange.Options){overrideClient(tc.secret, tc.clientID, tc.timeout)}
+			apply, tokenPath := workloadFor(t, tc.tokenSubject, tc.breakToken != nil)
+			if apply != nil {
+				adjust = append(adjust, apply)
 			}
 			source := zone.source(t, adjust...)
+			if tc.breakToken != nil {
+				tc.breakToken(t, tokenPath)
+			}
 			if tc.unreachable {
 				zone.stop()
 			}
@@ -324,8 +388,38 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			require.ErrorIs(t, err, tc.wantErr, "the failure class")
 			assert.Empty(t, value, "a failed exchange yields no credential")
 			assert.Len(t, zone.server.Requests(), tc.wantExchange, "token requests the zone recorded")
+			if tc.wantMessage != "" {
+				require.ErrorContains(t, err, tc.wantMessage, "the message names the failure")
+			}
 		})
 	}
+}
+
+// overrideClient applies the per-case client authentication and budget. An
+// empty value keeps what the fixture set.
+func overrideClient(secret, clientID string, timeout time.Duration) func(*exchange.Options) {
+	return func(o *exchange.Options) {
+		if secret != "" {
+			o.ClientSecret = secret
+		}
+		if clientID != "" {
+			o.ClientID = clientID
+		}
+		o.Timeout = timeout
+	}
+}
+
+// workloadFor selects workload identity when a case names a token subject or
+// breaks the token file. It returns a nil adjuster for a client secret case.
+func workloadFor(t *testing.T, subject string, breaks bool) (func(*exchange.Options), string) {
+	t.Helper()
+	if subject == "" && !breaks {
+		return nil, ""
+	}
+	if subject == "" {
+		subject = serviceAccount
+	}
+	return workloadIdentity(t, subject)
 }
 
 // newZoneWithoutMetadata answers discovery with 404 and leaves the token
@@ -573,6 +667,8 @@ func TestADeniedZoneAddressIsNotDialed(t *testing.T) {
 func TestNewRefusals(t *testing.T) {
 	t.Parallel()
 	present := tokenFile(t, serviceAccount)
+	empty := writeToken(t, "")
+	blank := writeToken(t, " \n\t\n")
 
 	tests := []struct {
 		name string
@@ -596,7 +692,24 @@ func TestNewRefusals(t *testing.T) {
 		{
 			name:    "a workload token file that is not there",
 			opts:    exchange.Options{ImpersonateUser: user, WorkloadTokenFile: filepath.Join(t.TempDir(), "absent")},
-			wantErr: "token file",
+			wantErr: "no such file",
+		},
+		{
+			// A read of a non-regular file can block past the exchange budget,
+			// so New refuses the path before it reads anything.
+			name:    "a workload token file that is not a regular file",
+			opts:    exchange.Options{ImpersonateUser: user, WorkloadTokenFile: t.TempDir()},
+			wantErr: "it is not a regular file",
+		},
+		{
+			name:    "a workload token file that is empty",
+			opts:    exchange.Options{ImpersonateUser: user, WorkloadTokenFile: empty},
+			wantErr: "token file is empty",
+		},
+		{
+			name:    "a workload token file that holds only whitespace",
+			opts:    exchange.Options{ImpersonateUser: user, WorkloadTokenFile: blank},
+			wantErr: "token file is empty",
 		},
 		{
 			name:    "no user to impersonate",
@@ -679,11 +792,8 @@ func TestDescribeNamesTheSourceAndNoSecret(t *testing.T) {
 func TestTheWorkloadTokenIsReadOnEveryExchange(t *testing.T) {
 	t.Parallel()
 	zone := newZone(t, nil)
-	path := tokenFile(t, serviceAccount)
-	source := zone.source(t, func(o *exchange.Options) {
-		o.ClientSecret = ""
-		o.WorkloadTokenFile = path
-	})
+	apply, path := workloadIdentity(t, serviceAccount)
+	source := zone.source(t, apply)
 
 	_, err := source.Credential(t.Context(), resource)
 	require.NoError(t, err, "the first exchange")

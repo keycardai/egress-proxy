@@ -50,10 +50,18 @@ grep 'exchange client=acceptance-app-credential actor="system:serviceaccount:age
 
 sigterm
 wait proxy
+
+# The process announces the mechanism on every start without the token.
+stderr '"msg":"credential source"'
+stderr 'authenticated by the workload token at'
+! stderr $SA_TOKEN
+
 audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
 
-# The token does not appear in the audit stream or the log.
-! stdout 'system:serviceaccount'
+# Neither the projected token nor the zone-issued credential appears in the
+# audit stream or the log.
+! stdout $SA_TOKEN
+! stdout 'zone-issued-sekrit'
 ! stderr 'zone-issued-sekrit'
 
 # The zone refuses a proxy that names a user different from the pod's

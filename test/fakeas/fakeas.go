@@ -3,7 +3,8 @@
 // the proxy posts, applies the impersonation rule from the zone policy, and
 // keeps every request for tests to read.
 //
-// It authenticates clients with client_secret_basic or a client assertion.
+// It authenticates clients with client_secret_basic or a client assertion, and
+// refuses a request that sends both.
 //
 // It does not verify signatures. Use it as a fixture, not as a zone. The
 // cluster lane exercises the real zone.
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -64,8 +66,11 @@ type Options struct {
 	// The default is "agents".
 	Namespace string
 	// ClientSecrets maps each client ID to its client_secret_basic secret. An
-	// empty map accepts only a client assertion.
+	// empty map accepts no client secret.
 	ClientSecrets map[string]string
+	// AssertionClients lists the client IDs that may authenticate with a client
+	// assertion. An empty slice accepts no assertion.
+	AssertionClients []string
 }
 
 // Request contains one token request as the server read it.
@@ -79,6 +84,9 @@ type Request struct {
 	// Actor is the subject of the client assertion. It is empty when the
 	// request uses a client secret.
 	Actor string
+	// HasBasic reports whether the request carried an Authorization header with
+	// basic credentials.
+	HasBasic bool
 	// Subject is the user named by the substitute-user token.
 	Subject string
 	// Error is the OAuth error code that the server returned. It is empty for a
@@ -146,6 +154,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	record := Request{
 		Form:     r.PostForm,
 		ClientID: r.PostForm.Get("client_id"),
+		HasBasic: hasBasic,
 		Subject:  claimSub(r.PostForm.Get("subject_token")),
 	}
 	if hasBasic {
@@ -155,7 +164,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		record.Actor = claimSub(r.PostForm.Get("client_assertion"))
 	}
 
-	value, refusal := s.issue(record, basicSecret, hasBasic)
+	value, refusal := s.issue(record, basicSecret)
 	if refusal != nil {
 		record.Error = refusal.Code
 	}
@@ -197,8 +206,8 @@ func requestShape(r *http.Request) *denial {
 
 // issue checks client authentication, the grant shape, the impersonation rule,
 // and the resource grant before it returns the credential.
-func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *denial) {
-	if refusal := s.authenticate(record, secret, hasBasic); refusal != nil {
+func (s *Server) issue(record Request, secret string) (string, *denial) {
+	if refusal := s.authenticate(record, secret); refusal != nil {
 		return "", refusal
 	}
 	if refusal := grantShape(record.Form); refusal != nil {
@@ -244,24 +253,40 @@ func (s *Server) impersonation(record Request) *denial {
 	return nil
 }
 
-// authenticate accepts a client assertion with a client_id or a known client
-// secret. The token-federation credential uses client_id to identify the
-// client, so the assertion alone is not enough.
-func (s *Server) authenticate(record Request, secret string, hasBasic bool) *denial {
+// authenticate accepts exactly one client authentication method. RFC 6749
+// section 2.3 says a client must not use more than one in a request. An
+// assertion names its client in client_id, because the token-federation
+// credential identifies the client by that parameter and not by the assertion.
+func (s *Server) authenticate(record Request, secret string) *denial {
+	hasAssertion := record.Form.Get("client_assertion") != ""
 	switch {
-	case record.Form.Get("client_assertion") != "":
-		if record.Actor != "" && record.ClientID != "" {
-			return nil
+	case hasAssertion && record.HasBasic:
+		return unknownClient("the request sends both a client assertion and basic credentials")
+	case hasAssertion:
+		if record.Actor == "" {
+			return unknownClient("the client assertion has no sub claim")
 		}
-	case hasBasic:
+		if !slices.Contains(s.opts.AssertionClients, record.ClientID) {
+			return unknownClient(record.ClientID + " may not authenticate with a client assertion")
+		}
+		return nil
+	case record.HasBasic:
 		if known, ok := s.opts.ClientSecrets[record.ClientID]; ok && known == secret {
 			return nil
 		}
+		return unknownClient("the client secret is not the one this server holds")
+	default:
+		return unknownClient("the request authenticates with neither a client secret nor a client assertion")
 	}
+}
+
+// unknownClient is the RFC 6749 section 5.2 answer to a client that did not
+// authenticate.
+func unknownClient(description string) *denial {
 	return &denial{
 		status:      http.StatusUnauthorized,
 		Code:        codeInvalidClient,
-		Description: "the request authenticates with neither a known secret nor a client assertion",
+		Description: description,
 	}
 }
 

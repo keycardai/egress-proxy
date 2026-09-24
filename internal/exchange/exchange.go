@@ -46,8 +46,8 @@ const (
 	codeInvalidGrant       = "invalid_grant"
 )
 
-// schemeHTTPS is the only scheme the exchange connects with. The client
-// secret goes to the zone, so cleartext would put it on the wire.
+// schemeHTTPS is the only scheme the exchange connects with. Client
+// authentication goes to the zone, so cleartext would put it on the wire.
 const schemeHTTPS = "https"
 
 // maxResponseSize limits a response from the zone. A token response holds the
@@ -83,8 +83,11 @@ type Options struct {
 	ClientID string
 	// ImpersonateUser is the IAM user public ID for each exchange.
 	ImpersonateUser string
-	// WorkloadTokenFile is the projected ServiceAccount token. The proxy reads the
-	// file for every exchange because the kubelet rotates it.
+	// WorkloadTokenFile is the projected ServiceAccount token. The kubelet
+	// rewrites it once the token passes 80% of its lifetime, which defaults to
+	// one hour, and the pod keeps running across the rewrite. The proxy
+	// therefore reads the file for every exchange. The kubelet swaps the file
+	// atomically, so a read never sees a partial write.
 	WorkloadTokenFile string
 	// ClientSecret is the application credential secret. The proxy reads it
 	// once, so a rotated secret takes effect after restart.
@@ -131,7 +134,7 @@ func New(opts Options) (*Source, error) {
 		Transport: guard{base: opts.transport()},
 		Timeout:   timeout,
 		// Discovery names the token endpoint. A redirect away from it would
-		// move the client secret to another host.
+		// move client authentication to another host.
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
 			return fmt.Errorf("%w to %s", errRedirect, req.URL.Redacted())
 		},
@@ -151,7 +154,7 @@ func New(opts Options) (*Source, error) {
 	}, nil
 }
 
-// checkZoneURL refuses a zone that the exchange must not offer the secret to.
+// checkZoneURL refuses a zone that the exchange must not authenticate to.
 // internal/config applies the same rule, and this check covers a Source that
 // another caller builds.
 func (o Options) checkZoneURL() error {
@@ -166,8 +169,8 @@ func (o Options) checkZoneURL() error {
 }
 
 // application builds the client credential and the description text. It
-// refuses a configuration with neither mechanism or with both, because each
-// mechanism provides different authority.
+// refuses a configuration that names neither mechanism, and one that names
+// both.
 //
 //nolint:ireturn // the SDK uses one interface for both mechanisms
 func (o Options) application() (oauth.ApplicationCredential, string, error) {
@@ -190,12 +193,15 @@ func (o Options) application() (oauth.ApplicationCredential, string, error) {
 }
 
 // workloadIdentity authenticates with the projected ServiceAccount token. The
-// file source reads the file for every exchange. The client ID goes on the form
-// with the assertion because the token-federation credential uses it to identify
-// the client.
+// client ID goes on the form beside the assertion, because the token-federation
+// credential identifies the client by that parameter.
 //
-//nolint:ireturn // polymorphism intended here
+//nolint:ireturn // the SDK uses one interface for both mechanisms
 func (o Options) workloadIdentity() (oauth.ApplicationCredential, string, error) {
+	if err := credential.CheckTokenFile(errConfigure, o.WorkloadTokenFile); err != nil {
+		//nolint:wrapcheck // CheckTokenFile wraps errConfigure, which callers match on
+		return nil, "", err
+	}
 	tokens, err := oauth.NewFileTokenSource(oauth.WithFileTokenPath(o.WorkloadTokenFile))
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: %w", errConfigure, err)
@@ -292,9 +298,7 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	// Workload identity reads the current token file here, so a rotated token
-	// reaches the zone without a restart. Both mechanisms ignore the prepare
-	// options, so they are nil.
+	// Both mechanisms ignore the prepare options, so they are nil.
 	request, err := s.application.PrepareTokenExchangeRequest(ctx, s.subject, resource, nil)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)

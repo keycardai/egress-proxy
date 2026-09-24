@@ -1,9 +1,11 @@
 package credential_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,6 +23,54 @@ func TestReadSecretFile(t *testing.T) {
 	secret, err := credential.ReadSecretFile(path)
 	require.NoError(t, err, "ReadSecretFile")
 	assert.Equal(t, "s3cr3t", secret, "the secret without its surrounding whitespace")
+}
+
+// errTokenFileKind stands in for the caller's sentinel, so a case can check
+// that the check wraps what the caller named.
+var errTokenFileKind = errors.New("invalid token file")
+
+// TestCheckTokenFileRefusals checks the file conditions that the proxy rejects
+// for a projected ServiceAccount token. The kubelet writes the token
+// world-readable, so the permission rule that covers a secret file does not
+// apply here.
+func TestCheckTokenFileRefusals(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	group := filepath.Join(dir, "group-readable")
+	require.NoError(t, os.WriteFile(group, []byte("token"), 0o644), "write the world-readable file")
+	large := filepath.Join(dir, "large")
+	require.NoError(t, os.WriteFile(large, []byte(strings.Repeat("x", 1<<20+1)), 0o600), "write the large file")
+	fifo := filepath.Join(dir, "fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o644), "make the FIFO")
+
+	tests := []struct {
+		name string
+		path string
+		// wantErr names the problem. Empty accepts the file.
+		wantErr string
+	}{
+		{name: "a file that is not there", path: filepath.Join(dir, "absent"), wantErr: "no such file"},
+		{name: "a directory", path: dir, wantErr: "it is not a regular file"},
+		// A FIFO with no writer blocks os.ReadFile forever. The stat happens
+		// before any read, so this case cannot hang.
+		{name: "a FIFO", path: fifo, wantErr: "it is not a regular file"},
+		{name: "a file larger than the reader reads", path: large, wantErr: "it is larger than 1048576 bytes"},
+		{name: "a token the kubelet wrote world-readable", path: group},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := credential.CheckTokenFile(errTokenFileKind, tc.path)
+			if tc.wantErr == "" {
+				require.NoError(t, err, "CheckTokenFile must accept this file")
+				return
+			}
+			require.Error(t, err, "CheckTokenFile must refuse this file")
+			require.ErrorIs(t, err, errTokenFileKind, "the error wraps the kind the caller named")
+			require.ErrorContains(t, err, tc.wantErr, "the message names the problem")
+		})
+	}
 }
 
 // TestReadSecretFileRefusals checks every file condition that the proxy

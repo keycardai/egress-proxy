@@ -165,8 +165,9 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Check(err)
 
 	zone := fakeas.New(fakeas.Options{
-		Credentials:   grants,
-		ClientSecrets: map[string]string{zoneClientID: zoneClientSecret},
+		Credentials:      grants,
+		ClientSecrets:    map[string]string{zoneClientID: zoneClientSecret},
+		AssertionClients: []string{zoneClientID},
 	})
 	server := httptest.NewUnstartedServer(logExchanges(zone, requests))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
@@ -188,7 +189,7 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 //
 // The token is an unsigned JWT with SUBJECT as its sub claim. The fake zone
 // reads that claim and does not verify a signature, so the scenario needs no
-// signing secret.
+// signing secret. The command sets SA_TOKEN to the token it wrote.
 func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 2 {
 		ts.Fatalf("usage: satoken FILE SUBJECT")
@@ -199,6 +200,9 @@ func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
 	token := encode([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + encode(claims) + "." + encode([]byte("signature"))
 	// The kubelet writes the projected token with mode 0644.
 	ts.Check(os.WriteFile(ts.MkAbs(args[0]), []byte(token), 0o644))
+	// A scenario asserts the token bytes appear in no output. The wire form is
+	// base64url, so matching the subject text would match nothing.
+	ts.Setenv("SA_TOKEN", token)
 }
 
 // logExchanges writes one line per token request that the zone reads. A
