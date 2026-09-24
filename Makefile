@@ -87,21 +87,30 @@ e2e:
 # a release step.
 IMAGE_TAG ?= dev
 
-# The reference the proxy image ends up under, and the intermediate one ko
-# loads before the setcap step.
+# The reference the proxy image ends up under.
 PROXY_IMAGE ?= egress-proxy:$(IMAGE_TAG)
-PROXY_KO_IMAGE ?= ko.local:$(IMAGE_TAG)-ko
+
+# The intermediate reference ko loads. The recipe builds it, the setcap
+# step reads it and the recipe removes it again, so it is not a knob: its
+# binary holds no capability and nothing outside this recipe may run it.
+PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
 
 # Two steps. ko compiles the binary and builds the distroless image, then
 # images/proxy/Dockerfile puts cap_net_bind_service=+ep on the binary,
 # which ko has no step for. test/images and test/e2e run this target, so
 # every lane drives the image the release builds.
+#
+# SOURCE_DATE_EPOCH keeps the created timestamp of the final image at the
+# epoch, which is the timestamp ko gives the image it loads. BuildKit
+# refuses rewrite-timestamp with the unpack the docker exporter does, so
+# the file timestamps inside the layers stay as the setcap stage left them.
 .PHONY: image-proxy
 image-proxy:
 	KO_CONFIG_PATH=images/proxy KO_DOCKER_REPO=ko.local $(GO) tool ko build --local --bare \
 		--tags $(IMAGE_TAG)-ko --platform linux/$(shell $(GO) env GOARCH) ./cmd/egress-proxy
-	docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
+	SOURCE_DATE_EPOCH=0 docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
 		-t $(PROXY_IMAGE) images/proxy
+	docker image rm $(PROXY_KO_IMAGE)
 
 .PHONY: image-netsetup
 image-netsetup:
