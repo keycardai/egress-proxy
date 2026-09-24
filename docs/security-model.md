@@ -84,6 +84,33 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 | An origin-form request reaches the listener and probes for a service that the proxy does not provide. | The listener provides no service of its own. It rejects the request with `not_a_proxy_request` and writes an audit record. The admin socket provides health and information endpoints. | `TestCleartextAndNonProxyRequests` |
 | A cleartext `http://` request carries a placeholder to a destination in cleartext. | The proxy forwards nothing cleartext. A cleartext request is rejected with `cleartext_not_forwarded`, and an endpoint that covers the host on that port does not make it reachable. | `TestCleartextAndNonProxyRequests`, `TestRedirectedConnectionsAreRefused` |
 
+### Netsetup ruleset
+
+The `egress-netsetup` init container programs an iptables ruleset in the
+pod's network namespace. The nat chain redirects the workload's outbound TCP
+on the capture ports to the sidecar's transparent listener. The filter
+chain's terminal DROP refuses everything the redirect does not cover.
+`internal/netsetup` builds and applies the rules. `cmd/egress-netsetup`
+verifies them, drops CAP_NET_ADMIN and writes the receipt.
+
+The pod contract this surface assumes: the init container holds NET_ADMIN
+and SETPCAP and runs before every other container. The sidecar runs as the
+proxy uid. The workload holds no capability and runs as a uid that is not
+the proxy's. The receipt is on an emptyDir with medium Memory that the
+workload does not mount.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| A workload calls `setuid` to the proxy uid. The nat chain returns early for that uid and the filter chain accepts it, so the workload's own traffic would be neither redirected nor dropped. This bypass is published against Istio (https://pulsesecurity.co.nz/advisories/istio-egress-bypass), and Istio states the same limit (https://istio.io/latest/docs/ops/best-practices/security/#understand-traffic-capture-limitations). | Traffic capture is not a boundary on its own. The workload securityContext is: run as a uid that is not the proxy's, `allowPrivilegeEscalation` false, `capabilities.drop` ALL. Without CAP_SETUID the call fails, and `no_new_privs` keeps an execve from granting it. The ruleset excludes the proxy uid and no other. | `TestProgramRules` |
+| A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, DNS to the named resolvers, and ICMPv6 Neighbour Discovery. | `TestProgramRules`, `TestTheTerminalDropIsLast` |
+| A workload leaves over IPv6, on a kernel whose ip6tables rules were never programmed. | Both address families are programmed. `--ipv6 auto` follows the kernel, `--ipv6 on` requires IPv6, and `--ipv6 off` programs an ip6tables ruleset that drops every IPv6 packet the pod sends. A probe that cannot tell whether the kernel has IPv6 fails the run. | `TestProgramRules`, `TestIPv6OffDenies`, `TestNoKernelIPv6ProgramsIPv4Alone`, `TestKernelHasIPv6` |
+| A rule another component put in OUTPUT decides the packet ahead of the ruleset, or a rule is added to a chain this package owns. | Each OUTPUT jump is inserted at position 1. After applying, the init container reads every rule back with `-C`, counts each chain it owns and checks that each OUTPUT jump is the first rule in its chain. A rule it did not install and a rule ahead of a jump both fail verification. | `TestApplyPutsEachJumpFirst`, `TestVerifyProblems` |
+| The process that programmed the rules changes them after it verified them. | The init container drops CAP_NET_ADMIN from the permitted, effective and inheritable sets and the bounding set of the thread that programmed the rules, sets `no_new_privs`, reads all of them back, and exits once it has written the receipt. The receipt records whether the drop happened. See the known limit on the drop's scope. | `TestKeepNetAdminIsRecorded` |
+| A rule the init container could not apply leaves the pod half governed, and an earlier run's receipt says it is contained. | The filter chain's terminal DROP is appended before any accept, and every accept is inserted above it. A run that stops part way leaves a chain that drops what it has not yet been told to accept. Every failure after the configuration is built unlinks the receipt. | `TestTheTerminalDropIsLast`, `TestApplyStopsAtTheFirstFailure`, `TestAFailedRunLeavesNoReceipt`, `TestRemoveReceiptLeavesNothingBehind` |
+| A `--verify` run writes a receipt for rules it did not program, or replaces a receipt that says CAP_NET_ADMIN was kept. | `--verify` reads the tables back and writes nothing. It never writes or removes the receipt and never drops a capability. | `TestVerifyWritesNothing` |
+| Re-running the init container flushes the filter chain while the OUTPUT jump an earlier run installed still points at it. Each `iptables` invocation takes and releases the xtables lock, so between the flush and the next rule the jump reaches an empty chain and the OUTPUT policy, ACCEPT in a pod, allows every protocol and port. | The flush of the filter chain and its terminal DROP are the first two invocations of the whole run, before any other chain is touched. The chain never sits empty under a live jump. | `TestApplySealsTheFilterChainFirst` |
+| The init container talks to the nft backend, whose rules the sandbox runtimes this proxy targets never apply. | The backend is read from the binary's version string, not from its name, and a version that names no backend is refused. With no override the legacy-specific name is tried before the generic one. | `TestOpenAssertsTheLegacyBackend`, `TestOpenSearchesPathForTheLegacyName` |
+
 ### Decision process
 
 | Threat | Mitigation | Test |
@@ -170,6 +197,32 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
 
 ## Known limits
 
+- Traffic capture is not a security boundary. A workload that can reach the
+  proxy uid escapes the redirect and the filter exclusion together. The
+  workload securityContext closes that. See the netsetup ruleset surface.
+- DNS is an open channel out. The filter chain accepts UDP and TCP port 53 to
+  every resolver in `/etc/resolv.conf`, unconditionally and unread. A workload
+  can encode data in query names and read data back out of the answers. That
+  traffic reaches no endpoint rule and no audit record.
+- `ESTABLISHED,RELATED` in the IPv4 OUTPUT chain is an open channel to any
+  peer that opens a connection into the pod. It is the first accept in the
+  filter chain. An outbound flow reaches ESTABLISHED only after its own first
+  packet was accepted, so it widens nothing the workload initiates. INPUT is
+  untouched and its policy is ACCEPT, so a peer that connects into the pod
+  creates a conntrack entry. The workload then has an unrestricted two-way
+  channel to that peer on that tuple, over TCP or UDP. A NetworkPolicy on
+  ingress closes it. `RELATED` also admits a flow a conntrack helper
+  expects. Attaching a helper needs CAP_NET_ADMIN in the pod's network
+  namespace, which nothing in the pod holds once the init container exits.
+  The exception is a kernel older than 6.0 on a node booted with
+  `nf_conntrack.nf_conntrack_helper=1`: it assigns helpers automatically in
+  every network namespace. Linux 4.7 turned that default off (commit
+  3bb398d925ec) and Linux 6.0 removed the setting (commit b118509076b3).
+- The init container drops CAP_NET_ADMIN on one thread. `capset`,
+  `PR_CAPBSET_DROP` and `PR_SET_NO_NEW_PRIVS` each act on the calling thread
+  (capabilities(7), prctl(2)). The other threads the Go runtime started keep
+  the capability in their permitted and bounding sets. The process runs no
+  code of its own on them and exits once it has written the receipt.
 - The proxy mints a credential for each request which is not cached. A busy
   resource receives one exchange per request.
 - A rotated client secret takes effect on the next start because the proxy

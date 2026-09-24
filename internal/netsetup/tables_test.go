@@ -1,8 +1,11 @@
 package netsetup_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,7 +30,12 @@ type fakeTables struct {
 	// listErr is returned by List for the chain it names, keyed the same
 	// way.
 	listErr map[string]error
+	// fail makes the first write whose invocation contains it return
+	// errWrite and change nothing.
+	fail string
 }
+
+var errWrite = errors.New("iptables: write refused")
 
 var errInsertPosition = errors.New("index of insertion too big")
 
@@ -36,13 +44,17 @@ func key(table, chain string) string { return table + " " + chain }
 func rule(chain string, spec []string) string { return "-A " + chain + " " + strings.Join(spec, " ") }
 
 func (f *fakeTables) ClearChain(table, chain string) error {
-	f.calls = append(f.calls, "-t "+table+" -F "+chain)
+	if err := f.record("-t " + table + " -F " + chain); err != nil {
+		return err
+	}
 	f.set(table, chain, nil)
 	return nil
 }
 
 func (f *fakeTables) Append(table, chain string, spec ...string) error {
-	f.calls = append(f.calls, "-t "+table+" -A "+chain+" "+strings.Join(spec, " "))
+	if err := f.record("-t " + table + " -A " + chain + " " + strings.Join(spec, " ")); err != nil {
+		return err
+	}
 	f.set(table, chain, append(f.rules[key(table, chain)], rule(chain, spec)))
 	return nil
 }
@@ -50,7 +62,10 @@ func (f *fakeTables) Append(table, chain string, spec ...string) error {
 // Insert refuses a position past the end of the chain plus one, as
 // iptables does.
 func (f *fakeTables) Insert(table, chain string, pos int, spec ...string) error {
-	f.calls = append(f.calls, "-t "+table+" -I "+chain+" "+strconv.Itoa(pos)+" "+strings.Join(spec, " "))
+	call := "-t " + table + " -I " + chain + " " + strconv.Itoa(pos) + " " + strings.Join(spec, " ")
+	if err := f.record(call); err != nil {
+		return err
+	}
 	rules := f.rules[key(table, chain)]
 	if pos < 1 || pos > len(rules)+1 {
 		return fmt.Errorf("%w: %d", errInsertPosition, pos)
@@ -75,6 +90,15 @@ func (f *fakeTables) List(table, chain string) ([]string, error) {
 		return nil, err
 	}
 	return append([]string{"-N " + chain}, f.rules[key(table, chain)]...), nil
+}
+
+// record logs an invocation and reports whether the case makes it fail.
+func (f *fakeTables) record(call string) error {
+	f.calls = append(f.calls, call)
+	if f.fail != "" && strings.Contains(call, f.fail) {
+		return errWrite
+	}
+	return nil
 }
 
 func (f *fakeTables) set(table, chain string, rules []string) {
@@ -133,6 +157,72 @@ func TestApplySealsTheFilterChainFirst(t *testing.T) {
 		if strings.Contains(call, "EGRESS_PROXY_FILTER_OUTPUT") && strings.Contains(call, "ACCEPT") {
 			assert.Greater(t, i, 1, "accept %q is inserted after the DROP is in place", call)
 		}
+	}
+}
+
+// TestApplyStopsAtTheFirstFailure makes one invocation fail and checks that
+// Apply stops there, names it, and leaves the filter chain ending in its
+// DROP. The order puts the DROP in first, so a run cut short at any point is
+// stricter than the finished ruleset.
+func TestApplyStopsAtTheFirstFailure(t *testing.T) {
+	t.Parallel()
+	const drop = "-A EGRESS_PROXY_FILTER_OUTPUT -j DROP"
+	tests := []struct {
+		name string
+		// fail is the invocation that fails, as the fake renders it.
+		fail string
+		// want is what the error names.
+		want string
+		// sealed says the terminal DROP went in before the failure.
+		sealed bool
+	}{
+		{
+			name: "the flush of the filter chain",
+			fail: "-t filter -F EGRESS_PROXY_FILTER_OUTPUT",
+			want: "clear the EGRESS_PROXY_FILTER_OUTPUT chain in the filter table",
+		},
+		{
+			name: "the terminal DROP",
+			fail: "-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
+			want: "-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
+		},
+		{
+			name:   "the nat REDIRECT",
+			fail:   "-j REDIRECT",
+			want:   "-t nat -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT",
+			sealed: true,
+		},
+		{
+			name:   "an accept above the DROP",
+			fail:   "--uid-owner 1337 -j ACCEPT",
+			want:   "-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -m owner --uid-owner 1337 -j ACCEPT",
+			sealed: true,
+		},
+		{
+			name:   "the filter OUTPUT jump",
+			fail:   "-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
+			want:   "-t filter -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
+			sealed: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handle := &fakeTables{fail: tc.fail}
+			err := netsetup.Apply(handle, programFor(t), nil)
+
+			require.ErrorIs(t, err, errWrite, "the write error reaches the caller")
+			assert.Contains(t, err.Error(), tc.want, "the error names the invocation that failed")
+			require.NotEmpty(t, handle.calls, "the run made the failing call")
+			assert.Contains(t, handle.calls[len(handle.calls)-1], tc.fail, "nothing runs after the failure")
+			filter := handle.rules["filter EGRESS_PROXY_FILTER_OUTPUT"]
+			if !tc.sealed {
+				assert.Empty(t, filter, "no rule went in ahead of the DROP")
+				return
+			}
+			require.NotEmpty(t, filter, "the filter chain holds its DROP")
+			assert.Equal(t, drop, filter[len(filter)-1], "the filter chain still ends in the DROP")
+		})
 	}
 }
 
@@ -308,6 +398,126 @@ func TestVerifyProblems(t *testing.T) {
 			for _, want := range tc.want {
 				assert.Contains(t, err.Error(), want, "the refusal names this problem")
 			}
+		})
+	}
+}
+
+// fakeBinary writes an executable that prints version and exits with code,
+// standing in for an iptables binary's --version.
+func fakeBinary(t *testing.T, dir, name, version string, code int) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\nexit %d\n", version, code)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+// TestOpenAssertsTheLegacyBackend drives Open against binaries that name
+// each backend, and no backend. The backend is read from the version string
+// because modern images point the generic name at the nft variant, whose
+// rules the sandbox runtimes never apply.
+func TestOpenAssertsTheLegacyBackend(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		family  netsetup.Family
+		version string
+		code    int
+		// wantBackend is the backend Open reports. Empty means Open refuses.
+		wantBackend netsetup.Backend
+		want        string
+	}{
+		{
+			name: "an IPv4 binary on the legacy backend", family: netsetup.FamilyIPv4,
+			version: "iptables v1.8.9 (legacy)", wantBackend: netsetup.BackendLegacy,
+		},
+		{
+			name: "an IPv6 binary on the legacy backend", family: netsetup.FamilyIPv6,
+			version: "ip6tables v1.8.10 (legacy)", wantBackend: netsetup.BackendLegacy,
+		},
+		{
+			name: "a binary on the nft backend", family: netsetup.FamilyIPv4,
+			version: "iptables v1.8.9 (nf_tables)", want: "uses the nf_tables backend",
+		},
+		{
+			name: "a binary older than 1.8, which names no backend", family: netsetup.FamilyIPv4,
+			version: "iptables v1.6.1", want: "the iptables version names no backend",
+		},
+		{
+			name: "a version string from some other program", family: netsetup.FamilyIPv4,
+			version: "nft v1.0.6 (Lester Gooch #5)", want: "the iptables version names no backend",
+		},
+		{
+			name: "a binary whose --version fails", family: netsetup.FamilyIPv4,
+			version: "iptables v1.8.9 (legacy)", code: 3, want: "--version: exit status 3",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := fakeBinary(t, t.TempDir(), "iptables", tc.version, tc.code)
+			handle, tool, err := netsetup.Open(context.Background(), tc.family, path)
+			if tc.wantBackend == "" {
+				require.ErrorIs(t, err, netsetup.ErrNoLegacyBackend, "the error the caller keys on")
+				assert.Contains(t, err.Error(), tc.want, "the refusal says why")
+				assert.Nil(t, handle, "a refused binary gets no handle")
+				return
+			}
+			require.NoError(t, err, "open the binary")
+			assert.NotNil(t, handle, "the handle")
+			assert.Equal(t, tc.wantBackend, tool.Backend, "the backend")
+			assert.Equal(t, path, tool.Path, "the binary")
+			assert.Equal(t, tc.version, tool.Version, "the first line of --version")
+		})
+	}
+}
+
+// TestOpenSearchesPathForTheLegacyName proves the search order with no
+// override: the legacy-specific name first, then the generic name. It sets
+// PATH, so it does not run in parallel.
+func TestOpenSearchesPathForTheLegacyName(t *testing.T) {
+	tests := []struct {
+		name string
+		// binaries maps a name on PATH to the version it prints.
+		binaries map[string]string
+		wantPath string
+		want     string
+	}{
+		{
+			name: "both names, where the generic one is the nft variant",
+			binaries: map[string]string{
+				"iptables-legacy": "iptables v1.8.9 (legacy)",
+				"iptables":        "iptables v1.8.9 (nf_tables)",
+			},
+			wantPath: "iptables-legacy",
+		},
+		{
+			name:     "the generic name alone, on the legacy backend",
+			binaries: map[string]string{"iptables": "iptables v1.8.9 (legacy)"},
+			wantPath: "iptables",
+		},
+		{
+			name:     "the generic name alone, on the nft backend",
+			binaries: map[string]string{"iptables": "iptables v1.8.9 (nf_tables)"},
+			want:     "iptables-legacy is not on PATH",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, version := range tc.binaries {
+				fakeBinary(t, dir, name, version, 0)
+			}
+			t.Setenv("PATH", dir)
+			_, tool, err := netsetup.Open(context.Background(), netsetup.FamilyIPv4, "")
+			if tc.wantPath == "" {
+				require.ErrorIs(t, err, netsetup.ErrNoLegacyBackend, "the error the caller keys on")
+				assert.Contains(t, err.Error(), tc.want, "the refusal names every name it tried")
+				assert.Contains(t, err.Error(), "uses the nf_tables backend", "the refusal names the backend it found")
+				return
+			}
+			require.NoError(t, err, "open the binary")
+			assert.Equal(t, filepath.Join(dir, tc.wantPath), tool.Path, "the binary Open chose")
 		})
 	}
 }

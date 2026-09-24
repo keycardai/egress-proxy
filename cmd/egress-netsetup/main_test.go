@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -77,12 +79,14 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := command(&out, nil).Run(context.Background(), append(dryRunArgs(resolv), tc.args...))
-			require.NoError(t, err, "the dry run")
+			receipt := filepath.Join(t.TempDir(), "netsetup.json")
+			args := append(dryRunArgs(resolv), append(tc.args, "--receipt", receipt)...)
+			require.NoError(t, command(&out, nil).Run(context.Background(), args), "the dry run")
 			for _, want := range tc.want {
 				assert.Contains(t, out.String(), want, "the printed ruleset")
 			}
-			assert.NotContains(t, out.String(), "receipt", "a dry run writes no receipt")
+			_, err := os.Stat(receipt)
+			require.ErrorIs(t, err, os.ErrNotExist, "a dry run writes no receipt")
 		})
 	}
 }
@@ -207,7 +211,15 @@ func TestCommandRefusals(t *testing.T) {
 type appliedTables struct {
 	rules  map[string][]string
 	writes []string
+	// fail makes the first write whose invocation contains it return
+	// errWrite.
+	fail string
 }
+
+var (
+	errWrite = errors.New("iptables: write refused")
+	errOpen  = errors.New("no iptables binary with the legacy backend")
+)
 
 func chainKey(table, chain string) string { return table + " " + chain }
 
@@ -231,18 +243,15 @@ func tablesHolding(programs ...netsetup.Program) *appliedTables {
 }
 
 func (f *appliedTables) ClearChain(table, chain string) error {
-	f.writes = append(f.writes, "-t "+table+" -F "+chain)
-	return nil
+	return f.write("-t " + table + " -F " + chain)
 }
 
 func (f *appliedTables) Append(table, chain string, spec ...string) error {
-	f.writes = append(f.writes, "-t "+table+" -A "+chain+" "+strings.Join(spec, " "))
-	return nil
+	return f.write("-t " + table + " -A " + chain + " " + strings.Join(spec, " "))
 }
 
 func (f *appliedTables) Insert(table, chain string, pos int, spec ...string) error {
-	f.writes = append(f.writes, "-t "+table+" -I "+chain+" "+strconv.Itoa(pos)+" "+strings.Join(spec, " "))
-	return nil
+	return f.write("-t " + table + " -I " + chain + " " + strconv.Itoa(pos) + " " + strings.Join(spec, " "))
 }
 
 func (f *appliedTables) InsertUnique(table, chain string, pos int, spec ...string) error {
@@ -255,6 +264,14 @@ func (f *appliedTables) Exists(table, chain string, spec ...string) (bool, error
 
 func (f *appliedTables) List(table, chain string) ([]string, error) {
 	return append([]string{"-N " + chain}, f.rules[chainKey(table, chain)]...), nil
+}
+
+func (f *appliedTables) write(call string) error {
+	f.writes = append(f.writes, call)
+	if f.fail != "" && strings.Contains(call, f.fail) {
+		return errWrite
+	}
+	return nil
 }
 
 // verifyFixture is a --verify command line and tables that hold exactly the
@@ -344,6 +361,114 @@ func TestVerifyWritesNothing(t *testing.T) {
 			}
 			require.NoError(t, err, "the receipt is still there")
 			assert.Equal(t, tc.before, string(body), "--verify leaves the receipt byte for byte as it found it")
+		})
+	}
+}
+
+// TestKeepNetAdminIsRecorded proves a run given --keep-net-admin writes a
+// receipt that says the capability was kept, so the sidecar can refuse it.
+// The drop itself needs CAP_NET_ADMIN to test, so this test covers only
+// what the receipt records.
+func TestKeepNetAdminIsRecorded(t *testing.T) {
+	t.Parallel()
+	receipt := filepath.Join(t.TempDir(), "netsetup.json")
+	_, tables := verifyFixture(t, receipt)
+	open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
+		return tables, netsetup.Tool{Path: "/sbin/iptables", Version: "v1.8.9 (legacy)"}, nil
+	}
+	args := []string{
+		"egress-netsetup", "--keep-net-admin",
+		"--dns-servers", "10.43.0.10", "--ipv6", "off", "--receipt", receipt,
+	}
+	var out bytes.Buffer
+	require.NoError(t, command(&out, open).Run(context.Background(), args), "the run")
+
+	body, err := os.ReadFile(receipt)
+	require.NoError(t, err, "the run writes a receipt")
+	var got netsetup.Receipt
+	require.NoError(t, json.Unmarshal(body, &got), "the receipt parses")
+	assert.True(t, got.Verified, "the rules read back")
+	assert.False(t, got.CapabilitiesDropped, "the receipt says CAP_NET_ADMIN was kept")
+	assert.Contains(t, out.String(), "CAP_NET_ADMIN is still held", "the run says it kept the capability")
+}
+
+// TestAFailedRunLeavesNoReceipt starts each run with a receipt an earlier
+// run left, then makes the run fail. The stale receipt says the rules are in
+// force, so every failure after the configuration is accepted must unlink
+// it. The last row makes the unlink fail too, and the error names both.
+func TestAFailedRunLeavesNoReceipt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// openErr fails the open. Otherwise the run gets tables.
+		openErr error
+		// tables is what the run applies to and reads back.
+		tables func(t *testing.T, receipt string) *appliedTables
+		// receiptIsDir puts a non-empty directory at the receipt path, which
+		// os.Remove cannot unlink.
+		receiptIsDir bool
+		want         []string
+	}{
+		{
+			name:    "the iptables binary cannot be opened",
+			openErr: errOpen,
+			want:    []string{"no iptables binary with the legacy backend"},
+		},
+		{
+			name: "a rule cannot go in",
+			tables: func(t *testing.T, receipt string) *appliedTables {
+				t.Helper()
+				_, tables := verifyFixture(t, receipt)
+				tables.fail = "-j REDIRECT"
+				return tables
+			},
+			want: []string{"iptables: write refused", "-j REDIRECT"},
+		},
+		{
+			name: "the tables do not read back as the ruleset",
+			tables: func(*testing.T, string) *appliedTables {
+				return &appliedTables{rules: map[string][]string{}}
+			},
+			want: []string{"the ruleset is not in force", "not in the tables"},
+		},
+		{
+			name:         "the stale receipt cannot be removed either",
+			openErr:      errOpen,
+			receiptIsDir: true,
+			want:         []string{"no iptables binary with the legacy backend", "remove the stale netsetup receipt"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			receipt := filepath.Join(t.TempDir(), "netsetup.json")
+			if tc.receiptIsDir {
+				require.NoError(t, os.MkdirAll(filepath.Join(receipt, "entry"), 0o755)) //nolint:gosec // G301: a fixture
+			} else {
+				require.NoError(t, os.WriteFile(receipt, []byte(keptCapabilityReceipt), 0o644), "an earlier run's receipt")
+			}
+			open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
+				if tc.openErr != nil {
+					return nil, netsetup.Tool{}, tc.openErr
+				}
+				return tc.tables(t, receipt), netsetup.Tool{Path: "/sbin/iptables", Version: "v1.8.9 (legacy)"}, nil
+			}
+			args := []string{
+				"egress-netsetup", "--keep-net-admin",
+				"--dns-servers", "10.43.0.10", "--ipv6", "off", "--receipt", receipt,
+			}
+			var out bytes.Buffer
+			err := command(&out, open).Run(context.Background(), args)
+
+			require.Error(t, err, "the run fails")
+			for _, want := range tc.want {
+				assert.Contains(t, err.Error(), want, "the error names this failure")
+			}
+			if tc.receiptIsDir {
+				return
+			}
+			_, err = os.Stat(receipt)
+			require.ErrorIs(t, err, os.ErrNotExist, "the earlier run's receipt is gone")
 		})
 	}
 }
