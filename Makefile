@@ -90,9 +90,11 @@ IMAGE_TAG ?= dev
 # The reference the proxy image ends up under.
 PROXY_IMAGE ?= egress-proxy:$(IMAGE_TAG)
 
-# The intermediate reference ko loads. The recipe builds it, the setcap
-# step reads it and the recipe removes it again, so it is not a knob: its
-# binary holds no capability and nothing outside this recipe may run it.
+# The intermediate reference the setcap step reads. ko loads the image
+# under this one and under a second one it prints, which is the digest as
+# a tag. The recipe builds both and removes both, so this is not a knob:
+# the binary in that image holds no capability and nothing outside this
+# recipe may run it.
 PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
 
 # Two steps. ko compiles the binary and builds the distroless image, then
@@ -106,11 +108,11 @@ PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
 # the file timestamps inside the layers stay as the setcap stage left them.
 .PHONY: image-proxy
 image-proxy:
-	KO_CONFIG_PATH=images/proxy KO_DOCKER_REPO=ko.local $(GO) tool ko build --local --bare \
-		--tags $(IMAGE_TAG)-ko --platform linux/$(shell $(GO) env GOARCH) ./cmd/egress-proxy
-	SOURCE_DATE_EPOCH=0 docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
-		-t $(PROXY_IMAGE) images/proxy
-	docker image rm $(PROXY_KO_IMAGE)
+	ko_ref=$$(KO_CONFIG_PATH=images/proxy KO_DOCKER_REPO=ko.local $(GO) tool ko build --local --bare \
+		--tags $(IMAGE_TAG)-ko --platform linux/$(shell $(GO) env GOARCH) ./cmd/egress-proxy) && \
+		SOURCE_DATE_EPOCH=0 docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
+			-t $(PROXY_IMAGE) images/proxy && \
+		docker image rm $(PROXY_KO_IMAGE) "$$ko_ref"
 
 .PHONY: image-netsetup
 image-netsetup:
