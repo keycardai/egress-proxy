@@ -132,16 +132,6 @@ func confirmDropped() error {
 	return nil
 }
 
-// HasNetAdmin reports whether this process holds CAP_NET_ADMIN in its
-// effective set.
-func HasNetAdmin() (bool, error) {
-	caps, err := threadCapabilities()
-	if err != nil {
-		return false, err
-	}
-	return caps.Get(capability.EFFECTIVE, capNetAdmin), nil
-}
-
 // ambientNetAdmin reports whether CAP_NET_ADMIN is in this thread's ambient
 // set, which an execve carries into the new program. PR_CAP_AMBIENT arrived
 // in Linux 4.3 and an older kernel answers EINVAL, where nothing is ambient.
