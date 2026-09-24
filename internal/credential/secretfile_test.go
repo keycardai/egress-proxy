@@ -40,7 +40,11 @@ func TestCheckTokenFileRefusals(t *testing.T) {
 	group := filepath.Join(dir, "group-readable")
 	require.NoError(t, os.WriteFile(group, []byte("token"), 0o644), "write the world-readable file")
 	large := filepath.Join(dir, "large")
-	require.NoError(t, os.WriteFile(large, []byte(strings.Repeat("x", 1<<20+1)), 0o600), "write the large file")
+	require.NoError(t, os.WriteFile(large, []byte(strings.Repeat("x", 64<<10+1)), 0o600), "write the large file")
+	// A bound token from a Kubernetes 1.34 cluster is about 1 KiB. The cap
+	// must leave room for a longer audience list.
+	realistic := filepath.Join(dir, "realistic")
+	require.NoError(t, os.WriteFile(realistic, []byte(strings.Repeat("x", 4<<10)), 0o644), "write a token-sized file")
 	fifo := filepath.Join(dir, "fifo")
 	require.NoError(t, syscall.Mkfifo(fifo, 0o644), "make the FIFO")
 
@@ -55,8 +59,9 @@ func TestCheckTokenFileRefusals(t *testing.T) {
 		// A FIFO with no writer blocks os.ReadFile forever. The stat happens
 		// before any read, so this case cannot hang.
 		{name: "a FIFO", path: fifo, wantErr: "it is not a regular file"},
-		{name: "a file larger than the reader reads", path: large, wantErr: "it is larger than 1048576 bytes"},
+		{name: "a file larger than the reader reads", path: large, wantErr: "it is larger than 65536 bytes"},
 		{name: "a token the kubelet wrote world-readable", path: group},
+		{name: "a token with room to spare under the cap", path: realistic},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

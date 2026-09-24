@@ -83,11 +83,12 @@ type Options struct {
 	ClientID string
 	// ImpersonateUser is the IAM user public ID for each exchange.
 	ImpersonateUser string
-	// WorkloadTokenFile is the projected ServiceAccount token. The kubelet
-	// rewrites it once the token passes 80% of its lifetime, which defaults to
-	// one hour, and the pod keeps running across the rewrite. The proxy
-	// therefore reads the file for every exchange. The kubelet swaps the file
-	// atomically, so a read never sees a partial write.
+	// WorkloadTokenFile is the projected ServiceAccount token. It must name a
+	// path that credential.CheckTokenFile accepts. The kubelet rewrites the
+	// token once it passes 80% of its lifetime, which defaults to one hour,
+	// and the pod keeps running across the rewrite. The proxy therefore reads
+	// the file for every exchange. The kubelet swaps the file atomically, so a
+	// read never sees a partial write.
 	WorkloadTokenFile string
 	// ClientSecret is the application credential secret. The proxy reads it
 	// once, so a rotated secret takes effect after restart.
