@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/netip"
 	"os"
 	"strconv"
@@ -61,8 +62,11 @@ const (
 // include/uapi/linux/netfilter/xt_multiport.h.
 const maxMultiportPorts = 15
 
-// maxUID is the highest uid the owner match takes.
-const maxUID = 0xFFFFFFF
+// maxUID is the highest uid Kubernetes accepts for runAsUser. The proxy uid
+// must be the sidecar's runAsUser, so no higher uid can run the proxy.
+// Source: maxUserID in k8s.io/apimachinery pkg/util/validation,
+// https://github.com/kubernetes/apimachinery/blob/41e3c50/pkg/util/validation/validation.go#L286-L309
+const maxUID = math.MaxInt32
 
 // Config is the ruleset input. Program is a pure function of it, so the
 // rendered ruleset tests rule generation and nothing about the host.

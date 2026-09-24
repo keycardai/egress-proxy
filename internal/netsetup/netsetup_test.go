@@ -1,6 +1,7 @@
 package netsetup_test
 
 import (
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -33,9 +34,18 @@ func TestValidate(t *testing.T) {
 	}{
 		{name: "the pod contract with a resolver", edit: func(*netsetup.Config) {}},
 		{
-			name: "a uid outside the range the owner match takes",
+			name: "a negative uid",
 			edit: func(c *netsetup.Config) { c.ProxyUID = -1 },
-			want: []string{"proxy uid -1 is out of range"},
+			want: []string{"proxy uid -1 is out of range 0-2147483647"},
+		},
+		{
+			name: "the highest uid Kubernetes accepts for runAsUser",
+			edit: func(c *netsetup.Config) { c.ProxyUID = math.MaxInt32 },
+		},
+		{
+			name: "a uid above what Kubernetes accepts for runAsUser",
+			edit: func(c *netsetup.Config) { c.ProxyUID = math.MaxInt32 + 1 },
+			want: []string{"proxy uid 2147483648 is out of range 0-2147483647"},
 		},
 		{
 			name: "a redirect port outside 1-65535",
