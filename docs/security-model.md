@@ -243,7 +243,7 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
 | Threat | Mitigation | Test |
 |---|---|---|
 | The workload reads the sandbox allowlist or probes health over loopback. | The admin surface uses a Unix socket in the proxy mount namespace. The socket has mode 0600 in a directory with mode 0700. The proxy rejects a relative path and a TCP address. | `TestServerAnswersHealthAndInfo`, `TestNewRefusals` |
-| A container sharing the socket volume connects to the admin socket, or unlinks it and binds its own. | The socket directory is set to mode 0700 on every start, because a restart finds the directory a previous start left behind. The proxy refuses to start when the directory does not end up at 0700. The directory mode also covers the window between the bind, which honors the process umask, and the chmod of the socket to 0600. The default puts that directory inside the volume rather than at the mount point, which belongs to root at mode 0777 and which the proxy's uid may not chmod. | `TestNewSetsTheDirectoryMode`, `TestCheckDirMode` |
+| A container sharing the socket volume connects to the admin socket, or unlinks it and binds its own. | The socket directory is set to mode 0700 on every start, because a restart finds the directory a previous start left behind. The proxy refuses to start when the directory does not end up at 0700. The directory mode also covers the window between the bind, which honors the process umask, and the chmod of the socket to 0600. The default puts that directory inside the volume rather than at the mount point, which belongs to root at mode 0777 and which the proxy's uid may not chmod. The mount point's own mode is outside this check, which Known limits states. | `TestNewSetsTheDirectoryMode`, `TestCheckDirMode` |
 | A wrong socket path causes the proxy to delete a file at start-up. | The proxy unlinks only an existing socket. Any other object at the path stops the process. | `TestNewRefusals`, `TestNewReplacesAStaleSocket` |
 
 ### Readiness and the probe subcommand
@@ -352,6 +352,12 @@ The three images are defined under `images/` and built locally by
 - An idle timeout does not limit a request in flight. A response that is still
   transferring is not idle. A stalled upstream keeps its connection until the
   workload or upstream closes it.
+- The sidecar checks the mode of the admin socket directory and of no
+  directory above it. It sets that directory to 0700 and reads the mode
+  back. The volume mount point above it is owned by root at mode 0777
+  (kubernetes `pkg/volume/emptydir/empty_dir.go`, `perm`), and the proxy's
+  uid may not chmod it. Any uid that mounts the volume can create entries
+  beside the socket directory, but not inside it.
 - Readiness is a point in time. `/readyz` reads the listener flag and stats
   `ca.crt` on each request, so it reports the state then rather than a
   guarantee about the next request.
