@@ -93,7 +93,7 @@ func isIPv6Socket(addr net.Addr) bool {
 // are.
 func getsockoptSockaddr(fd uintptr, level, option int) ([]byte, error) {
 	buf := make([]byte, sockaddrIn6Len)
-	size := uint32(len(buf))
+	var size uint32 = sockaddrIn6Len
 	_, _, errno := unix.Syscall6(
 		uintptr(unix.SYS_GETSOCKOPT),
 		fd,
@@ -107,7 +107,7 @@ func getsockoptSockaddr(fd uintptr, level, option int) ([]byte, error) {
 		return nil, errno
 	}
 	if int(size) > len(buf) {
-		return nil, fmt.Errorf("the kernel returned %d bytes into a %d byte buffer", size, len(buf))
+		return nil, fmt.Errorf("%w: %d bytes into a %d byte buffer", ErrLongSockaddr, size, len(buf))
 	}
 	return buf[:size], nil
 }

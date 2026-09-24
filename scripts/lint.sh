@@ -17,9 +17,25 @@ if [[ $# -gt 0 && -d $1 ]]; then
 	shift
 fi
 
+# golangci-lint analyzes one GOOS at a time, and a file its build
+# constraints exclude is never loaded. Linting the host alone leaves every
+# //go:build linux file unlinted on a macOS workstation. Both platforms run
+# here, so the local gate and the CI gate are one gate.
+platforms=(linux darwin)
+
+# The tool is built once, for the host. Setting GOOS for `go tool` would
+# cross-build the tool itself instead of changing what it analyzes.
+tool_dir=$(mktemp -d)
+trap 'rm -rf "$tool_dir"' EXIT
+go build -modfile="$repo_root/go.mod" -o "$tool_dir/golangci-lint" \
+	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+
 cd "$dir"
 # The acceptance tests are behind a build tag; naming it here keeps them
 # under the same lint as everything else.
-go tool -modfile="$repo_root/go.mod" golangci-lint run --config "$repo_root/.golangci.yml" \
-	--build-tags acceptance ./... "$@"
+for goos in "${platforms[@]}"; do
+	echo "lint: GOOS=$goos ($dir)"
+	GOOS=$goos "$tool_dir/golangci-lint" run --config "$repo_root/.golangci.yml" \
+		--build-tags acceptance ./... "$@"
+done
 echo "lint: OK ($dir)"

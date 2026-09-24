@@ -27,6 +27,12 @@ import (
 	"github.com/keycardai/egress-proxy/internal/transparent"
 )
 
+// captureHost is the destination the workload names. It must be a name the
+// system resolver answers, because the proxy re-resolves the name it peeked
+// and dials the upstream by it. A name reserved for documentation resolves
+// on a workstation that runs a local resolver for it and nowhere else.
+const captureHost = "localhost"
+
 // capturePeekTimeout bounds the peek in this pipeline. The run is timed
 // against it, so a peek that waits for bytes the client has not sent fails
 // the test rather than merely slowing it.
@@ -74,7 +80,7 @@ func newCapture(t *testing.T) *capture {
 	t.Helper()
 	upstreamCA, err := ca.New(ca.Options{CommonName: "capture upstream CA"})
 	require.NoError(t, err)
-	leaf, err := upstreamCA.Leaf("upstream.test")
+	leaf, err := upstreamCA.Leaf(captureHost)
 	require.NoError(t, err)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -92,7 +98,7 @@ func newCapture(t *testing.T) *capture {
 	deny, err := policy.NewDenyList(nil, []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
 	require.NoError(t, err)
 	matcher, err := policy.Compile([]policy.Endpoint{
-		{Host: "upstream.test", Port: port, PathPrefix: "/allowed/"},
+		{Host: captureHost, Port: port, PathPrefix: "/allowed/"},
 	}, deny)
 	require.NoError(t, err)
 	authority, err := ca.New(ca.Options{})
@@ -137,7 +143,7 @@ func newCapture(t *testing.T) *capture {
 	})
 	return &capture{
 		addr:      captured.Addr().String(),
-		authority: net.JoinHostPort("upstream.test", portText),
+		authority: net.JoinHostPort(captureHost, portText),
 		roots:     authority.Pool(),
 		records:   records,
 	}
@@ -145,7 +151,7 @@ func newCapture(t *testing.T) *capture {
 
 // get makes one request the way a workload with no proxy configured does:
 // it opens a connection to the redirect target and speaks TLS for
-// upstream.test over it.
+// captureHost over it.
 func (c *capture) get(t *testing.T, path string) (int, string) {
 	t.Helper()
 	client := &http.Client{

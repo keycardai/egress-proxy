@@ -48,6 +48,9 @@ var (
 	// ErrShortSockaddr is returned when the kernel returned fewer bytes than
 	// the address family needs.
 	ErrShortSockaddr = errors.New("sockaddr is shorter than its address family requires")
+	// ErrLongSockaddr is returned when the kernel reported a sockaddr longer
+	// than the buffer it was given.
+	ErrLongSockaddr = errors.New("sockaddr is longer than the buffer the kernel was given")
 	// ErrUnknownFamily is returned for an address family that is neither
 	// AF_INET nor AF_INET6.
 	ErrUnknownFamily = errors.New("sockaddr names an unknown address family")
