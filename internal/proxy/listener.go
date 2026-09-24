@@ -18,6 +18,22 @@ func limitListener(listener net.Listener, maxConnections int, timeout time.Durat
 	return netutil.LimitListener(&idleListener{Listener: listener, timeout: timeout}, maxConnections)
 }
 
+// CloseWriter is a connection that can shut down its writing side on its
+// own, telling the peer this side has finished. Half-closing before a close
+// keeps a final write from being lost to the RST that a close with unread
+// data in the receive buffer sends.
+//
+// *net.TCPConn is one. net.Conn is not, so a wrapper that embeds net.Conn
+// hides the half-close underneath it. EVERY wrapper in the chain forwards
+// CloseWrite explicitly, and asserts at compile time that it does. A
+// wrapper that forgets fails the type assertion at run time and silently
+// skips the half-close.
+type CloseWriter interface {
+	CloseWrite() error
+}
+
+var _ CloseWriter = (*idleConn)(nil)
+
 // IdleConn gives a connection the same idle bound the CONNECT frontend
 // applies to its own. The transparent frontend wraps each connection with
 // it after it has read the original destination off the socket, because a
@@ -73,12 +89,10 @@ func (c *idleConn) SetDeadline(t time.Time) error {
 }
 
 // CloseWrite half-closes the connection, telling the peer this side has
-// finished writing. net.Conn has no CloseWrite, so embedding the interface
-// hides the one *net.TCPConn defines. This forward puts it back. A
-// connection with no half-close, such as a pipe, reports
-// errors.ErrUnsupported.
+// finished writing. A connection with no half-close, such as a pipe,
+// reports errors.ErrUnsupported.
 func (c *idleConn) CloseWrite() error {
-	closer, ok := c.Conn.(interface{ CloseWrite() error })
+	closer, ok := c.Conn.(CloseWriter)
 	if !ok {
 		return fmt.Errorf("%w: %T has no CloseWrite", errors.ErrUnsupported, c.Conn)
 	}

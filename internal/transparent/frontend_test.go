@@ -340,7 +340,11 @@ func TestARefusalReachesAClientThatIsStillSending(t *testing.T) {
 	t.Parallel()
 	const refusal = "HTTP/1.1 403 Forbidden\r\n" +
 		"X-Keycard-Deny-Reason: no_matching_endpoint\r\nContent-Length: 0\r\n\r\n"
-	drained := make(chan bool, 1)
+	type served struct {
+		drains     bool
+		halfCloses bool
+	}
+	handled := make(chan served, 1)
 	front, err := transparent.New(transparent.Options{
 		MaxConnections: 4,
 		IdleTimeout:    30 * time.Second,
@@ -354,9 +358,10 @@ func TestARefusalReachesAClientThatIsStillSending(t *testing.T) {
 			if drains {
 				drainer.DrainOnClose()
 			}
+			_, halfCloses := conn.(proxy.CloseWriter)
 			_, _ = io.WriteString(conn, refusal)
 			_ = conn.Close()
-			drained <- drains
+			handled <- served{drains: drains, halfCloses: halfCloses}
 		},
 	})
 	require.NoError(t, err, "build the frontend")
@@ -386,8 +391,9 @@ func TestARefusalReachesAClientThatIsStillSending(t *testing.T) {
 	assert.Equal(t, refusal, string(got), "the whole refusal reached the client")
 
 	select {
-	case drains := <-drained:
-		assert.True(t, drains, "the frontend hands on a connection that can close in order")
+	case s := <-handled:
+		assert.True(t, s.drains, "the frontend hands on a connection that can close in order")
+		assert.True(t, s.halfCloses, "and one a handler can half-close")
 	case <-time.After(10 * time.Second):
 		require.FailNow(t, "the frontend handed on no connection")
 	}

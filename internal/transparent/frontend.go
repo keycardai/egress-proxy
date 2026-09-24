@@ -331,8 +331,21 @@ type peekedConn struct {
 	release func()
 }
 
+var _ proxy.CloseWriter = (*peekedConn)(nil)
+
 func (c *peekedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p) //nolint:wrapcheck // net.Conn errors are read by type
+}
+
+// CloseWrite half-closes the connection the proxy was handed. Close makes
+// the half-close the drain needs on its own, so this is for a handler that
+// finishes writing before it is done reading.
+func (c *peekedConn) CloseWrite() error {
+	closer, ok := c.Conn.(proxy.CloseWriter)
+	if !ok {
+		return fmt.Errorf("%w: %T has no CloseWrite", errors.ErrUnsupported, c.Conn)
+	}
+	return closer.CloseWrite() //nolint:wrapcheck // net.Conn errors are read by type
 }
 
 // DrainOnClose makes the next Close read what the client is still sending
@@ -354,7 +367,7 @@ const (
 func (c *peekedConn) Close() error {
 	if c.drain {
 		c.drain = false
-		if closer, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		if closer, ok := c.Conn.(proxy.CloseWriter); ok {
 			_ = closer.CloseWrite()
 		}
 		_ = c.SetReadDeadline(time.Now().Add(drainTimeout))
