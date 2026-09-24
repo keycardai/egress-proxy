@@ -22,6 +22,13 @@ const (
 	prGetNoNewPrivs = 39
 )
 
+// Sentinels for the read-back in confirmDropped. Each names a state that
+// leaves CAP_NET_ADMIN reachable after the drop returned zero.
+var (
+	errStillHeld  = errors.New("CAP_NET_ADMIN is still held")
+	errNoNewPrivs = errors.New("no_new_privs is not set")
+)
+
 // DropNetAdmin removes CAP_NET_ADMIN from the calling thread, in every set,
 // and closes the one path that puts it back. It runs after the rules are
 // applied and verified.
@@ -95,7 +102,7 @@ func confirmDropped() error {
 		{capability.INHERITABLE, "inheritable"},
 	} {
 		if caps.Get(set.which, capNetAdmin) {
-			return fmt.Errorf("CAP_NET_ADMIN is still in this thread's %s set after capset", set.name)
+			return fmt.Errorf("%w: it is in this thread's %s set after capset", errStillHeld, set.name)
 		}
 	}
 	bounding, err := capability.GetBound(capNetAdmin)
@@ -103,24 +110,24 @@ func confirmDropped() error {
 		return fmt.Errorf("read the capability bounding set: %w", err)
 	}
 	if bounding {
-		return errors.New("CAP_NET_ADMIN is still in the bounding set after PR_CAPBSET_DROP, " +
-			"so an execve would grant it back")
+		return fmt.Errorf("%w: it is in the bounding set after PR_CAPBSET_DROP, "+
+			"so an execve would grant it back", errStillHeld)
 	}
 	ambient, err := ambientNetAdmin()
 	if err != nil {
 		return err
 	}
 	if ambient {
-		return errors.New("CAP_NET_ADMIN is still in the ambient set after capset, " +
-			"so an execve would carry it into the new program")
+		return fmt.Errorf("%w: it is in the ambient set after capset, "+
+			"so an execve would carry it into the new program", errStillHeld)
 	}
 	set, _, errno := syscall.Syscall(syscall.SYS_PRCTL, prGetNoNewPrivs, 0, 0)
 	if errno != 0 {
 		return fmt.Errorf("read no_new_privs: %w", errno)
 	}
 	if set != 1 {
-		return errors.New("no_new_privs is not set after PR_SET_NO_NEW_PRIVS, " +
-			"so an execve could grant privileges this process gave up")
+		return fmt.Errorf("%w after PR_SET_NO_NEW_PRIVS, "+
+			"so an execve could grant privileges this process gave up", errNoNewPrivs)
 	}
 	return nil
 }
@@ -155,6 +162,8 @@ func ambientNetAdmin() (bool, error) {
 // NEVER read the bounding or ambient set through this value. Load takes
 // those two from /proc/self/status, which reports the thread group leader,
 // and every capability primitive here acts on the calling thread.
+//
+//nolint:ireturn // capability.NewPid2 hands back the interface and the library exports no concrete type
 func threadCapabilities() (capability.Capabilities, error) {
 	caps, err := capability.NewPid2(0)
 	if err != nil {
