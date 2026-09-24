@@ -1,7 +1,8 @@
 # The proxy image. ko builds it straight from the module, so there is no
-# Dockerfile and no build context to keep in step with the tree.
+# build context to keep in step with the tree. images/proxy/Dockerfile then
+# puts cap_net_bind_service=+ep on the binary, which ko has no step for.
 #
-# Build it locally with:
+# Build both steps locally with:
 #   make image-proxy
 #
 # The base is distroless static: the binary, the public root certificates

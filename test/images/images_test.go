@@ -14,10 +14,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +47,13 @@ func TestMain(m *testing.M) {
 	if !dockerAvailable() {
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	// The proxy image is built once for the whole lane, so it is removed
+	// here rather than by one test's cleanup.
+	for _, image := range []string{proxyImageRef, proxyKoImageRef} {
+		_ = exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run()
+	}
+	os.Exit(code)
 }
 
 func dockerAvailable() bool {
@@ -66,8 +75,7 @@ func repoRoot(t *testing.T) string {
 }
 
 // docker runs one docker command in the repository root and returns its
-// combined output, failing the test on a non-zero exit. runStdout is the
-// one that takes an environment and runs a build tool.
+// combined output, failing the test on a non-zero exit.
 func docker(t *testing.T, timeout time.Duration, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
@@ -79,11 +87,40 @@ func docker(t *testing.T, timeout time.Duration, args ...string) string {
 	return string(out)
 }
 
-// koRepo is where ko loads the proxy image. With --bare the reference is
-// this name and the tag, and nothing here pushes.
-const koRepo = "ko.local"
+// The two references `make image-proxy` leaves behind: the image ko loads
+// and the image the setcap step builds from it.
+const (
+	proxyImageRef   = "egress-proxy:" + tag
+	proxyKoImageRef = "ko.local:" + tag + "-ko"
+)
 
-// runStdout is run, returning standard output alone.
+// buildProxyImage runs the target a release runs, so the lane drives the
+// image the Makefile produces rather than one it assembled itself. It runs
+// once for the whole lane.
+var buildProxyImage = sync.OnceValue(func() error { //nolint:gochecknoglobals // one build for the lane
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		return fmt.Errorf("resolve the repository root: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "make", "image-proxy", "IMAGE_TAG="+tag)
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("make image-proxy: %w\n%s", err, out)
+	}
+	return nil
+})
+
+// proxyImage is the reference `make image-proxy` tagged.
+func proxyImage(t *testing.T) string {
+	t.Helper()
+	require.NoError(t, buildProxyImage(), "build the proxy image")
+	return proxyImageRef
+}
+
+// runStdout runs one command in the repository root and returns its
+// standard output alone, passing standard error through.
 func runStdout(t *testing.T, timeout time.Duration, env []string, name string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
@@ -106,19 +143,11 @@ func removeImage(t *testing.T, image string) {
 	})
 }
 
-// TestProxyImage builds the proxy image with ko and drives the two
-// subcommands in it. The image has no shell, so they are the only way in.
+// TestProxyImage builds the proxy image and drives the two subcommands in
+// it. The image has no shell, so they are the only way in.
 func TestProxyImage(t *testing.T) {
 	t.Parallel()
-	removeImage(t, koRepo+":"+tag)
-	// ko writes its logs to stderr and the reference it loaded to stdout,
-	// so the lane drives the image ko built rather than one it guessed the
-	// name of.
-	image := strings.TrimSpace(runStdout(t, buildTimeout,
-		[]string{"KO_CONFIG_PATH=images/proxy", "KO_DOCKER_REPO=" + koRepo},
-		"go", "tool", "ko", "build", "--local", "--bare", "--tags", tag,
-		"--platform", "linux/"+goarch(t), "./cmd/egress-proxy"))
-	require.NotEmpty(t, image, "ko printed no image reference")
+	image := proxyImage(t)
 
 	// The socket is not there, so the probe fails. That failure is what
 	// holds the workload container back while the proxy is starting.
@@ -127,7 +156,7 @@ func TestProxyImage(t *testing.T) {
 	probe := exec.CommandContext(ctx, "docker", "run", "--rm", image, "probe", "readyz")
 	out, err := probe.CombinedOutput()
 	require.Error(t, err, "probe readyz answered with no proxy running:\n%s", out)
-	assert.Contains(t, string(out), "/run/egress/admin.sock",
+	assert.Contains(t, string(out), "/run/egress/admin/admin.sock",
 		"the failure names the socket the probe dialled")
 
 	// No shell, so the probe has to be the binary itself.
@@ -150,6 +179,162 @@ func TestProxyImage(t *testing.T) {
 	assert.Equal(t, config.EnvPrefix, report.EnvPrefix, "env_prefix")
 	assert.NotEmpty(t, report.Settings, "the image publishes no variable")
 	assert.Equal(t, netsetup.DefaultProxyUID, report.Netsetup.ProxyUID, "the proxy uid a pod has to match")
+}
+
+// TestProxyImageHoldsTheBindCapability reads the file capability back off
+// the binary in the built image. The proxy image has no shell and no
+// getcap, so the check copies the binary into a stage that has libcap2-bin
+// and reads it there. A COPY between stages keeps the security.capability
+// extended attribute, which is the same mechanism the image build itself
+// relies on.
+func TestProxyImageHoldsTheBindCapability(t *testing.T) {
+	t.Parallel()
+	image := proxyImage(t)
+
+	reader := "egress-proxy-getcap:" + tag
+	removeImage(t, reader)
+	buildFromStdin(t, reader, capabilityReaderDockerfile, "PROXY_IMAGE="+image)
+
+	out := docker(t, runTimeout, "run", "--rm", reader)
+	assert.Contains(t, out, "/ko-app/egress-proxy cap_net_bind_service=ep",
+		"getcap reads the capability off the binary the image ships")
+}
+
+// capabilityReaderDockerfile copies the binary out of the proxy image into
+// a stage that can read a file capability. It is passed on standard input,
+// so it needs no build context.
+const capabilityReaderDockerfile = `ARG PROXY_IMAGE
+ARG SETCAP_IMAGE=debian:bookworm-slim
+FROM ${PROXY_IMAGE} AS proxy
+FROM ${SETCAP_IMAGE}
+RUN apt-get update \
+	&& apt-get install --yes --no-install-recommends libcap2-bin \
+	&& rm -rf /var/lib/apt/lists/*
+COPY --from=proxy /ko-app/egress-proxy /ko-app/egress-proxy
+ENTRYPOINT ["getcap", "/ko-app/egress-proxy"]
+`
+
+// TestProxyImageBindsAPrivilegedPort runs the image the way a hardened pod
+// runs it: a uid of its own, every capability dropped, no_new_privs on and
+// the sysctl at 1024, so nothing but the capability can explain a bind
+// below 1024. The two rows differ only in whether the container's bounding
+// set holds NET_BIND_SERVICE.
+//
+// Without it the container does not reach main: a permitted file
+// capability outside the bounding set makes the kernel refuse the execve.
+// That is the failure an operator sees for a pod that drops ALL and adds
+// nothing back.
+func TestProxyImageBindsAPrivilegedPort(t *testing.T) {
+	t.Parallel()
+	image := proxyImage(t)
+	config := privilegedBindConfig(t)
+
+	tests := []struct {
+		name string
+		// capAdd is what the pod puts in the container's bounding set.
+		capAdd string
+		// wantServing says the proxy reached the bind and stayed up.
+		wantServing bool
+		wantLog     string
+	}{
+		{
+			name:        "the pod puts NET_BIND_SERVICE in the bounding set",
+			capAdd:      "NET_BIND_SERVICE",
+			wantServing: true,
+			wantLog:     `"connect":"[::]:1015"`,
+		},
+		{
+			name:    "the pod drops every capability and adds none back",
+			wantLog: "operation not permitted",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := []string{
+				"run", "--detach",
+				"--user", strconv.Itoa(netsetup.DefaultProxyUID) + ":" + strconv.Itoa(netsetup.DefaultProxyUID),
+				"--cap-drop", "ALL",
+				"--security-opt", "no-new-privileges=true",
+				"--sysctl", "net.ipv4.ip_unprivileged_port_start=1024",
+				"--tmpfs", "/run/egress", "--tmpfs", "/shared-ca", "--tmpfs", "/state",
+				"--volume", config + ":/etc/keycard:ro",
+			}
+			if tc.capAdd != "" {
+				args = append(args, "--cap-add", tc.capAdd)
+			}
+			args = append(args, image, "--config", "/etc/keycard/config.yaml")
+
+			container := strings.TrimSpace(docker(t, runTimeout, args...))
+			require.NotEmpty(t, container, "docker run printed no container id")
+			t.Cleanup(func() {
+				_ = exec.CommandContext(context.Background(), "docker", "rm", "-f", container).Run()
+			})
+
+			serving, logs := waitForServing(t, container)
+			assert.Equal(t, tc.wantServing, serving, "the proxy bound every listener and stayed up:\n%s", logs)
+			assert.Contains(t, logs, tc.wantLog, "the container said:\n%s", logs)
+		})
+	}
+}
+
+// privilegedBindConfig writes the document the bind cases mount. The
+// CONNECT frontend takes the redirect port, so the bind under test is one
+// below 1024 and needs no netsetup receipt. Nothing else in the document
+// reaches the network.
+func privilegedBindConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	document := "version: 1\n" +
+		"sandbox:\n  id: images-lane\n" +
+		"listen:\n  connect: \"0.0.0.0:" + strconv.Itoa(netsetup.DefaultRedirectPort) + "\"\n" +
+		"ca:\n  state_dir: \"/state/ca\"\n" +
+		"endpoints:\n  - host: upstream.test\n"
+	writeFile(t, filepath.Join(dir, "config.yaml"), []byte(document))
+	//nolint:gosec // the proxy reads the document as its own uid, not as the host user
+	require.NoError(t, os.Chmod(dir, 0o755), "the container reads the document")
+	return dir
+}
+
+// waitForServing polls the container until the proxy logs that it is
+// serving or the container exits, whichever comes first. The log line is a
+// side effect of another process, so there is no signal to subscribe to.
+func waitForServing(t *testing.T, container string) (bool, string) {
+	t.Helper()
+	deadline := time.Now().Add(runTimeout)
+	for {
+		logs := docker(t, time.Minute, "logs", container)
+		if strings.Contains(logs, `"msg":"serving"`) {
+			return true, logs
+		}
+		state := strings.TrimSpace(docker(t, time.Minute, "inspect", "-f", "{{.State.Running}}", container))
+		if state == "false" {
+			return false, logs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the container neither served nor exited within %s:\n%s", runTimeout, logs)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// buildFromStdin builds one image from a Dockerfile on standard input, with
+// no build context. args are --build-arg values.
+func buildFromStdin(t *testing.T, image, dockerfile string, args ...string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), buildTimeout)
+	defer cancel()
+	// A lone "-" is the Dockerfile on standard input with no build context.
+	argv := make([]string, 0, 4+2*len(args))
+	argv = append(argv, "build", "-t", image)
+	for _, arg := range args {
+		argv = append(argv, "--build-arg", arg)
+	}
+	cmd := exec.CommandContext(ctx, "docker", append(argv, "-")...)
+	cmd.Dir = repoRoot(t)
+	cmd.Stdin = strings.NewReader(dockerfile)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "docker build %s:\n%s", image, out)
 }
 
 // TestNetsetupImage builds the init container image and checks that it
@@ -258,12 +443,6 @@ func TestSandboxBaseImage(t *testing.T) {
 		assert.Contains(t, string(out), "did not appear within 2s", "the refusal says what it waited for")
 		assert.NotContains(t, string(out), "the agent started", "the agent must not run")
 	})
-}
-
-func goarch(t *testing.T) string {
-	t.Helper()
-	out := docker(t, time.Minute, "version", "--format", "{{.Server.Arch}}")
-	return strings.TrimSpace(out)
 }
 
 // gitOverHTTPS serves a git repository over HTTPS inside the container,

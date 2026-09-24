@@ -17,7 +17,7 @@ repository enforces it, the text says so and names the enforcer.
 
 | Image | Built by | What is in it |
 |---|---|---|
-| proxy | `make image-proxy`, ko from `images/proxy/.ko.yaml` | `gcr.io/distroless/static-debian12:nonroot`, the `egress-proxy` binary and the public root certificates it verifies upstreams and the zone against. No shell and no package manager. |
+| proxy | `make image-proxy`, ko from `images/proxy/.ko.yaml` and then `images/proxy/Dockerfile` | `gcr.io/distroless/static-debian12:nonroot`, the `egress-proxy` binary with `cap_net_bind_service=+ep` on it, and the public root certificates it verifies upstreams and the zone against. No shell and no package manager. |
 | netsetup | `make image-netsetup`, `images/netsetup/Dockerfile` with the repository root as its build context | Alpine, the `egress-netsetup` binary, the legacy `iptables` and `ip6tables` binaries with their xtables extension libraries, and a shell. |
 | sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian bookworm-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
 
@@ -41,14 +41,38 @@ The image's own user is the distroless nonroot uid, 65532, so a manifest
 that wants the proxy on the uid the capture exempts sets `runAsUser`
 itself.
 
-**Capabilities.** `NET_BIND_SERVICE`, and only when `listen.transparent`
-names a port below 1024. `listen.transparent` has no default, and the
-redirect port the init container programs is 1015. A port below 1024 is one
-an unprivileged workload cannot bind during a sidecar restart to stand in
-for the proxy, and the capability is what lets the proxy bind it. The pod
-grants it: the binary has no file capability.
-Nothing else is needed: the proxy programs no rule and reads no other
-process.
+**Capabilities.** `NET_BIND_SERVICE`, and nothing else. The proxy programs
+no rule and reads no other process.
+
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+        add: ["NET_BIND_SERVICE"]
+
+The capability is what lets the proxy bind `listen.transparent` below 1024.
+The redirect port the init container programs is 1015, and a port below
+1024 is one an unprivileged workload cannot bind during a sidecar restart
+to stand in for the proxy.
+
+It takes both the image and the pod. The image holds
+`cap_net_bind_service=+ep` on `/ko-app/egress-proxy`, so the kernel puts the
+capability in the permitted and effective sets of whatever uid execs the
+binary. A permitted file capability is drawn from the bounding set, and the
+pod is what fills that set.
+
+Neither half works alone. Without the file capability a non-root container
+holds an added capability in its bounding set and nothing else
+(kubernetes/kubernetes#56374), so the bind is refused. Without the pod
+grant, the capability is outside the bounding set and the kernel refuses
+the exec itself with `operation not permitted`. The file capability still
+applies under `allowPrivilegeEscalation: false`, which is what sets
+`no_new_privs`, and `test/images` proves that.
+
+**NEVER give the proxy container `drop: ["ALL"]` without
+`add: ["NET_BIND_SERVICE"]`**, whatever `listen.transparent` is set to. The
+capability is a property of the binary, so a bounding set without it stops
+the container before `main` runs, with `listen.transparent` unset as much
+as with it set.
 
 **Volumes and paths.**
 
@@ -176,8 +200,19 @@ the container.
 - **`net.ipv4.ip_unprivileged_port_start`.** The redirect target is below
   1024 so the workload cannot bind it. That rests on the sysctl, so the
   proxy reads it at start-up rather than trusting the manifest and refuses
-  to start when it is at or below the redirect port. A Kubernetes pod gets
-  the kernel default of 1024. Docker lowers it to 0.
+  to start when it is at or below the redirect port. containerd sets the
+  sysctl to 0 in a pod sandbox, and Docker sets it to 0 too, so the refusal
+  fires on every pod that has not set it. A pod that wants this mitigation
+  sets it itself:
+
+      securityContext:
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "1024"
+
+  It is on the kubelet's safe sysctl list, so no node configuration and no
+  `--allowed-unsafe-sysctls` is needed. Under Docker, run the container
+  with `--sysctl net.ipv4.ip_unprivileged_port_start=1024`.
 - **The CA state directory.** The proxy checks the file system type and
   refuses a `ca.state_dir` that is not memory-backed, and refuses one that
   overlaps `ca.out_dir`, before any key exists.
