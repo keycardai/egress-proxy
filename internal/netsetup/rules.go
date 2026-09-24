@@ -51,12 +51,12 @@ type Step struct {
 	Spec  []string
 	// At is the position an insert puts the rule at. Zero appends.
 	At int
-	// Existing says the chain belongs to the rest of the system rather than
-	// to this package. Such a rule is inserted at At only when no identical
-	// rule is anywhere in the chain. It is never deleted: a delete followed
-	// by an insert leaves an instant in which OUTPUT has no jump and its
-	// ACCEPT policy governs the pod. A rule already present at another
-	// position stays there, and Verify refuses it.
+	// Existing says the chain belongs to the rest of the system, not to
+	// this package. Such a rule is inserted at At only when no identical
+	// rule is anywhere in the chain. A rule already present at another
+	// position stays there, and Verify refuses it. NEVER delete one: OUTPUT
+	// must hold the jump at every instant, or its ACCEPT policy governs the
+	// pod.
 	Existing bool
 	// Seal says this rule holds the chain closed while the rest of it is
 	// filled. Apply appends it in the same pair of invocations that clears

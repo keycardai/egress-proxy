@@ -77,11 +77,11 @@ type Tool struct {
 }
 
 // detectTool runs a binary's --version and reports which backend it uses.
+// A version that names no backend is refused, because assuming one is how a
+// pod ends up with rules the kernel never applied.
 //
-// The backend is read here rather than from go-iptables, which parses the
-// same string, keeps the answer in an unexported field and defaults it to
-// legacy when the version names none. Assuming a backend is how a pod ends
-// up with rules the kernel never applied.
+// NEVER take the backend from go-iptables. It reports legacy when the
+// version names none (extractIptablesVersion in iptables/iptables.go).
 func detectTool(ctx context.Context, name string) (Tool, error) {
 	path, err := exec.LookPath(name)
 	if err != nil {
@@ -224,24 +224,20 @@ func applyStep(handle Tables, step Step) error {
 // rules that make this pod's egress unavoidable in the kernel, and is
 // anything else in the way. Three checks together pin the ruleset.
 //
-// Every rule the program installs is present. The question goes to the
-// kernel with -C rather than by parsing -S output, because iptables renders
-// a rule back in its own normalised form and comparing text would compare
-// this package's spelling against iptables'.
+// Every rule the program installs is present. The kernel answers this with
+// -C, because iptables prints a rule back in its own normalised form and
+// that text does not match this package's spelling.
 //
-// Each owned chain holds exactly as many rules as the program puts in it. A
-// chain whose count matches and every one of whose expected rules is present
-// holds those rules and no others. -C alone could never say that: it answers
-// "is this rule there", never "is anything ahead of it", and an ACCEPT
-// inserted above the terminal DROP accepts everything the DROP would drop.
-// The filter chain's terminal DROP is checked by position as well. Every
-// accept is inserted above it, so a DROP that is not last leaves the rules
-// after it accepting.
+// Each owned chain holds exactly as many rules as the program puts in it.
+// With every expected rule present, a matching count means the chain holds
+// no other rule, such as an ACCEPT above the terminal DROP. The filter
+// chain's terminal DROP is checked by position as well. Every accept is
+// inserted above it, so a DROP that is not last leaves the rules after it
+// accepting.
 //
-// Each OUTPUT jump is the first rule in its OUTPUT chain. The same limit of
-// -C applies there: a rule ahead of the filter jump accepts what the
-// terminal DROP would drop, and one ahead of the nat jump rewrites the
-// destination before the REDIRECT sees it.
+// Each OUTPUT jump is the first rule in its OUTPUT chain. A rule ahead of
+// the filter jump accepts what the terminal DROP would drop, and one ahead
+// of the nat jump rewrites the destination before the REDIRECT sees it.
 func Verify(handle Tables, program Program, progress io.Writer) error {
 	var found problems
 	for _, step := range program.Steps {
@@ -273,8 +269,8 @@ func Verify(handle Tables, program Program, progress io.Writer) error {
 // owned chain. Whatever runs first decides the packet, so a jump that is not
 // the first rule governs only what the rules ahead of it passed on.
 //
-// The jump is found by its target rather than by matching the whole rendered
-// line, because iptables prints a rule back in its own normalised form.
+// The jump is found by its target, because iptables prints a rule back in
+// its own normalised form.
 func jumpProblems(handle Tables, step Step) []string {
 	target := jumpTarget(step.Spec)
 	if target == "" {
