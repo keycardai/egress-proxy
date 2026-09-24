@@ -11,6 +11,12 @@ import (
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 )
 
+// denying is the same configuration with IPv6 denied rather than proxied.
+func denying(cfg netsetup.Config) netsetup.Config {
+	cfg.IPv6 = netsetup.IPv6Deny
+	return cfg
+}
+
 // render builds one family's ruleset and returns it as the iptables
 // invocations it performs.
 func render(t *testing.T, cfg netsetup.Config, family netsetup.Family) string {
@@ -81,6 +87,35 @@ func TestProgramRules(t *testing.T) {
 			// RFC 4890 section 4.4.4 leaves Redirect to policy, and this
 			// policy drops it.
 			absent: []string{"10.43.0.10", "127.0.0.0/8", "--icmpv6-type 137", "--icmpv6-type 128"},
+		},
+		{
+			name: "the IPv6 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv6,
+			want: []string{
+				"-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 2 -o lo -j ACCEPT",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 3 -d ::1/128 -j ACCEPT",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 11 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT",
+				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -j RETURN",
+				"-t nat -A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
+				"-t filter -A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT",
+			},
+			// Each of these would let the pod originate IPv6.
+			absent: []string{
+				"REDIRECT", "--uid-owner", "--dport 53", "fd00::a", "RELATED",
+				"10.42.0.0/16", "10.43.0.0/16",
+			},
+		},
+		{
+			// The IPv6 mode does not change the IPv4 ruleset.
+			name: "the IPv4 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv4,
+			want: []string{
+				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 " +
+					"-j REDIRECT --to-ports 1015",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
+			},
+			absent: []string{"fd00::a", "ipv6-icmp"},
 		},
 	}
 	for _, tc := range tests {

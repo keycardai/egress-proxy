@@ -39,6 +39,10 @@ var (
 	// ErrRulesMissing is returned when the tables do not hold the whole
 	// ruleset.
 	ErrRulesMissing = errors.New("the ruleset is not in force")
+	// ErrIPv6Undetermined is returned when this process cannot tell whether
+	// the kernel has IPv6. Choosing a mode from a guess can leave IPv6
+	// ungoverned, so the caller names one instead.
+	ErrIPv6Undetermined = errors.New("whether this kernel has IPv6 could not be determined")
 	// ErrNoBackendNamed is returned for a version string with no
 	// parenthesised backend. Assuming a backend is how a pod ends up with
 	// rules the kernel never applied.

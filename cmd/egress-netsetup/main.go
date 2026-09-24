@@ -285,27 +285,33 @@ func dropNetAdmin(keep bool, receipt *netsetup.Receipt, out io.Writer) error {
 	return nil
 }
 
-// resolveIPv6 decides whether to program ip6tables. auto follows the
-// kernel, on requires IPv6 and off leaves it ungoverned.
-func resolveIPv6(mode string, out io.Writer) (bool, error) {
-	switch mode {
-	case "auto":
-		has := netsetup.KernelHasIPv6()
-		if !has {
-			fmt.Fprintln(out, "# this kernel has no IPv6, so no ip6tables ruleset is programmed")
-		}
-		return has, nil
-	case "on":
-		if !netsetup.KernelHasIPv6() {
-			return false, fmt.Errorf("%w: on was asked for and this kernel has no IPv6", errUsage)
-		}
-		return true, nil
-	case "off":
-		fmt.Fprintln(out, "# IPv6 is left ungoverned: every IPv6 destination is reachable on every port")
-		return false, nil
-	default:
-		return false, fmt.Errorf("%w: %q is not auto, on or off", errUsage, mode)
+// resolveIPv6 turns the --ipv6 flag and the kernel into a mode. auto and on
+// send captured IPv6 TCP into the proxy, and off drops every IPv6 packet
+// the pod sends.
+//
+// A probe that cannot answer fails the run rather than guessing. See
+// netsetup.IPv6Mode for what an ungoverned family costs.
+func resolveIPv6(mode string, out io.Writer) (netsetup.IPv6Mode, error) {
+	if mode != "auto" && mode != "on" && mode != "off" {
+		return netsetup.IPv6None, fmt.Errorf("%w: %q is not auto, on or off", errUsage, mode)
 	}
+	has, err := netsetup.KernelHasIPv6()
+	if err != nil {
+		return netsetup.IPv6None, fmt.Errorf("%w. Name --ipv6 on or --ipv6 off rather than auto", err)
+	}
+	if !has {
+		if mode == "on" {
+			return netsetup.IPv6None, fmt.Errorf("%w: on was asked for and this kernel has no IPv6", errUsage)
+		}
+		fmt.Fprintln(out, "# this kernel has no IPv6, so no ip6tables ruleset is programmed")
+		return netsetup.IPv6None, nil
+	}
+	if mode == "off" {
+		fmt.Fprintln(out, "# --ipv6 off: every IPv6 packet this pod sends is dropped. "+
+			"Replies to inbound connections and neighbour discovery still go out")
+		return netsetup.IPv6Deny, nil
+	}
+	return netsetup.IPv6Proxy, nil
 }
 
 func parsePorts(values []string) ([]int, error) {
@@ -412,7 +418,7 @@ func flagSet(opts *settings) []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name: "ipv6", Value: "auto", Destination: &opts.ipv6,
-			Usage: "program ip6tables: auto follows the kernel, on requires it, off leaves IPv6 ungoverned",
+			Usage: "ip6tables ruleset: auto follows the kernel, on requires IPv6, off denies all IPv6 egress",
 		},
 		&cli.StringFlag{
 			Name: "iptables", Destination: &opts.iptables,

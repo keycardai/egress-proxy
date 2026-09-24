@@ -113,8 +113,13 @@ func (c Config) Program(family Family) (Program, error) {
 		Family: family,
 		Chains: []Chain{{Table: natTable, Name: natChain}, {Table: filterTable, Name: filterChain}},
 	}
-	program.nat(c, family)
-	program.filter(c, family)
+	if family == FamilyIPv6 && c.IPv6 == IPv6Deny {
+		program.denyNat()
+		program.denyFilter()
+	} else {
+		program.nat(c, family)
+		program.filter(c, family)
+	}
 	// The jumps attach the chains. They go in last, so the chains are full
 	// before anything reaches them.
 	program.Steps = append(program.Steps,
@@ -248,6 +253,32 @@ func (p *Program) filter(cfg Config, family Family) {
 		for _, server := range addrsFor(family, cfg.DNSServers) {
 			p.accept("-d", server.String(), "-p", protocol, "--dport", "53", "-j", "ACCEPT")
 		}
+	}
+}
+
+// denyNat puts a single RETURN in the nat chain. IPv6Deny redirects
+// nothing. The chain and its OUTPUT jump stay, so every family has the same
+// shape in the tables.
+func (p *Program) denyNat() {
+	p.add("-j", "RETURN")
+}
+
+// denyFilter drops the IPv6 traffic the pod originates, and leaves the pod
+// reachable over IPv6. A reply to a connection opened into the pod is
+// ESTABLISHED, so it is accepted. A flow the pod starts never becomes
+// ESTABLISHED, because its first packet meets the DROP.
+//
+// NEVER add RELATED here. A conntrack helper can use it to admit a new
+// outbound flow to any address and port.
+func (p *Program) denyFilter() {
+	p.Steps = append(p.Steps, Step{
+		Table: filterTable, Chain: filterChain, Spec: []string{"-j", "DROP"}, Seal: true,
+	})
+	p.accept("-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")
+	p.accept("-o", "lo", "-j", "ACCEPT")
+	p.accept("-d", loopbackFor(FamilyIPv6), "-j", "ACCEPT")
+	for _, icmpType := range ndpTypes() {
+		p.accept("-p", "ipv6-icmp", "-m", "icmp6", "--icmpv6-type", strconv.Itoa(icmpType), "-j", "ACCEPT")
 	}
 }
 

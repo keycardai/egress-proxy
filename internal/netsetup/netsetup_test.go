@@ -2,6 +2,8 @@ package netsetup_test
 
 import (
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -100,10 +102,13 @@ func TestFamilies(t *testing.T) {
 	t.Parallel()
 	cfg := valid()
 	assert.Equal(t, []netsetup.Family{netsetup.FamilyIPv4, netsetup.FamilyIPv6}, cfg.Families(),
-		"IPv6 on programs both families")
-	cfg.IPv6 = false
+		"IPv6Proxy programs both families")
+	cfg.IPv6 = netsetup.IPv6Deny
+	assert.Equal(t, []netsetup.Family{netsetup.FamilyIPv4, netsetup.FamilyIPv6}, cfg.Families(),
+		"IPv6Deny programs both families: the rules that deny IPv6 go in the tables")
+	cfg.IPv6 = netsetup.IPv6None
 	assert.Equal(t, []netsetup.Family{netsetup.FamilyIPv4}, cfg.Families(),
-		"IPv6 off programs IPv4 alone")
+		"IPv6None programs IPv4 alone")
 }
 
 func TestNameservers(t *testing.T) {
@@ -173,4 +178,45 @@ func addrTexts(addrs []netip.Addr) []string {
 func mustContainOnce(t *testing.T, rendered, rule string) {
 	t.Helper()
 	assert.Equal(t, 1, strings.Count(rendered, rule), "%q appears once in:\n%s", rule, rendered)
+}
+
+// TestKernelHasIPv6 pins what the probe does with each answer the
+// filesystem can give. Only the file being absent says the kernel has no
+// IPv6. Any other error means this process cannot tell, and reading it as
+// "no IPv6" would leave the family unprogrammed and every IPv6 destination
+// reachable on every port.
+func TestKernelHasIPv6(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	present := filepath.Join(dir, "if_inet6")
+	require.NoError(t, os.WriteFile(present, []byte("\n"), 0o600), "the file that says the kernel has IPv6")
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+		// wantErr says the probe could not tell.
+		wantErr bool
+	}{
+		{name: "the file is there", path: present, want: true},
+		{name: "the file is absent", path: filepath.Join(dir, "missing"), want: false},
+		{
+			// A path under a regular file answers ENOTDIR, which is neither
+			// "there" nor "absent".
+			name: "the path cannot be walked", path: filepath.Join(present, "if_inet6"), wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			has, err := netsetup.KernelHasIPv6At(tc.path)
+			if tc.wantErr {
+				require.ErrorIs(t, err, netsetup.ErrIPv6Undetermined, "an unreadable probe is not an answer")
+				assert.False(t, has, "a probe that failed reports no IPv6 alongside its error")
+				return
+			}
+			require.NoError(t, err, "the probe answers")
+			assert.Equal(t, tc.want, has, "whether the kernel has IPv6")
+		})
+	}
 }

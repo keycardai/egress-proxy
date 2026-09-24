@@ -14,9 +14,12 @@
 package netsetup
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -86,10 +89,43 @@ type Config struct {
 	// host would then leave the pod without passing the proxy. At least one
 	// server is required.
 	DNSServers []netip.Addr
-	// IPv6 also generates the ip6tables ruleset. A kernel with IPv6 that
-	// this ruleset does not program is a pod that reaches any IPv6
-	// destination on any port.
-	IPv6 bool
+	// IPv6 says what the ip6tables ruleset does.
+	IPv6 IPv6Mode
+}
+
+// IPv6Mode says what the ip6tables ruleset does.
+//
+// Every mode governs IPv6. If the kernel has IPv6 and no ip6tables ruleset
+// is programmed, the pod reaches any IPv6 destination on any port. Nothing
+// redirects that traffic and nothing drops it. The zero value programs
+// nothing, so it is correct only on a kernel with no IPv6.
+type IPv6Mode int
+
+const (
+	// IPv6None programs no ip6tables ruleset. NEVER choose it for a kernel
+	// that has IPv6.
+	IPv6None IPv6Mode = iota
+	// IPv6Proxy redirects captured IPv6 TCP into the proxy and drops the
+	// rest, which is what the IPv4 ruleset does.
+	IPv6Proxy
+	// IPv6Deny drops every IPv6 packet the pod sends. The pod stays
+	// reachable over IPv6: replies to a connection opened into it are
+	// accepted, as is neighbour discovery, so a dual-stack Service still
+	// works.
+	IPv6Deny
+)
+
+func (m IPv6Mode) String() string {
+	switch m {
+	case IPv6None:
+		return "none"
+	case IPv6Proxy:
+		return "proxy"
+	case IPv6Deny:
+		return "deny"
+	default:
+		return "IPv6Mode(" + strconv.Itoa(int(m)) + ")"
+	}
 }
 
 // DefaultConfig is the pod contract: the sidecar on uid 1337 with its
@@ -103,16 +139,17 @@ func DefaultConfig() Config {
 		ProxyUID:     DefaultProxyUID,
 		RedirectPort: DefaultRedirectPort,
 		CapturePorts: []int{80, 443},
-		IPv6:         true,
+		IPv6:         IPv6Proxy,
 	}
 }
 
-// Families lists the address families to program.
+// Families lists the address families to program. A denied family is
+// programmed too: the rules that deny it have to go in the tables.
 func (c Config) Families() []Family {
-	if c.IPv6 {
-		return []Family{FamilyIPv4, FamilyIPv6}
+	if c.IPv6 == IPv6None {
+		return []Family{FamilyIPv4}
 	}
-	return []Family{FamilyIPv4}
+	return []Family{FamilyIPv4, FamilyIPv6}
 }
 
 // Validate reports every problem it finds, so one run tells an operator
@@ -129,6 +166,11 @@ func (c Config) Validate() error {
 	found.add(prefixProblems("pod CIDR", c.PodCIDRs)...)
 	found.add(prefixProblems("service CIDR", c.ServiceCIDRs)...)
 	found.add(c.resolverProblems()...)
+	switch c.IPv6 {
+	case IPv6None, IPv6Proxy, IPv6Deny:
+	default:
+		found.addf("IPv6 mode %d is not one this package knows", c.IPv6)
+	}
 	if len(found) == 0 {
 		return nil
 	}
@@ -208,14 +250,22 @@ func (p *problems) add(found ...string) {
 // exists exactly when the kernel has IPv6.
 const ipv6ProcPath = "/proc/net/if_inet6"
 
-// KernelHasIPv6 reports whether this kernel has IPv6.
+// KernelHasIPv6 reports whether this kernel has IPv6. It picks the IPv6Mode
+// a run uses, so read what that type says about an ungoverned family.
 //
-// A kernel with IPv6 whose ip6tables rules are never programmed is a pod
-// that reaches any IPv6 destination on any port, neither redirected nor
-// dropped. So detection decides whether to program the v6 ruleset, and a
-// missing ip6tables-legacy on such a kernel is an error rather than a family
-// skipped in silence.
-func KernelHasIPv6() bool {
-	_, err := os.Stat(ipv6ProcPath)
-	return err == nil
+// NEVER read a failure here as a kernel without IPv6. Only the file being
+// absent says that. Any other error means this process cannot tell.
+func KernelHasIPv6() (bool, error) {
+	return kernelHasIPv6At(ipv6ProcPath)
+}
+
+func kernelHasIPv6At(path string) (bool, error) {
+	switch _, err := os.Stat(path); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: %s could not be read: %w", ErrIPv6Undetermined, path, err)
+	}
 }

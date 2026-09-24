@@ -87,19 +87,54 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 	}
 }
 
-// TestIPv6OffPrintsOneFamilyAndSaysSo proves --ipv6 off renders the iptables
-// ruleset alone and announces what it gives up. A kernel with IPv6 that this
-// ruleset does not program is a pod that reaches any IPv6 destination on any
-// port, so the run says so rather than leaving it to be noticed.
-func TestIPv6OffPrintsOneFamilyAndSaysSo(t *testing.T) {
+// TestIPv6OffDenies proves --ipv6 off programs an ip6tables ruleset that
+// drops what the pod sends, rather than skipping the family. Skipping it
+// would leave IPv6 ungoverned and nothing would report that.
+//
+// The skip reads the same kernel the command does.
+func TestIPv6OffDenies(t *testing.T) {
 	t.Parallel()
+	has, err := netsetup.KernelHasIPv6()
+	require.NoError(t, err, "read whether this kernel has IPv6")
+	if !has {
+		t.Skip("there is no IPv6 on this kernel to deny")
+	}
+	resolv := resolvConf(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
+	var out bytes.Buffer
+	args := []string{"egress-netsetup", "--dry-run", "--resolv-conf", resolv, "--ipv6", "off"}
+	require.NoError(t, command(&out, nil).Run(context.Background(), args), "the dry run")
+	start := strings.Index(out.String(), "# ipv6 ruleset")
+	require.GreaterOrEqual(t, start, 0, "--ipv6 off prints an ip6tables ruleset")
+	for _, want := range []string{
+		"-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
+		"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+		"every IPv6 packet this pod sends is dropped",
+	} {
+		assert.Contains(t, out.String(), want, "the printed ruleset")
+	}
+	ipv6 := out.String()[start:]
+	for _, absent := range []string{"REDIRECT", "fd00::a", "--dport 53"} {
+		assert.NotContains(t, ipv6, absent, "the denied family redirects nothing and accepts no egress")
+	}
+}
+
+// TestNoKernelIPv6ProgramsIPv4Alone proves a kernel without IPv6 gets the
+// IPv4 ruleset and no ip6tables invocation, which would fail on a kernel
+// with no ip6_tables module.
+func TestNoKernelIPv6ProgramsIPv4Alone(t *testing.T) {
+	t.Parallel()
+	has, err := netsetup.KernelHasIPv6()
+	require.NoError(t, err, "read whether this kernel has IPv6")
+	if has {
+		t.Skip("this kernel has IPv6, so every mode programs the family")
+	}
 	resolv := resolvConf(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
 	var out bytes.Buffer
 	args := []string{"egress-netsetup", "--dry-run", "--resolv-conf", resolv, "--ipv6", "off"}
 	require.NoError(t, command(&out, nil).Run(context.Background(), args), "the IPv4 dry run")
 	assert.Contains(t, out.String(), "# ipv4 ruleset", "the IPv4 ruleset is printed")
-	assert.NotContains(t, out.String(), "# ipv6 ruleset", "--ipv6 off leaves IPv6 out")
-	assert.Contains(t, out.String(), "IPv6 is left ungoverned", "--ipv6 off says what it gives up")
+	assert.NotContains(t, out.String(), "# ipv6 ruleset", "a kernel with no IPv6 gets no ip6tables ruleset")
+	assert.Contains(t, out.String(), "this kernel has no IPv6", "the run says why the family is absent")
 }
 
 // TestBothFamiliesArePrinted proves --ipv6 on renders the ip6tables ruleset
@@ -107,7 +142,9 @@ func TestIPv6OffPrintsOneFamilyAndSaysSo(t *testing.T) {
 // --ipv6 on requires a kernel with IPv6, which is what the skip reads.
 func TestBothFamiliesArePrinted(t *testing.T) {
 	t.Parallel()
-	if !netsetup.KernelHasIPv6() {
+	has, err := netsetup.KernelHasIPv6()
+	require.NoError(t, err, "read whether this kernel has IPv6")
+	if !has {
 		t.Skip("--ipv6 on refuses a kernel with no IPv6")
 	}
 	resolv := resolvConf(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
