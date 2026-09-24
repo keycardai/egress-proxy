@@ -4,6 +4,10 @@
 # id. go-licenses walks the packages' resolved imports, so a transitive
 # dependency is checked like a direct one.
 #
+# It walks one GOOS at a time, and a file its build constraints exclude is
+# never loaded. Both platforms run here, so a module that only a
+# //go:build linux file imports is checked on a macOS workstation too.
+#
 # Usage: check-licenses.sh [DIR]
 #        check-licenses.sh --allowed     print the allow-list, one id per line
 #
@@ -38,10 +42,19 @@ dir=${1:-$repo_root}
 [[ -d $dir ]] || { echo "check-licenses: not a directory: $dir" >&2; exit 2; }
 cd "$dir"
 
+# The tool is built once, for the host. Setting GOOS for `go tool` would
+# cross-build the tool itself instead of changing what it walks.
+tool_dir=$(mktemp -d)
+trap 'rm -rf "$tool_dir"' EXIT
+go build -modfile="$repo_root/go.mod" -o "$tool_dir/go-licenses" github.com/google/go-licenses/v2
+
 # Packages of this repository are not third-party and are skipped by path
 # prefix; their dependencies are still checked.
 allowed=$(IFS=,; echo "${allowed_licenses[*]}")
-go tool -modfile="$repo_root/go.mod" go-licenses check ./... \
-	--allowed_licenses="$allowed" \
-	--ignore github.com/keycardai/egress-proxy
+for goos in linux darwin; do
+	echo "check-licenses: GOOS=$goos ($dir)"
+	GOOS=$goos "$tool_dir/go-licenses" check ./... \
+		--allowed_licenses="$allowed" \
+		--ignore github.com/keycardai/egress-proxy
+done
 echo "check-licenses: OK ($dir): every module in the build list is licensed under one of: $allowed"
