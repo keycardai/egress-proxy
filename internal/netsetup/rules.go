@@ -52,10 +52,11 @@ type Step struct {
 	// At is the position an insert puts the rule at. Zero appends.
 	At int
 	// Existing says the chain belongs to the rest of the system rather than
-	// to this package. Such a rule is appended only when an identical one is
-	// absent, and never deleted: a delete followed by an append leaves an
-	// instant in which OUTPUT has no jump and its ACCEPT policy governs the
-	// pod.
+	// to this package. Such a rule is inserted at At only when no identical
+	// rule is anywhere in the chain. It is never deleted: a delete followed
+	// by an insert leaves an instant in which OUTPUT has no jump and its
+	// ACCEPT policy governs the pod. A rule already present at another
+	// position stays there, and Verify refuses it.
 	Existing bool
 	// Seal says this rule holds the chain closed while the rest of it is
 	// filled. Apply appends it in the same pair of invocations that clears
@@ -121,10 +122,11 @@ func (c Config) Program(family Family) (Program, error) {
 		program.filter(c, family)
 	}
 	// The jumps attach the chains. They go in last, so the chains are full
-	// before anything reaches them.
+	// before anything reaches them. Each is the first rule in its OUTPUT
+	// chain, ahead of any rule the rest of the system put there.
 	program.Steps = append(program.Steps,
-		Step{Table: natTable, Chain: "OUTPUT", Existing: true, Spec: []string{"-p", "tcp", "-j", natChain}},
-		Step{Table: filterTable, Chain: "OUTPUT", Existing: true, Spec: []string{"-j", filterChain}},
+		Step{Table: natTable, Chain: "OUTPUT", At: 1, Existing: true, Spec: []string{"-p", "tcp", "-j", natChain}},
+		Step{Table: filterTable, Chain: "OUTPUT", At: 1, Existing: true, Spec: []string{"-j", filterChain}},
 	)
 	program.count()
 	return program, nil

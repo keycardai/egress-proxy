@@ -1,6 +1,8 @@
 package netsetup_test
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,9 +15,10 @@ import (
 )
 
 // fakeTables stands in for an iptables binary. It records every invocation
-// in order, so a test reads the sequence Apply performs, and it answers
-// every read from a chain listing the case supplies, so a test drives Verify
-// against tables that hold whatever it wants them to hold.
+// in order, so a test reads the sequence Apply performs. Every write also
+// changes the chain listing it holds, and every read answers from that
+// listing, so a test drives Verify against tables that hold whatever the
+// case or an earlier Apply put there.
 type fakeTables struct {
 	calls []string
 	// rules is what List answers, keyed by table and chain, in the order
@@ -26,29 +29,45 @@ type fakeTables struct {
 	listErr map[string]error
 }
 
+var errInsertPosition = errors.New("index of insertion too big")
+
 func key(table, chain string) string { return table + " " + chain }
+
+func rule(chain string, spec []string) string { return "-A " + chain + " " + strings.Join(spec, " ") }
 
 func (f *fakeTables) ClearChain(table, chain string) error {
 	f.calls = append(f.calls, "-t "+table+" -F "+chain)
+	f.set(table, chain, nil)
 	return nil
 }
 
 func (f *fakeTables) Append(table, chain string, spec ...string) error {
 	f.calls = append(f.calls, "-t "+table+" -A "+chain+" "+strings.Join(spec, " "))
+	f.set(table, chain, append(f.rules[key(table, chain)], rule(chain, spec)))
 	return nil
 }
 
-func (f *fakeTables) AppendUnique(table, chain string, spec ...string) error {
-	return f.Append(table, chain, spec...)
-}
-
+// Insert refuses a position past the end of the chain plus one, as
+// iptables does.
 func (f *fakeTables) Insert(table, chain string, pos int, spec ...string) error {
 	f.calls = append(f.calls, "-t "+table+" -I "+chain+" "+strconv.Itoa(pos)+" "+strings.Join(spec, " "))
+	rules := f.rules[key(table, chain)]
+	if pos < 1 || pos > len(rules)+1 {
+		return fmt.Errorf("%w: %d", errInsertPosition, pos)
+	}
+	f.set(table, chain, slices.Insert(rules, pos-1, rule(chain, spec)))
 	return nil
+}
+
+func (f *fakeTables) InsertUnique(table, chain string, pos int, spec ...string) error {
+	if present, _ := f.Exists(table, chain, spec...); present {
+		return nil
+	}
+	return f.Insert(table, chain, pos, spec...)
 }
 
 func (f *fakeTables) Exists(table, chain string, spec ...string) (bool, error) {
-	return slices.Contains(f.rules[key(table, chain)], "-A "+chain+" "+strings.Join(spec, " ")), nil
+	return slices.Contains(f.rules[key(table, chain)], rule(chain, spec)), nil
 }
 
 func (f *fakeTables) List(table, chain string) ([]string, error) {
@@ -58,6 +77,13 @@ func (f *fakeTables) List(table, chain string) ([]string, error) {
 	return append([]string{"-N " + chain}, f.rules[key(table, chain)]...), nil
 }
 
+func (f *fakeTables) set(table, chain string, rules []string) {
+	if f.rules == nil {
+		f.rules = make(map[string][]string)
+	}
+	f.rules[key(table, chain)] = rules
+}
+
 // listing renders what the tables hold once a program has been applied. An
 // insert at position n lands at index n-1, which is how the accepts end up
 // above the DROP that was appended first.
@@ -65,12 +91,12 @@ func listing(program netsetup.Program) map[string][]string {
 	out := make(map[string][]string, len(program.Chains)+2)
 	for _, step := range program.Steps {
 		at := key(step.Table, step.Chain)
-		rule := "-A " + step.Chain + " " + strings.Join(step.Spec, " ")
+		installed := rule(step.Chain, step.Spec)
 		if step.At > 0 {
-			out[at] = slices.Insert(out[at], step.At-1, rule)
+			out[at] = slices.Insert(out[at], step.At-1, installed)
 			continue
 		}
-		out[at] = append(out[at], rule)
+		out[at] = append(out[at], installed)
 	}
 	return out
 }
@@ -107,6 +133,80 @@ func TestApplySealsTheFilterChainFirst(t *testing.T) {
 		if strings.Contains(call, "EGRESS_PROXY_FILTER_OUTPUT") && strings.Contains(call, "ACCEPT") {
 			assert.Greater(t, i, 1, "accept %q is inserted after the DROP is in place", call)
 		}
+	}
+}
+
+// TestApplyPutsEachJumpFirst applies the ruleset to OUTPUT chains that
+// already hold rules, then verifies it against the tables Apply left. A rule
+// ahead of a jump decides the packet first, so the ruleset is in force only
+// when each jump is rule 1.
+func TestApplyPutsEachJumpFirst(t *testing.T) {
+	t.Parallel()
+	const (
+		filterJump = "-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT"
+		natJump    = "-A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT"
+		// Rules of the kind Docker's embedded resolver puts in a
+		// container's OUTPUT chains.
+		filterOther = "-A OUTPUT -d 127.0.0.11/32 -j ACCEPT"
+		natOther    = "-A OUTPUT -d 127.0.0.11/32 -j DOCKER_OUTPUT"
+	)
+	tests := []struct {
+		name string
+		// beforeFilter and beforeNat are what each OUTPUT chain holds when
+		// Apply starts.
+		beforeFilter, beforeNat []string
+		wantFilter, wantNat     []string
+		// wantRefusal is empty when Verify passes after Apply.
+		wantRefusal string
+	}{
+		{
+			name:       "empty OUTPUT chains",
+			wantFilter: []string{filterJump},
+			wantNat:    []string{natJump},
+		},
+		{
+			name:         "OUTPUT chains that hold a rule the rest of the system put there",
+			beforeFilter: []string{filterOther},
+			beforeNat:    []string{natOther},
+			wantFilter:   []string{filterJump, filterOther},
+			wantNat:      []string{natJump, natOther},
+		},
+		{
+			name:         "a re-run, which leaves the jumps an earlier run put first",
+			beforeFilter: []string{filterJump, filterOther},
+			beforeNat:    []string{natJump, natOther},
+			wantFilter:   []string{filterJump, filterOther},
+			wantNat:      []string{natJump, natOther},
+		},
+		{
+			name:         "a re-run after a rule went in ahead of the filter jump",
+			beforeFilter: []string{filterOther, filterJump},
+			beforeNat:    []string{natJump},
+			wantFilter:   []string{filterOther, filterJump},
+			wantNat:      []string{natJump},
+			wantRefusal:  "jumps to EGRESS_PROXY_FILTER_OUTPUT only at position 2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			program := programFor(t)
+			handle := &fakeTables{}
+			handle.set("filter", "OUTPUT", slices.Clone(tc.beforeFilter))
+			handle.set("nat", "OUTPUT", slices.Clone(tc.beforeNat))
+
+			require.NoError(t, netsetup.Apply(handle, program, nil), "apply the ruleset")
+			assert.Equal(t, tc.wantFilter, handle.rules["filter OUTPUT"], "the filter OUTPUT chain")
+			assert.Equal(t, tc.wantNat, handle.rules["nat OUTPUT"], "the nat OUTPUT chain")
+
+			err := netsetup.Verify(handle, program, nil)
+			if tc.wantRefusal == "" {
+				require.NoError(t, err, "the ruleset is in force")
+				return
+			}
+			require.ErrorIs(t, err, netsetup.ErrRulesMissing, "the error the caller keys on")
+			assert.Contains(t, err.Error(), tc.wantRefusal, "the refusal names the rule ahead of the jump")
+		})
 	}
 }
 

@@ -152,8 +152,8 @@ func protocol(family Family) iptables.Protocol {
 type Tables interface {
 	ClearChain(table, chain string) error
 	Append(table, chain string, rulespec ...string) error
-	AppendUnique(table, chain string, rulespec ...string) error
 	Insert(table, chain string, pos int, rulespec ...string) error
+	InsertUnique(table, chain string, pos int, rulespec ...string) error
 	Exists(table, chain string, rulespec ...string) (bool, error)
 	List(table, chain string) ([]string, error)
 }
@@ -209,7 +209,8 @@ func writeStep(handle Tables, step Step, progress io.Writer) error {
 func applyStep(handle Tables, step Step) error {
 	switch {
 	case step.Existing:
-		return handle.AppendUnique(step.Table, step.Chain, step.Spec...) //nolint:wrapcheck // the caller names the step
+		//nolint:wrapcheck // the caller names the step
+		return handle.InsertUnique(step.Table, step.Chain, step.At, step.Spec...)
 	case step.At > 0:
 		return handle.Insert(step.Table, step.Chain, step.At, step.Spec...) //nolint:wrapcheck // same
 	default:

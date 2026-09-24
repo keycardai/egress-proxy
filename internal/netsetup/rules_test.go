@@ -66,8 +66,8 @@ func TestProgramRules(t *testing.T) {
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -m owner --uid-owner 1337 -j ACCEPT",
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 6 -d 10.43.0.10 -p tcp --dport 53 -j ACCEPT",
-				"-t nat -A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
-				"-t filter -A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT",
+				"-t nat -I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
+				"-t filter -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
 			},
 			absent: []string{"fd00::a", "::1/128", "ipv6-icmp"},
 		},
@@ -98,8 +98,8 @@ func TestProgramRules(t *testing.T) {
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 11 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT",
 				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -j RETURN",
-				"-t nat -A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
-				"-t filter -A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT",
+				"-t nat -I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
+				"-t filter -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
 			},
 			// Each of these would let the pod originate IPv6.
 			absent: []string{

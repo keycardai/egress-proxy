@@ -240,13 +240,13 @@ func (f *appliedTables) Append(table, chain string, spec ...string) error {
 	return nil
 }
 
-func (f *appliedTables) AppendUnique(table, chain string, spec ...string) error {
-	return f.Append(table, chain, spec...)
-}
-
 func (f *appliedTables) Insert(table, chain string, pos int, spec ...string) error {
 	f.writes = append(f.writes, "-t "+table+" -I "+chain+" "+strconv.Itoa(pos)+" "+strings.Join(spec, " "))
 	return nil
+}
+
+func (f *appliedTables) InsertUnique(table, chain string, pos int, spec ...string) error {
+	return f.Insert(table, chain, pos, spec...)
 }
 
 func (f *appliedTables) Exists(table, chain string, spec ...string) (bool, error) {
