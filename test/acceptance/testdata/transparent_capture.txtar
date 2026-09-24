@@ -145,11 +145,13 @@ audit -all out/audit.jsonl sandbox_id=transparent-capture
 
 # The check reads the tables back rather than trusting that nothing changed
 # them. A rule inserted into an owned chain is a rule this ruleset did not
-# install. These run last: a failed check unlinks the receipt, and the
-# inserted rules open what the ruleset closes until they are removed.
+# install. These run last, because the inserted rules open what the ruleset
+# closes until they are removed. A --verify run never writes or removes the
+# receipt, so the receipt is still there after a failed check.
 exec docker exec $LAB-workload iptables-legacy -I EGRESS_PROXY_FILTER_OUTPUT 1 -j ACCEPT
 ! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
 stderr 'holds a rule this ruleset did not put there'
+exec docker exec $LAB-workload test -f /run/egress/netsetup.json
 exec docker exec $LAB-workload iptables-legacy -D EGRESS_PROXY_FILTER_OUTPUT -j ACCEPT
 
 # A rule ahead of the OUTPUT jump decides the packet before the jump does,
