@@ -1,8 +1,10 @@
 // Package fakeas is an authorization server fixture for unit and acceptance
 // tests. It answers RFC 8414 discovery and the RFC 8693 token exchange that
-// the proxy posts. It keeps every request for tests to read.
+// the proxy posts, applies the impersonation rule from the zone policy, and
+// keeps every request for tests to read.
 //
-// It authenticates clients with client_secret_basic, which this build sends.
+// It authenticates clients with client_secret_basic or a client assertion, and
+// refuses a request that sends both.
 //
 // It does not verify signatures. Use it as a fixture, not as a zone. The
 // cluster lane exercises the real zone.
@@ -13,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -28,9 +31,10 @@ const (
 //
 //nolint:gosec // G101: protocol URNs, not credentials
 const (
-	grantTokenExchange    = "urn:ietf:params:oauth:grant-type:token-exchange"
-	subjectTypeSubstitute = "urn:keycard:params:oauth:token-type:substitute-user"
-	issuedTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
+	grantTokenExchange     = "urn:ietf:params:oauth:grant-type:token-exchange"
+	subjectTypeSubstitute  = "urn:keycard:params:oauth:token-type:substitute-user"
+	assertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	issuedTypeAccessToken  = "urn:ietf:params:oauth:token-type:access_token"
 )
 
 // These are the RFC 6749 section 5.2 error codes that the server returns.
@@ -49,14 +53,24 @@ const expiresIn = 300
 // is empty for an unsigned token.
 const jwtSegments = 3
 
+// defaultNamespace is the ServiceAccount namespace that the impersonation
+// rule uses when Options does not set one.
+const defaultNamespace = "agents"
+
 // Options configures a Server.
 type Options struct {
 	// Credentials maps each resource to the access token that the server issues.
 	// The server returns access_denied for an unmapped resource.
 	Credentials map[string]string
+	// Namespace is the ServiceAccount namespace that the impersonation rule uses.
+	// The default is "agents".
+	Namespace string
 	// ClientSecrets maps each client ID to its client_secret_basic secret. An
-	// empty map authenticates no client.
+	// empty map accepts no client secret.
 	ClientSecrets map[string]string
+	// AssertionClients lists the client IDs that may authenticate with a client
+	// assertion. An empty slice accepts no assertion.
+	AssertionClients []string
 }
 
 // Request contains one token request as the server read it.
@@ -67,6 +81,12 @@ type Request struct {
 	// ClientID is the authenticated client ID from basic credentials or the
 	// client_id parameter.
 	ClientID string
+	// Actor is the subject of the client assertion. It is empty when the
+	// request uses a client secret.
+	Actor string
+	// HasBasic reports whether the request carried an Authorization header with
+	// basic credentials.
+	HasBasic bool
 	// Subject is the user named by the substitute-user token.
 	Subject string
 	// Error is the OAuth error code that the server returned. It is empty for a
@@ -85,6 +105,9 @@ type Server struct {
 // New builds a server. Mount it on any listener. The server reads its issuer
 // from each request, so it needs no address in advance.
 func New(opts Options) *Server {
+	if opts.Namespace == "" {
+		opts.Namespace = defaultNamespace
+	}
 	return &Server{opts: opts}
 }
 
@@ -116,7 +139,7 @@ func (s *Server) metadata(w http.ResponseWriter, r *http.Request) {
 		"issuer":                                issuer,
 		"token_endpoint":                        issuer + TokenPath,
 		"grant_types_supported":                 []string{grantTokenExchange},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_basic"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "private_key_jwt"},
 	})
 }
 
@@ -131,13 +154,17 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	record := Request{
 		Form:     r.PostForm,
 		ClientID: r.PostForm.Get("client_id"),
+		HasBasic: hasBasic,
 		Subject:  claimSub(r.PostForm.Get("subject_token")),
 	}
 	if hasBasic {
 		record.ClientID = basicID
 	}
+	if r.PostForm.Get("client_assertion_type") == assertionTypeJWTBearer {
+		record.Actor = claimSub(r.PostForm.Get("client_assertion"))
+	}
 
-	value, refusal := s.issue(record, basicSecret, hasBasic)
+	value, refusal := s.issue(record, basicSecret)
 	if refusal != nil {
 		record.Error = refusal.Code
 	}
@@ -177,10 +204,10 @@ func requestShape(r *http.Request) *denial {
 	return nil
 }
 
-// issue checks client authentication, the grant shape, and the resource
-// grant, then returns the credential.
-func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *denial) {
-	if refusal := s.authenticate(record, secret, hasBasic); refusal != nil {
+// issue checks client authentication, the grant shape, the impersonation rule,
+// and the resource grant before it returns the credential.
+func (s *Server) issue(record Request, secret string) (string, *denial) {
+	if refusal := s.authenticate(record, secret); refusal != nil {
 		return "", refusal
 	}
 	if refusal := grantShape(record.Form); refusal != nil {
@@ -192,6 +219,9 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 			Code:        codeInvalidGrant,
 			Description: "the substitute-user token has no sub claim",
 		}
+	}
+	if refusal := s.impersonation(record); refusal != nil {
+		return "", refusal
 	}
 	resource := record.Form.Get("resource")
 	value, granted := s.opts.Credentials[resource]
@@ -205,19 +235,58 @@ func (s *Server) issue(record Request, secret string, hasBasic bool) (string, *d
 	return value, nil
 }
 
-// authenticate accepts a client secret that the server knows. A secret names
-// no ServiceAccount, so the server cannot bind the client to the requested
-// user.
-func (s *Server) authenticate(record Request, secret string, hasBasic bool) *denial {
-	if hasBasic {
+// impersonation applies the zone policy for user impersonation. A ServiceAccount
+// can act only for the user in its name. A request with a client secret names
+// no ServiceAccount, so this rule has nothing to check.
+func (s *Server) impersonation(record Request) *denial {
+	if record.Actor == "" {
+		return nil
+	}
+	want := "system:serviceaccount:" + s.opts.Namespace + ":" + record.Subject
+	if record.Actor != want {
+		return &denial{
+			status:      http.StatusForbidden,
+			Code:        codeAccessDenied,
+			Description: record.Actor + " cannot act for " + record.Subject,
+		}
+	}
+	return nil
+}
+
+// authenticate accepts exactly one client authentication method. RFC 6749
+// section 2.3 says a client must not use more than one in a request. An
+// assertion names its client in client_id, because the token-federation
+// credential identifies the client by that parameter and not by the assertion.
+func (s *Server) authenticate(record Request, secret string) *denial {
+	hasAssertion := record.Form.Get("client_assertion") != ""
+	switch {
+	case hasAssertion && record.HasBasic:
+		return unknownClient("the request sends both a client assertion and basic credentials")
+	case hasAssertion:
+		if record.Actor == "" {
+			return unknownClient("the client assertion has no sub claim")
+		}
+		if !slices.Contains(s.opts.AssertionClients, record.ClientID) {
+			return unknownClient(record.ClientID + " may not authenticate with a client assertion")
+		}
+		return nil
+	case record.HasBasic:
 		if known, ok := s.opts.ClientSecrets[record.ClientID]; ok && known == secret {
 			return nil
 		}
+		return unknownClient("the client secret is not the one this server holds")
+	default:
+		return unknownClient("the request authenticates with neither a client secret nor a client assertion")
 	}
+}
+
+// unknownClient is the RFC 6749 section 5.2 answer to a client that did not
+// authenticate.
+func unknownClient(description string) *denial {
 	return &denial{
 		status:      http.StatusUnauthorized,
 		Code:        codeInvalidClient,
-		Description: "the request has no client secret this server knows",
+		Description: description,
 	}
 }
 

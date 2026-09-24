@@ -5,9 +5,11 @@
 // subject_token is an unsigned substitute-user JWT, so the proxy sends no
 // signature. The zone's policy must refuse an unauthorized user.
 //
-// This build authenticates with client_secret_basic. A client secret names no
+// Workload identity sends the projected ServiceAccount token as an RFC 7523
+// client assertion. The zone policy ties that ServiceAccount to one user. A
+// client secret uses client_secret_basic without any binding to the
 // ServiceAccount, so a zone that accepts it permits impersonation based on the
-// secret alone. This build refuses identity.workload_token_file.
+// secret alone. Use workload identity in a Kubernetes cluster deployment.
 package exchange
 
 import (
@@ -44,8 +46,8 @@ const (
 	codeInvalidGrant       = "invalid_grant"
 )
 
-// schemeHTTPS is the only scheme the exchange connects with. The client
-// secret goes to the zone, so cleartext would put it on the wire.
+// schemeHTTPS is the only scheme the exchange connects with. Client
+// authentication goes to the zone, so cleartext would put it on the wire.
 const schemeHTTPS = "https"
 
 // maxResponseSize limits a response from the zone. A token response holds the
@@ -72,7 +74,8 @@ var (
 	errTooLarge  = errors.New("the zone answered with more than 1 MiB")
 )
 
-// Options configures a Source. ClientSecret authenticates the client.
+// Options configures a Source. Exactly one of WorkloadTokenFile and
+// ClientSecret authenticates the client.
 type Options struct {
 	// ZoneURL is the issuer URL for RFC 8414 discovery. It must be https.
 	ZoneURL string
@@ -80,8 +83,12 @@ type Options struct {
 	ClientID string
 	// ImpersonateUser is the IAM user public ID for each exchange.
 	ImpersonateUser string
-	// WorkloadTokenFile is the projected ServiceAccount token. This build does
-	// not read it and refuses a configuration that names it.
+	// WorkloadTokenFile is the projected ServiceAccount token. It must name a
+	// path that credential.CheckTokenFile accepts. The kubelet rewrites the
+	// token once it passes 80% of its lifetime, which defaults to one hour,
+	// and the pod keeps running across the rewrite. The proxy therefore reads
+	// the file for every exchange. The kubelet swaps the file atomically, so a
+	// read never sees a partial write.
 	WorkloadTokenFile string
 	// ClientSecret is the application credential secret. The proxy reads it
 	// once, so a rotated secret takes effect after restart.
@@ -128,7 +135,7 @@ func New(opts Options) (*Source, error) {
 		Transport: guard{base: opts.transport()},
 		Timeout:   timeout,
 		// Discovery names the token endpoint. A redirect away from it would
-		// move the client secret to another host.
+		// move client authentication to another host.
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
 			return fmt.Errorf("%w to %s", errRedirect, req.URL.Redacted())
 		},
@@ -148,7 +155,7 @@ func New(opts Options) (*Source, error) {
 	}, nil
 }
 
-// checkZoneURL refuses a zone that the exchange must not offer the secret to.
+// checkZoneURL refuses a zone that the exchange must not authenticate to.
 // internal/config applies the same rule, and this check covers a Source that
 // another caller builds.
 func (o Options) checkZoneURL() error {
@@ -162,27 +169,49 @@ func (o Options) checkZoneURL() error {
 	return nil
 }
 
-// application builds the client credential and the phrase that Describe uses.
-// The interface lets the workload identity mechanism provide another form.
+// application builds the client credential and the description text. It
+// refuses a configuration that names neither mechanism, and one that names
+// both.
 //
-//nolint:ireturn // the SDK models a client credential as this interface
+//nolint:ireturn // the SDK uses one interface for both mechanisms
 func (o Options) application() (oauth.ApplicationCredential, string, error) {
 	switch {
-	case o.WorkloadTokenFile != "":
-		// TODO: drop this refusal with the branch that reads the projected
-		// token and authenticates the exchange with it.
+	case o.WorkloadTokenFile != "" && o.ClientSecret != "":
 		return nil, "", fmt.Errorf(
-			"%w: it names identity.workload_token_file, which this build does not read; "+
-				"authenticate with identity.client_secret_file", errConfigure,
+			"%w: it names a workload token file and a client secret; configure one", errConfigure,
 		)
-	case o.ClientSecret == "":
-		return nil, "", fmt.Errorf("%w: it names no client secret", errConfigure)
+	case o.WorkloadTokenFile != "":
+		return o.workloadIdentity()
+	case o.ClientSecret != "":
+		application, err := oauth.NewClientSecret(o.ClientID, o.ClientSecret)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: %w", errConfigure, err)
+		}
+		return application, "authenticated by a client secret", nil
+	default:
+		return nil, "", fmt.Errorf("%w: it names no workload token file and no client secret", errConfigure)
 	}
-	application, err := oauth.NewClientSecret(o.ClientID, o.ClientSecret)
+}
+
+// workloadIdentity authenticates with the projected ServiceAccount token. The
+// client ID goes on the form beside the assertion, because the token-federation
+// credential identifies the client by that parameter.
+//
+//nolint:ireturn // the SDK uses one interface for both mechanisms
+func (o Options) workloadIdentity() (oauth.ApplicationCredential, string, error) {
+	if err := credential.CheckTokenFile(errConfigure, o.WorkloadTokenFile); err != nil {
+		//nolint:wrapcheck // CheckTokenFile wraps errConfigure, which callers match on
+		return nil, "", err
+	}
+	tokens, err := oauth.NewFileTokenSource(oauth.WithFileTokenPath(o.WorkloadTokenFile))
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: %w", errConfigure, err)
 	}
-	return application, "authenticated by a client secret", nil
+	application, err := oauth.NewWorkloadIdentity(tokens, oauth.WithWorkloadClientID(o.ClientID))
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: %w", errConfigure, err)
+	}
+	return application, "authenticated by the workload token at " + o.WorkloadTokenFile, nil
 }
 
 // transport connects to the zone with TLS 1.2 or later, the configured roots,
@@ -270,7 +299,7 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	// The client credential uses no prepare options.
+	// Both mechanisms ignore the prepare options, so they are nil.
 	request, err := s.application.PrepareTokenExchangeRequest(ctx, s.subject, resource, nil)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)

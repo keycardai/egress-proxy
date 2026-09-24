@@ -69,8 +69,8 @@ grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-i
 grep -count=1 '^request ' upstream/requests.log
 
 # The two matched endpoints made exactly two exchanges at the zone.
-grep 'exchange client=acceptance-app-credential subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
-grep 'exchange client=acceptance-app-credential subject=igmua2g0fwapl21qll7tczdw7t resource=https://refused.example/ error="access_denied"' zone/requests.log
+grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
+grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://refused.example/ error="access_denied"' zone/requests.log
 grep -count=2 '^exchange ' zone/requests.log
 
 sigterm
