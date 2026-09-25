@@ -1,6 +1,6 @@
-// Command netfixture is the network fixture the netsetup ruleset and
-// transparent capture scenarios run on both sides of the rules. It is a test
-// fixture and ships in no image the product publishes.
+// Command netfixture is a network fixture for the netsetup and transparent
+// capture scenarios. It runs on both sides of the rules and ships in no
+// product image.
 //
 // Every probe prints one line and exits 0, so the script asserts on what the
 // line says:
@@ -11,11 +11,11 @@
 //	netfixture udp HOST:PORT               send one datagram and print the reply
 //	netfixture ping HOST                   send one ICMP echo request and print the result
 //	netfixture ndp HOST                    send one neighbour solicitation from a raw socket
-//	netfixture https ADDRESS CERT KEY      answer HTTPS with the request path, logging each request
-//	netfixture get URL                     fetch URL with no proxy configured and print the status and body
+//	netfixture https ADDRESS CERT KEY      answer HTTPS with the request path and log each request
+//	netfixture get URL                     fetch URL without a proxy and print the status and body
 //
-// get reads no proxy variable, so a request it makes goes through the proxy
-// only when the capture put it there.
+// get ignores proxy variables. A request goes through the proxy only when
+// the capture redirects it.
 package main
 
 import (
@@ -58,7 +58,7 @@ const (
 	// solicitReserved is the reserved field that opens a neighbour
 	// solicitation body.
 	solicitReserved = 4
-	// httpsArgs is the argument count of https ADDRESS CERT KEY.
+	// httpsArgs is the number of arguments for https ADDRESS CERT KEY.
 	httpsArgs         = 4
 	requestTimeout    = 30 * time.Second
 	readHeaderTimeout = 10 * time.Second
@@ -95,7 +95,7 @@ func run(args []string, out io.Writer) error {
 	}
 }
 
-// probe runs one of the probes that print a line and exit 0.
+// probe runs a probe that prints one line and exits 0.
 func probe(command, target string, out io.Writer) error {
 	switch command {
 	case "dial":
@@ -183,8 +183,8 @@ func answerDatagrams(conn net.PacketConn, reply string) error {
 	}
 }
 
-// serveHTTPS answers every path with the path it was asked for, so a
-// client's output says which request reached the upstream.
+// serveHTTPS answers each request with its path, so the client output shows
+// which request reached the upstream.
 func serveHTTPS(address, certFile, keyFile string) error {
 	server := &http.Server{
 		Addr:              address,
@@ -192,7 +192,7 @@ func serveHTTPS(address, certFile, keyFile string) error {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "request %s %s host=%s\n", r.Method, r.URL.RequestURI(), r.Host)
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			//nolint:gosec // G705: a fixture echoing as text/plain
+			//nolint:gosec // G705: this fixture echoes text as text/plain
 			fmt.Fprintf(w, "hello from upstream %s\n", r.URL.Path)
 		}),
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
@@ -200,14 +200,14 @@ func serveHTTPS(address, certFile, keyFile string) error {
 	return server.ListenAndServeTLS(certFile, keyFile) //nolint:wrapcheck // the command prints it as it is
 }
 
-// get makes one request with Transport.Proxy nil, so no HTTPS_PROXY in the
-// environment can route it.
+// get makes one request with Transport.Proxy nil, so HTTPS_PROXY cannot route
+// it.
 func get(url string, out io.Writer) error {
 	client := &http.Client{
 		Timeout:   requestTimeout,
 		Transport: &http.Transport{Proxy: nil},
 	}
-	//nolint:noctx,gosec // the client's own timeout bounds the request, and G704: the URL is this fixture's argument
+	//nolint:noctx,gosec // the client timeout bounds the request. G704: the URL is this fixture's argument
 	resp, err := client.Get(url)
 	if err != nil {
 		return err //nolint:wrapcheck // the command prints it as it is

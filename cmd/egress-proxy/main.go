@@ -159,8 +159,8 @@ func flagSet(opts *flags) []cli.Flag {
 	})
 }
 
-// listenFlags are where the process accepts connections and what it checks
-// its own containment against.
+// listenFlags defines the addresses where the process accepts connections and
+// the settings it checks for containment.
 func listenFlags(opts *flags) []cli.Flag {
 	return []cli.Flag{
 		stringFlag(
@@ -414,20 +414,19 @@ func (p *process) info() any {
 	}
 }
 
-// capture builds the transparent frontend, after the netsetup receipt shows
-// that the rules redirect to it and that this process cannot change them. A
-// configuration with no listen.transparent runs no frontend and checks no
-// receipt.
+// capture builds the transparent frontend after the receipt shows that the
+// rules redirect to it and that this process cannot change them. A
+// configuration without listen.transparent does not run capture frontends.
 //
-// The check runs before any listener is bound, so a sidecar whose
-// containment does not hold never serves. probes supplies the capability,
-// sysctl and owner reads. Its zero value reads this process and its
-// filesystem.
+// The check runs before any listener is bound, so a sidecar that fails the
+// check never services any request. The probes supply capability, sysctl,
+// network namespace, and owner reads. A zero-value request reads this process
+// and its filesystem.
 func capture(
 	cfg *config.Config, server *proxy.Server, logger *slog.Logger, probes netsetup.ContainmentRequest,
 ) (*transparent.Frontend, error) {
 	if cfg.Listen.Transparent == "" {
-		return nil, nil //nolint:nilnil // no transparent frontend is a posture, not a failure
+		return nil, nil //nolint:nilnil // no transparent frontend is valid, not an error
 	}
 	if !transparent.Supported {
 		return nil, fmt.Errorf("%w: listen.transparent is set and this platform has no SO_ORIGINAL_DST",
@@ -441,7 +440,7 @@ func capture(
 	if err != nil {
 		return nil, fmt.Errorf("network capture: %w", err)
 	}
-	logger.Info("network capture in force",
+	logger.Info("transparent network capture enabled",
 		slog.String("receipt", cfg.Netsetup.Receipt),
 		slog.String("ruleset_digest", receipt.RulesetDigest),
 		slog.Int("proxy_uid", receipt.ProxyUID),
@@ -450,7 +449,7 @@ func capture(
 		slog.Any("families", receipt.Families),
 		slog.Any("cleartext_ports", cfg.Listen.CleartextPorts))
 	for _, port := range uncaptured(receipt.CapturePorts, cfg.Listen.CleartextPorts) {
-		logger.Warn("listen.cleartext_ports names a port the redirect does not cover, "+
+		logger.Warn("listen.cleartext_ports names a port outside of the network capture and transparent redirect, "+
 			"so nothing reaches this frontend on it",
 			slog.Int("port", port))
 	}
@@ -467,9 +466,9 @@ func capture(
 	return frontend, nil
 }
 
-// uncaptured names the cleartext ports the redirect does not cover. The two
-// settings live in different containers' arguments, and the receipt is what
-// reconciles them.
+// uncaptured returns cleartext ports outside the capture and redirect. The
+// settings come from different containers. The receipt lets the proxy compare
+// them.
 func uncaptured(captured, cleartext []int) []int {
 	covered := make(map[int]bool, len(captured))
 	for _, port := range captured {
@@ -499,6 +498,7 @@ func (p *process) serve(ctx context.Context) error {
 
 	captured, err := p.captureListeners(ctx)
 	if err != nil {
+		// Tear down the listener we've opened so far, on the way out to a crash.
 		_ = listener.Close()
 		return err
 	}
@@ -531,8 +531,8 @@ func version() string {
 	return info.Main.Version
 }
 
-// captureListeners binds the transparent frontend, one socket per address
-// family. It returns nothing when no transparent frontend is configured.
+// captureListeners binds one transparent frontend socket per address family.
+// It returns no listeners when no transparent frontend is configured.
 func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
 	if p.transparent == nil {
 		return nil, nil

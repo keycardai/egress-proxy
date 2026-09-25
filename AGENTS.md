@@ -15,8 +15,8 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   `cmd/` for binaries, `internal/` for everything else,
   `test/acceptance/` for the acceptance tests, Go behind the `acceptance`
   build tag with one testscript per scenario under `testdata/`,
-  `test/acceptance/netfixture/` for the probes, listeners, HTTPS upstream
-  and Go client the Docker scenarios run,
+  `test/acceptance/netfixture/` for the probes, listeners, HTTPS upstream,
+  and Go client used by the Docker scenarios,
   `test/e2e/` for the cluster lanes,
   `test/fakeas/` for the fake authorization server that unit and acceptance
   tests use for token exchange,
@@ -148,11 +148,10 @@ than a refactor, and it changes `docs/security-model.md` with it.
   environment and an external client. Beyond testscript's own commands,
   `acceptance_test.go` registers `upstream`, `fakeas`, `satoken`, `expand`,
   `freeport`, `shortdir`, `waitfile`, `waitgrep`, `waitport`, `sigterm`, and
-  `audit`, which matches dotted fields in the JSON audit stream and takes
-  `-all` to require every record to match. `dockerlab`, `linuxbin` and
-  `tlscert` build a Docker network, cross-compiled binaries and an upstream
-  certificate for a scenario that needs a Linux kernel, and `[docker]` skips
-  it where no Docker daemon answers.
+  `audit`. The audit command matches dotted fields in the JSON stream, and
+  `-all` requires every record to match. `dockerlab`, `linuxbin`, and `tlscert`
+  build the Docker network, cross-compiled binaries, and an upstream
+  certificate. `[docker]` skips a scenario when no Docker daemon answers.
 
 ## Comments
 

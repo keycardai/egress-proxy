@@ -10,25 +10,24 @@ import (
 	"strings"
 )
 
-// unprivilegedPortStartPath is the lowest port a process with no
-// CAP_NET_BIND_SERVICE may bind. Source: linux
+// unprivilegedPortStartPath names the sysctl for the lowest port a process
+// without CAP_NET_BIND_SERVICE can bind. See Linux
 // Documentation/networking/ip-sysctl.rst, ip_unprivileged_port_start. Its
 // default is 1024.
 const unprivilegedPortStartPath = "/proc/sys/net/ipv4/ip_unprivileged_port_start"
 
-// errPortStart reports a sysctl that does not hold a port number.
+// errPortStart reports a sysctl value that is not a port number.
 var errPortStart = errors.New("the unprivileged port start is not a port number")
 
-// UnprivilegedPortStart reads the lowest port a process with no
-// CAP_NET_BIND_SERVICE may bind. The setting covers both address families,
-// which is why it is read from the IPv4 path alone: an IPv6 bind checks it
-// too (linux net/ipv6/af_inet6.c, __inet6_bind, and
-// inet_port_requires_bind_service).
+// UnprivilegedPortStart reads the lowest port a process without
+// CAP_NET_BIND_SERVICE can bind. The setting covers both address families,
+// so this function reads the IPv4 path. An IPv6 bind checks it too (Linux
+// net/ipv6/af_inet6.c, __inet6_bind, and inet_port_requires_bind_service).
 func UnprivilegedPortStart() (int, error) {
 	return unprivilegedPortStartAt(unprivilegedPortStartPath)
 }
 
-// unprivilegedPortStartAt reads the sysctl from path.
+// unprivilegedPortStartAt reads the sysctl at path.
 func unprivilegedPortStartAt(path string) (int, error) {
 	body, err := os.ReadFile(path) //nolint:gosec // G304: the sysctl path, or a test fixture
 	if err != nil {

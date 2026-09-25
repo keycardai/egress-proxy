@@ -29,8 +29,14 @@ func writeFile(t *testing.T, name, body string) string {
 	return path
 }
 
+// podNetwork is the network namespace the fixture receipt was written in and
+// the fixture sidecar runs in.
+func podNetwork() netsetup.NetNamespace {
+	return netsetup.NetNamespace{Device: 4, Inode: 4026532288}
+}
+
 // contained is the receipt a sidecar starts on: the rules were applied,
-// verified and then made unchangeable.
+// verified and then made unchangeable, in the sidecar's network namespace.
 func contained() netsetup.Receipt {
 	cfg := netsetup.DefaultConfig()
 	cfg.DNSServers = valid().DNSServers
@@ -44,6 +50,8 @@ func contained() netsetup.Receipt {
 	}
 	receipt := netsetup.NewReceipt(cfg, programs, true, now.Add(-time.Minute))
 	receipt.CapabilitiesDropped = true
+	namespace := podNetwork()
+	receipt.NetNamespace = &namespace
 	return receipt
 }
 
@@ -87,7 +95,11 @@ const wantReceiptJSON = `{
     "ipv6"
   ],
   "ruleset_digest": "sha256:0123",
-  "capabilities_dropped": true
+  "capabilities_dropped": true,
+  "net_namespace": {
+    "device": 4,
+    "inode": 4026532288
+  }
 }
 `
 
@@ -106,6 +118,7 @@ func TestWriteReceipt(t *testing.T) {
 		Version: 1, VerifiedAt: now, Verified: true, ProxyUID: 1337, RedirectPort: 1015,
 		CapturePorts: []int{80, 443}, Families: []string{"ipv4", "ipv6"},
 		RulesetDigest: "sha256:0123", CapabilitiesDropped: true,
+		NetNamespace: &netsetup.NetNamespace{Device: 4, Inode: 4026532288},
 	}
 	tests := []struct {
 		name string

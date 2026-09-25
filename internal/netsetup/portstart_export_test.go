@@ -2,8 +2,8 @@
 
 package netsetup
 
-// UnprivilegedPortStartAt exports unprivilegedPortStartAt for tests.
+// UnprivilegedPortStartAt exposes unprivilegedPortStartAt to tests.
 func UnprivilegedPortStartAt(path string) (int, error) { return unprivilegedPortStartAt(path) }
 
-// ErrPortStart exports errPortStart for tests.
+// ErrPortStart exposes errPortStart to tests.
 var ErrPortStart = errPortStart

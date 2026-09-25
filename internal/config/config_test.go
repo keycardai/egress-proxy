@@ -28,8 +28,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 	}{
 		{"listen.connect", cfg.Listen.Connect, "127.0.0.1:3128"},
 		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin.sock"},
-		// Empty runs no transparent frontend, so nothing is captured and no
-		// receipt is read.
+		// An empty value disables the transparent frontend.
 		{"listen.transparent", cfg.Listen.Transparent, ""},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
 		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup.json"},
@@ -123,8 +122,8 @@ func TestDigestIsOverTheDocumentAsWritten(t *testing.T) {
 const identityDoc = "identity:\n  zone_url: https://z\n  client_id: c\n  workload_token_file: /t\n" +
 	"  impersonate: {user: u}\n"
 
-// transparentDoc opens a listen section with a transparent frontend. A case
-// appends its own cleartext_ports under it.
+// transparentDoc returns a listen section with a transparent frontend. A
+// case appends its own cleartext_ports field.
 const transparentDoc = "listen:\n  transparent: \"0.0.0.0:1015\"\n"
 
 // twoEndpointsReversed lists the endpoints of minimal plus
@@ -620,8 +619,8 @@ func TestParseRefusesInvalidEndpoints(t *testing.T) {
 }
 
 // TestParseEndpointIdentity pins what makes two entries one endpoint. The
-// key is the host, the port and the path prefix together, which is the key
-// policy.Compile uses. A host reachable on two ports is two endpoints.
+// identity is the host, port, and path prefix that policy.Compile uses. A
+// host reachable on two ports is two endpoints.
 func TestParseEndpointIdentity(t *testing.T) {
 	t.Parallel()
 	doc := func(entries string) string {
@@ -650,8 +649,8 @@ func TestParseEndpointIdentity(t *testing.T) {
 			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/simple/" repeats endpoints[0]`,
 		},
 		{
-			// The default fills the port the first entry leaves out, so
-			// the two name the same endpoint.
+			// The default fills the omitted port, so both entries name the
+			// same endpoint.
 			name: "one entry naming the default port and one leaving it out",
 			doc: doc("  - host: pypi.org\n    path_prefix: /simple/\n" +
 				"  - host: pypi.org\n    port: 443\n    path_prefix: /simple/\n"),
@@ -690,8 +689,8 @@ func TestParseEndpointIdentity(t *testing.T) {
 				got = append(got, key{endpoint.Host, endpoint.Port, endpoint.PathPrefix})
 			}
 			assert.Equal(t, tc.want, got, "endpoints")
-			// The matcher applies the same rule, so a document the parser
-			// accepts must compile.
+			// The matcher applies the same rule, so a parsed document must
+			// also compile.
 			deny, denyErr := policy.NewDenyList(nil, nil)
 			require.NoError(t, denyErr, "policy.NewDenyList")
 			_, compileErr := policy.Compile(cfg.PolicyEndpoints(), deny)

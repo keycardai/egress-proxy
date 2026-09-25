@@ -13,44 +13,43 @@ import (
 	"time"
 )
 
-// maxReceiptSize bounds the read. The receipt is a dozen scalar fields.
+// maxReceiptSize limits the read. The receipt has scalar fields only.
 const maxReceiptSize = 64 << 10
 
-// groupAndOtherWrite is the permission bits the receipt may not have.
+// groupAndOtherWrite contains permission bits the receipt must not have.
 const groupAndOtherWrite = 0o022
 
-// The errors the containment check returns.
+// Containment check errors.
 var (
-	// ErrNoReceipt is returned when the receipt is not where it was
-	// expected.
+	// ErrNoReceipt means the receipt is missing from its configured path.
 	ErrNoReceipt = errors.New("no netsetup receipt")
-	// ErrNotContained is returned when the ruleset in force disagrees with
-	// what the sidecar is about to do.
+	// ErrNotContained means the active rules do not match what the sidecar
+	// will do.
 	ErrNotContained = errors.New("the sidecar cannot assert its own containment")
-	// ErrPortStartNotSupported is returned on a platform that does not
-	// report the lowest port an unprivileged process may bind.
+	// ErrNetNamespaceNotSupported means the platform does not report the
+	// identity of a network namespace.
+	ErrNetNamespaceNotSupported = errors.New("the network namespace is reported only on Linux")
+	// ErrPortStartNotSupported means the platform does not report the lowest
+	// port an unprivileged process can bind.
 	ErrPortStartNotSupported = errors.New("the unprivileged port start is reported only on Linux")
-	// ErrUnreadableReceipt is returned for a receipt that is there and
-	// cannot be used: not a regular file, not JSON, or from a schema version
-	// this build does not read.
+	// ErrUnreadableReceipt means the receipt cannot be used. It is not a
+	// regular file, is not JSON, or uses a schema version this build cannot
+	// read.
 	ErrUnreadableReceipt = errors.New("the netsetup receipt cannot be read")
 )
 
-// ReadReceipt reads and validates a receipt's own shape. Whether what it
-// says agrees with the caller is Containment's question.
+// ReadReceipt reads and validates the receipt's shape. Containment checks
+// whether it agrees with the caller.
 func ReadReceipt(path string) (Receipt, error) {
 	receipt, _, err := readReceipt(path)
 	return receipt, err
 }
 
-// readReceipt returns the receipt and the metadata of the file it came out
-// of.
+// readReceipt returns the receipt and metadata for its file.
 //
-// The contents and the metadata come from one open file descriptor, so the
-// mode and the owner Containment checks belong to the bytes it parsed. The
-// open does not follow a symlink: a link at the receipt's path points the
-// check at one file and the read at another. The open does not block: a
-// FIFO at the path is refused as not a regular file.
+// The contents and metadata come from one open file descriptor, so the mode
+// and owner checks apply to the bytes read. The open does not follow a
+// symlink or block. A symlink or FIFO at the path is refused.
 func readReceipt(path string) (Receipt, fs.FileInfo, error) {
 	//nolint:gosec // G304: the path comes from this process's own configuration
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -86,46 +85,47 @@ func readReceipt(path string) (Receipt, fs.FileInfo, error) {
 	return receipt, info, nil
 }
 
-// ContainmentRequest is what the sidecar is about to do, checked against
-// what the init container programmed.
+// ContainmentRequest describes what the sidecar will do. Containment checks
+// it against what the init container programmed.
 type ContainmentRequest struct {
-	// Path is where the receipt is.
+	// Path is the receipt path.
 	Path string
-	// TransparentPort is the port the transparent frontend binds.
+	// TransparentPort is the port the transparent frontend will bind.
 	TransparentPort int
-	// UID is the uid this process runs as.
+	// UID is the uid of this process.
 	UID int
-	// Now is the clock the receipt's age is measured against. The zero time
-	// uses the system clock.
+	// Now is the time used to check the receipt's age. The zero time uses the
+	// system clock.
 	Now time.Time
 	// NetAdmin reports whether this process holds CAP_NET_ADMIN. Nil uses
-	// HasNetAdmin, and a platform with no capability sets is not checked.
+	// HasNetAdmin. A platform with no capability sets is not checked.
 	NetAdmin func() (bool, error)
-	// PortStart reports the lowest port a process with no
-	// CAP_NET_BIND_SERVICE may bind. Nil uses UnprivilegedPortStart, and a
+	// PortStart reports the lowest port a process without
+	// CAP_NET_BIND_SERVICE can bind. Nil uses UnprivilegedPortStart. A
 	// platform that does not report it is not checked.
 	PortStart func() (int, error)
-	// Owner reports the uid owning a file. Nil reads it from the
+	// NetNamespace reports the network namespace of this process. Nil uses
+	// CurrentNetNamespace. A platform that does not report it is not
+	// checked.
+	NetNamespace func() (NetNamespace, error)
+	// Owner reports the uid that owns a file. Nil reads it from the
 	// filesystem.
 	Owner func(fs.FileInfo) (int, bool)
 }
 
-// Containment reports every way the ruleset in force disagrees with what
-// this sidecar is about to do.
+// Containment reports each mismatch between the active rules and what this
+// sidecar will do.
 //
-// It answers one question: if this process starts, is the workload's egress
-// forced through it. Every refusal names the two values that disagree and
-// the setting that changes each, because a refusal that says only
-// "verification failed" leaves an operator reading two containers'
-// arguments side by side.
+// It answers whether this process will force the workload's egress through
+// itself. Each refusal names both values and the setting to change.
 //
-// A receipt that passes says the whole ruleset was in the tables when it was
-// written and that the process that wrote it then gave up the capability to
-// change them. It does not say the workload cannot get around the ruleset:
-// the securityContext says that.
+// A passing receipt shows that the whole ruleset was in the tables when the
+// init container wrote it and that the init container then gave up the
+// capability to change it. The pod's securityContext controls whether the
+// workload can get around the ruleset.
 //
-// It returns the receipt it checked. Log from that value and NEVER read the
-// file again: a second read can find a receipt this check never saw.
+// It returns the checked receipt. Log that value and NEVER read the file
+// again. A second read can find a different receipt.
 func Containment(request ContainmentRequest) (Receipt, error) {
 	receipt, info, err := readReceipt(request.Path)
 	if err != nil {
@@ -163,6 +163,7 @@ func Containment(request ContainmentRequest) (Receipt, error) {
 	}
 	found.add(netAdminProblems(request)...)
 	found.add(portStartProblems(receipt, request)...)
+	found.add(netNamespaceProblems(receipt, request)...)
 	found.add(receiptFileProblems(request, info)...)
 	if len(found) > 0 {
 		return Receipt{}, fmt.Errorf("%w:\n  %s", ErrNotContained, strings.Join(found, "\n  "))
@@ -170,10 +171,9 @@ func Containment(request ContainmentRequest) (Receipt, error) {
 	return receipt, nil
 }
 
-// receiptAgeProblems bounds when the receipt was written. A receipt with no
-// timestamp, or one dated after now, describes a ruleset this process has no
-// reason to believe is in the tables. The two containers share one clock, so
-// neither bound needs a tolerance.
+// receiptAgeProblems checks when the receipt was written. A missing timestamp
+// or a future timestamp does not identify a ruleset in the tables. The two
+// containers share a clock, so neither check needs a tolerance.
 func receiptAgeProblems(receipt Receipt, request ContainmentRequest) []string {
 	now := request.Now
 	if now.IsZero() {
@@ -192,9 +192,8 @@ func receiptAgeProblems(receipt Receipt, request ContainmentRequest) []string {
 	return found
 }
 
-// netAdminProblems refuses a sidecar holding the capability that programs
-// the tables. The receipt is worth something only because this process
-// cannot change what it describes.
+// netAdminProblems refuses a sidecar that holds the capability that programs
+// the tables. The receipt is useful only when this process cannot change it.
 func netAdminProblems(request ContainmentRequest) []string {
 	netAdmin := request.NetAdmin
 	if netAdmin == nil {
@@ -216,9 +215,8 @@ func netAdminProblems(request ContainmentRequest) []string {
 }
 
 // portStartProblems refuses a redirect port an unprivileged process can
-// bind. A workload that can bind it stands in for the proxy during a sidecar
-// restart and decides its own traffic, so the manifest is not taken at its
-// word: the kernel is asked.
+// bind. A workload that can bind it can stand in for the proxy during a
+// sidecar restart. Read the kernel value instead of trusting the manifest.
 func portStartProblems(receipt Receipt, request ContainmentRequest) []string {
 	read := request.PortStart
 	if read == nil {
@@ -242,14 +240,38 @@ func portStartProblems(receipt Receipt, request ContainmentRequest) []string {
 		start, receipt.RedirectPort)}
 }
 
-// receiptFileProblems refuses a receipt another uid can write or owns, and a
-// directory another uid owns. Whoever can write the receipt decides what
-// this process believes about its own containment.
+// netNamespaceProblems refuses a receipt written in another network
+// namespace. The rules it describes govern that namespace, not the one this
+// process and the workload share.
+func netNamespaceProblems(receipt Receipt, request ContainmentRequest) []string {
+	read := request.NetNamespace
+	if read == nil {
+		read = CurrentNetNamespace
+	}
+	own, err := read()
+	switch {
+	case errors.Is(err, ErrNetNamespaceNotSupported):
+		return nil
+	case err != nil:
+		return []string{fmt.Sprintf("this process's network namespace could not be read, so there is no saying "+
+			"whether the receipt describes rules in it: %v", err)}
+	case receipt.NetNamespace == nil:
+		return []string{"the receipt records no network namespace, so there is no saying whether its rules " +
+			"govern this pod's network. Re-run the init container"}
+	case *receipt.NetNamespace == own:
+		return nil
+	}
+	return []string{fmt.Sprintf("the receipt was written in network namespace %s and this process is in "+
+		"network namespace %s, so the init container and the sidecar are not in the same pod network",
+		receipt.NetNamespace, own)}
+}
+
+// receiptFileProblems refuses a receipt that another uid can write or owns,
+// and a directory that another uid owns. A writer can replace the receipt.
 //
-// The directory may be writable by every uid. An emptyDir mount point is
-// 0777 (kubernetes pkg/volume/emptydir/empty_dir.go, perm). A uid that
-// replaces the receipt there owns the replacement, and the owner check
-// refuses it.
+// The directory can be writable by every uid. An emptyDir mount point is
+// 0777 (kubernetes pkg/volume/emptydir/empty_dir.go, perm). A replacement is
+// owned by the uid that wrote it, so the owner check refuses it.
 func receiptFileProblems(request ContainmentRequest, info fs.FileInfo) []string {
 	owner := request.Owner
 	if owner == nil {
@@ -267,8 +289,8 @@ func receiptFileProblems(request ContainmentRequest, info fs.FileInfo) []string 
 	return found
 }
 
-// receiptDirProblems refuses a directory owned by a uid that is neither root
-// nor this process's own. Its owner can change its mode and its entries.
+// receiptDirProblems refuses a directory owned by a uid other than root or
+// this process. Its owner can change its mode and entries.
 func receiptDirProblems(owner func(fs.FileInfo) (int, bool), request ContainmentRequest) []string {
 	dir := filepath.Dir(request.Path)
 	info, err := os.Stat(dir)
@@ -278,10 +300,9 @@ func receiptDirProblems(owner func(fs.FileInfo) (int, bool), request Containment
 	return ownerProblems(owner, info, dir, request.UID, "So that uid can replace the receipt")
 }
 
-// ownerProblems refuses a path owned by a uid that is neither root nor this
-// process's own. Those are the only two with any business writing the
-// receipt: the init container's and the sidecar's. A filesystem that does
-// not report an owner is refused too, because the check cannot be made.
+// ownerProblems refuses a path owned by a uid other than root or this
+// process. Those are the only uids that can write the receipt. It also
+// refuses a filesystem that does not report an owner.
 func ownerProblems(owner func(fs.FileInfo) (int, bool), info fs.FileInfo, path string, uid int, why string) []string {
 	found, ok := owner(info)
 	switch {
@@ -295,8 +316,8 @@ func ownerProblems(owner func(fs.FileInfo) (int, bool), info fs.FileInfo, path s
 		path, found, uid, why)}
 }
 
-// fileOwner reads the uid owning a file. It reports false where the
-// filesystem does not say.
+// fileOwner reads the uid that owns a file. It returns false when the
+// filesystem does not report one.
 func fileOwner(info fs.FileInfo) (int, bool) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

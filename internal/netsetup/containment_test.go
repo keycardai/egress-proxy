@@ -15,10 +15,10 @@ import (
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 )
 
-// request is a containment check for a sidecar that matches the receipt.
-// The capability read, the owner and the sysctl are all supplied, because a
-// unit test cannot arrange any of the three on the host it runs on. 1024 is
-// the kernel default for ip_unprivileged_port_start.
+// request builds a containment check for a sidecar that matches the receipt.
+// The test supplies capability, owner, sysctl, and namespace reads because it
+// cannot change those values on the host. 1024 is the kernel default for
+// ip_unprivileged_port_start.
 func request(path string) netsetup.ContainmentRequest {
 	return netsetup.ContainmentRequest{
 		Path:            path,
@@ -27,6 +27,7 @@ func request(path string) netsetup.ContainmentRequest {
 		Now:             now,
 		NetAdmin:        func() (bool, error) { return false, nil },
 		PortStart:       func() (int, error) { return 1024, nil },
+		NetNamespace:    func() (netsetup.NetNamespace, error) { return podNetwork(), nil },
 		Owner:           func(fs.FileInfo) (int, bool) { return netsetup.DefaultProxyUID, true },
 	}
 }
@@ -37,7 +38,7 @@ func TestContainment(t *testing.T) {
 		name string
 		edit func(*netsetup.Receipt)
 		ask  func(*netsetup.ContainmentRequest)
-		// chmod and chmodDir loosen the receipt and the directory it is in.
+		// chmod and chmodDir loosen the receipt and its directory.
 		chmod    fs.FileMode
 		chmodDir fs.FileMode
 		want     []string
@@ -94,8 +95,8 @@ func TestContainment(t *testing.T) {
 			want:  []string{"so a uid other than its owner can write it", "Set the mode to 0644"},
 		},
 		{
-			// An emptyDir mount point is 0777. A replacement another uid
-			// puts there is owned by that uid, which the owner check refuses.
+			// An emptyDir mount point is 0777. A replacement is owned by the
+			// uid that wrote it, so the owner check refuses it.
 			name:     "a directory every uid can write, which is what an emptyDir mount point is",
 			chmodDir: 0o777,
 		},
@@ -173,6 +174,56 @@ func TestContainment(t *testing.T) {
 			},
 			want: []string{"capabilities could not be read"},
 		},
+		{
+			name: "a receipt from the sidecar's own network namespace",
+			edit: func(r *netsetup.Receipt) { r.NetNamespace = &netsetup.NetNamespace{Device: 7, Inode: 4026532999} },
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.NetNamespace = func() (netsetup.NetNamespace, error) {
+					return netsetup.NetNamespace{Device: 7, Inode: 4026532999}, nil
+				}
+			},
+		},
+		{
+			name: "a receipt from a network namespace on another device",
+			edit: func(r *netsetup.Receipt) { r.NetNamespace = &netsetup.NetNamespace{Device: 5, Inode: 4026532288} },
+			want: []string{
+				"the receipt was written in network namespace device 5 inode 4026532288 and this process is in " +
+					"network namespace device 4 inode 4026532288",
+				"the init container and the sidecar are not in the same pod network",
+			},
+		},
+		{
+			name: "a receipt from another network namespace on the same device",
+			edit: func(r *netsetup.Receipt) { r.NetNamespace = &netsetup.NetNamespace{Device: 4, Inode: 4026531840} },
+			want: []string{
+				"the receipt was written in network namespace device 4 inode 4026531840 and this process is in " +
+					"network namespace device 4 inode 4026532288",
+				"the init container and the sidecar are not in the same pod network",
+			},
+		},
+		{
+			name: "a receipt that records no network namespace",
+			edit: func(r *netsetup.Receipt) { r.NetNamespace = nil },
+			want: []string{"the receipt records no network namespace", "Re-run the init container"},
+		},
+		{
+			// The init container on such a platform records no namespace
+			// either, so neither side has one to compare.
+			name: "a platform that does not report the network namespace, which is not a failure to read it",
+			edit: func(r *netsetup.Receipt) { r.NetNamespace = nil },
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.NetNamespace = func() (netsetup.NetNamespace, error) {
+					return netsetup.NetNamespace{}, netsetup.ErrNetNamespaceNotSupported
+				}
+			},
+		},
+		{
+			name: "a network namespace that could not be read at all",
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.NetNamespace = func() (netsetup.NetNamespace, error) { return netsetup.NetNamespace{}, assert.AnError }
+			},
+			want: []string{"this process's network namespace could not be read"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,10 +265,9 @@ func TestReadReceiptRefusals(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
-		// missing asks for a path where no file is.
+		// missing uses a path with no file.
 		missing bool
-		// put replaces the plain file the case is read from, for the shapes
-		// a receipt must not have.
+		// put replaces the regular file with a shape a receipt must not have.
 		put     func(t *testing.T) string
 		want    string
 		wantErr error
@@ -237,8 +287,8 @@ func TestReadReceiptRefusals(t *testing.T) {
 			wantErr: netsetup.ErrUnreadableReceipt,
 		},
 		{
-			// An open that blocks waits for a writer that never comes, so the
-			// sidecar would hang at start-up rather than refuse.
+			// A blocking open waits for a writer that never comes. The
+			// sidecar hangs at start-up instead of refusing the receipt.
 			name: "a receipt that is a FIFO",
 			put: func(t *testing.T) string {
 				t.Helper()
@@ -249,9 +299,8 @@ func TestReadReceiptRefusals(t *testing.T) {
 			want: "not a regular file", wantErr: netsetup.ErrUnreadableReceipt,
 		},
 		{
-			// A link at the receipt's path points the mode and owner checks
-			// at one file and the read at another, so the open refuses to
-			// follow it.
+			// A link at the receipt path can make the mode, owner, and read
+			// use different files, so the open refuses to follow it.
 			name: "a receipt that is a symbolic link to a receipt that would pass",
 			put: func(t *testing.T) string {
 				t.Helper()

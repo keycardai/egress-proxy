@@ -63,6 +63,23 @@ type Receipt struct {
 	// them, which is the scope DropNetAdmin has, and the process exits as
 	// soon as this receipt is written.
 	CapabilitiesDropped bool `json:"capabilities_dropped"`
+	// NetNamespace is the network namespace the rules were programmed in.
+	// The rules govern that namespace and no other. Nil means none was
+	// recorded.
+	NetNamespace *NetNamespace `json:"net_namespace,omitempty"`
+}
+
+// NetNamespace identifies a network namespace. Two processes are in the same
+// namespace when the device and inode of their /proc/[pid]/ns/net links are
+// equal (namespaces(7), The /proc/[pid]/ns/ directory).
+type NetNamespace struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
+// String names the namespace in a refusal.
+func (n NetNamespace) String() string {
+	return fmt.Sprintf("device %d inode %d", n.Device, n.Inode)
 }
 
 // PortProtection says whether a run checked that a workload cannot bind the

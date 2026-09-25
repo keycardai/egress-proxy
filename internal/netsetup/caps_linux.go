@@ -125,10 +125,9 @@ func confirmDropped() error {
 	return nil
 }
 
-// HasNetAdmin reports whether this thread holds CAP_NET_ADMIN in its
-// effective or permitted set. A thread raises any permitted capability into
-// its effective set with capset (capabilities(7)), so a permitted
-// capability is held.
+// HasNetAdmin reports whether this thread has CAP_NET_ADMIN in its effective
+// or permitted set. capset can raise a permitted capability into the
+// effective set, so either set means the thread holds it.
 func HasNetAdmin() (bool, error) {
 	caps, err := threadCapabilities()
 	if err != nil {

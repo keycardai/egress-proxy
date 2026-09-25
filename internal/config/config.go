@@ -37,7 +37,7 @@ const (
 	DefaultConnect = "127.0.0.1:3128"
 	DefaultAdmin   = "/run/egress/admin.sock"
 	// DefaultCleartextPort is the captured port read as cleartext HTTP when
-	// listen.cleartext_ports names none.
+	// listen.cleartext_ports is empty.
 	DefaultCleartextPort  = 80
 	DefaultCAOutDir       = "/shared-ca"
 	DefaultLeafTTL        = 24 * time.Hour
@@ -98,9 +98,9 @@ type Document struct {
 	Limits   Limits    `json:"limits"`
 	// Credentials names the source from which the proxy reads credentials.
 	Credentials Credentials `json:"credentials"`
-	// Netsetup is what the init container programmed, which the proxy reads
-	// before it serves a transparent frontend.
-	Netsetup  Netsetup   `json:"netsetup"`
+	// Netsetup describes what the init container programmed into network
+	// firewall rules. The proxy reads it before serving a transparent frontend.
+	Netsetup Netsetup `json:"netsetup"`
 	Policy    Policy     `json:"policy"`
 	Endpoints []Endpoint `json:"endpoints"`
 }
@@ -173,24 +173,23 @@ type Impersonate struct {
 type Listen struct {
 	// Connect is the CONNECT frontend, host:port.
 	Connect string `json:"connect"`
-	// Transparent is the redirect target the netsetup rules send captured
-	// TCP to, host:port. An empty value runs no transparent frontend.
+	// Transparent is the host:port redirect target for captured TCP. An empty
+	// value disables the transparent frontend.
 	//
-	// The port is below 1024, so an unprivileged workload cannot bind it
-	// during a sidecar restart and stand in for the proxy. The proxy holds
+	// The port is below 1024, so an unprivileged workload cannot bind it during
+	// a sidecar restart and stand in for the proxy. The proxy holds
 	// NET_BIND_SERVICE and no other capability.
 	Transparent string `json:"transparent"`
-	// CleartextPorts are the captured destination ports read as cleartext
-	// HTTP, where the destination comes from the Host header. Empty means
-	// port 80. Every other captured port is read as TLS.
+	// CleartextPorts lists captured destination ports to read as cleartext
+	// HTTP. The destination comes from the Host header. Empty means port 80.
+	// Every other captured port is read as TLS.
 	CleartextPorts []int `json:"cleartext_ports"`
 	// Admin is the path of the admin Unix socket.
 	Admin string `json:"admin"`
 }
 
-// Netsetup is where the init container's receipt is. The proxy reads it
-// before it serves a transparent frontend and refuses to start when the uid
-// or the redirect port disagree with what the rules programmed.
+// Netsetup contains the init container's receipt. The proxy reads it before
+// serving a transparent frontend and refuses a mismatched uid or port.
 type Netsetup struct {
 	Receipt string `json:"receipt"`
 }
@@ -400,8 +399,8 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // can make two sidecars answer the same request differently.
 //
 // sandbox.id stays out: it annotates a record but decides nothing, and it
-// already has its own field on every record. So do ca, limits and the listen
-// addresses, which bound how the process runs without changing any answer.
+// It already has its own field on every record. The same holds for ca, limits,
+// and listen addresses, which bound the process without changing any answer.
 //
 // The compiled deny list goes in because it is platform policy that a build
 // carries rather than a document. Two binaries that deny different
@@ -414,10 +413,9 @@ type decisionInputs struct {
 	UpstreamCAFiles    []string         `json:"upstream_ca_files"`
 	CredentialSource   credentialSource `json:"credential_source"`
 	DenyList           string           `json:"deny_list"`
-	// CleartextPorts decides what a captured port is read as, and a port
-	// read as cleartext is refused where the same port read as TLS is
-	// decided on its server name. It is empty with no transparent frontend,
-	// where nothing is captured and the setting decides nothing.
+	// CleartextPorts decides how the frontend reads a captured port. It refuses
+	// a port read as cleartext where the same port read as TLS uses its server
+	// name. It is empty with no transparent frontend, where nothing is captured.
 	CleartextPorts []int `json:"cleartext_ports,omitempty"`
 }
 
@@ -447,10 +445,9 @@ func canonicalPrefixes(prefixes []netip.Prefix) []string {
 	return out
 }
 
-// canonicalEndpoints orders an endpoint list by host, then port, then path
-// prefix. The matcher sorts each host's prefixes by descending length and
-// validation refuses a repeated host, port and prefix, so document order
-// changes no answer and must change no digest.
+// canonicalEndpoints orders endpoints by host, port, and path prefix. The
+// matcher sorts prefixes by length, and validation rejects duplicates, so
+// document order changes neither the answer nor the digest.
 func canonicalEndpoints(endpoints []Endpoint) []Endpoint {
 	out := append([]Endpoint(nil), endpoints...)
 	sort.Slice(out, func(i, j int) bool {
@@ -521,9 +518,9 @@ func (c *Config) UpstreamRoots() (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// TransparentPort is the port the transparent frontend binds, zero when the
-// configuration runs none. The containment check compares it with the
-// redirect port on the receipt.
+// TransparentPort is the port the transparent frontend binds. It is zero
+// when the configuration has no transparent frontend. The containment check
+// compares it with the receipt's redirect port.
 func (c *Config) TransparentPort() int {
 	if c.Listen.Transparent == "" {
 		return 0
@@ -704,9 +701,8 @@ func (c *Config) validate() error {
 	seen := make(map[string]int, len(c.Endpoints))
 	for i, endpoint := range c.Endpoints {
 		endpoint.validate(i, &found)
-		// An endpoint names a service, so the identity is the host, the
-		// port and the prefix together. This is the key policy.Compile
-		// uses, and the two must agree on what a repeat is.
+		// An endpoint identifies a service by host, port, and prefix. Compile
+		// uses the same identity, so both checks reject the same duplicate.
 		key := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)) + endpoint.PathPrefix
 		if previous, ok := seen[key]; ok {
 			found.addf("endpoints[%d]: host %q with path_prefix %q repeats endpoints[%d]",
@@ -978,9 +974,9 @@ func requireOnly(
 	}
 }
 
-// validateTransparent checks the transparent frontend and the receipt it
-// starts against. A transparent frontend without a receipt cannot show that
-// the rules send it anything, so the receipt path is required with it.
+// validateTransparent checks the transparent frontend and its receipt. A
+// transparent frontend without a receipt cannot show that the rules send it
+// traffic, so it requires a receipt path.
 func (c *Config) validateTransparent(found *problems) {
 	for i, port := range c.Listen.CleartextPorts {
 		if port < 1 || port > maxPort {
@@ -997,8 +993,8 @@ func (c *Config) validateTransparent(found *problems) {
 	}
 }
 
-// validateTransparentAddress checks listen.transparent is host:port with an
-// empty or IP host. The frontend binds sockets itself and resolves no name.
+// validateTransparentAddress checks that listen.transparent is host:port with
+// an empty or IP host. Host names are not allowed here.
 func validateTransparentAddress(address string, found *problems) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
@@ -1014,9 +1010,7 @@ func validateTransparentAddress(address string, found *problems) {
 	}
 }
 
-// sortedPorts renders a port list the way the frontend reads it: sorted and
-// deduplicated. Two spellings of one set read the same ports as cleartext,
-// so they digest the same.
+// sortedPorts sorts and removes duplicate ports to canonicalize for the digest.
 func sortedPorts(ports []int) []int {
 	seen := make(map[int]struct{}, len(ports))
 	out := make([]int, 0, len(ports))

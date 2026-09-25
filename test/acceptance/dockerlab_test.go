@@ -56,8 +56,8 @@ const (
 	// binaries to a container. The build cache is keyed by layer content,
 	// so the package layers are still built once.
 	labImageRepo = "egress-proxy-acceptance"
-	// certificatePEMSize is a generous guess at one PEM certificate, used
-	// to size the buffer the leaf chain is written into.
+	// certificatePEMSize estimates one PEM certificate when sizing the leaf
+	// chain buffer.
 	certificatePEMSize = 1024
 )
 
@@ -127,8 +127,8 @@ func dockerClientEnv(ts *testscript.TestScript) {
 	ts.Setenv("DOCKER_CONFIG", config)
 }
 
-// cmdLinuxBin cross-compiles egress-proxy, egress-netsetup and netfixture
-// into DIR:
+// cmdLinuxBin cross-compiles egress-proxy, egress-netsetup, and netfixture
+// into DIR.
 //
 //	linuxbin DIR
 //
@@ -151,12 +151,12 @@ func cmdLinuxBin(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
-// cmdTLSCert writes a CA certificate and a leaf for HOST into DIR:
+// cmdTLSCert writes a CA certificate and leaf for HOST into DIR.
 //
 //	tlscert DIR HOST
 //
-// DIR/ca.crt is what the proxy verifies the upstream against and
-// DIR/leaf.crt with DIR/leaf.key is what the upstream serves.
+// The proxy verifies the upstream with DIR/ca.crt. The upstream serves
+// DIR/leaf.crt with DIR/leaf.key.
 func cmdTLSCert(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 2 {
 		ts.Fatalf("usage: tlscert DIR HOST")

@@ -359,13 +359,13 @@ func cmdWaitFile(ts *testscript.TestScript, neg bool, args []string) {
 	})
 }
 
-// cmdWaitGrep waits for a file to hold a line matching a regular
-// expression:
+// cmdWaitGrep waits for a file to contain a line that matches a regular
+// expression.
 //
 //	waitgrep FILE PATTERN
 //
-// A process in a container writes its log to a mounted directory, so this
-// is how a script waits for that process to reach a state it announces.
+// A container writes its log to a mounted directory. The script waits for
+// the process to announce that it reached a state.
 func cmdWaitGrep(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 2 {
 		ts.Fatalf("usage: waitgrep FILE PATTERN")

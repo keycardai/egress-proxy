@@ -465,8 +465,9 @@ func TestVerifyWritesNothing(t *testing.T) {
 }
 
 // TestKeepNetAdminIsRecorded proves a run given --keep-net-admin writes a
-// receipt that says the capability was kept. The drop itself needs
-// CAP_NET_ADMIN, so netsetup_ruleset.txtar covers it.
+// receipt that says the capability was kept, and names the network
+// namespace it ran in. The drop itself needs CAP_NET_ADMIN, so
+// netsetup_ruleset.txtar covers it.
 func TestKeepNetAdminIsRecorded(t *testing.T) {
 	t.Parallel()
 	receipt := filepath.Join(t.TempDir(), "netsetup.json")
@@ -483,6 +484,13 @@ func TestKeepNetAdminIsRecorded(t *testing.T) {
 	assert.Equal(t, netsetup.PortProtectionRequired, got.RedirectPortProtection, "the receipt says the port was checked")
 	assert.False(t, got.CapabilitiesDropped, "the receipt says CAP_NET_ADMIN was kept")
 	assert.Contains(t, out.String(), "CAP_NET_ADMIN is still held", "the run says it kept the capability")
+	namespace, err := netsetup.CurrentNetNamespace()
+	if errors.Is(err, netsetup.ErrNetNamespaceNotSupported) {
+		assert.Nil(t, got.NetNamespace, "a platform that reports no namespace records none")
+		return
+	}
+	require.NoError(t, err, "read the network namespace")
+	assert.Equal(t, &namespace, got.NetNamespace, "the receipt names the namespace the run programmed")
 }
 
 // TestAFailedRunLeavesNoReceipt starts each run with a receipt an earlier
