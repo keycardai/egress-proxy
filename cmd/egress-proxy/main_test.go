@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -158,7 +159,10 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 		transparentPort func(t *testing.T) int
 		// families is what the netsetup receipt records the redirect
 		// covers.
-		families    []string
+		families []string
+		// listen binds the capture sockets. Nil binds them with
+		// transparent.Listen.
+		listen      func(ctx context.Context, port int) ([]net.Listener, error)
 		wantCapture bool
 		wantErr     string
 	}{
@@ -175,12 +179,22 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 			families:        []string{"ipv4"},
 			wantCapture:     true,
 		},
+		{
+			name:            "the receipt names ipv6 and only the ipv4 socket binds",
+			transparentPort: freePort,
+			families:        []string{"ipv4", "ipv6"},
+			listen:          listenIPv4Only,
+			wantErr: "the netsetup receipt names ipv4,ipv6 and the capture bound ipv4, " +
+				"so the redirect sends ipv6 nowhere",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			connect := freeAddress(t)
-			proc := startingProcess(t, connect, tc.transparentPort(t), tc.families)
+			port := tc.transparentPort(t)
+			proc := startingProcess(t, connect, port, tc.families)
+			proc.listenCapture = tc.listen
 			require.ErrorIs(t, proc.ready(), errNotReady, "readiness before bind")
 
 			listener, captured, err := proc.bind(t.Context())
@@ -196,6 +210,12 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 				reclaimed, reclaimErr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", connect)
 				require.NoError(t, reclaimErr, "the failed bind left the CONNECT listener open on %s", connect)
 				require.NoError(t, reclaimed.Close(), "close the reclaimed CONNECT listener")
+				if tc.listen != nil {
+					capture := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+					reclaimed, reclaimErr = (&net.ListenConfig{}).Listen(t.Context(), "tcp4", capture)
+					require.NoError(t, reclaimErr, "the refused capture left its socket open on %s", capture)
+					require.NoError(t, reclaimed.Close(), "close the reclaimed capture socket")
+				}
 				return
 			}
 			require.NoError(t, err, "bind")
@@ -209,6 +229,39 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 			assert.NoError(t, proc.ready(), "readiness once every listener is bound")
 		})
 	}
+}
+
+// listenIPv4Only binds the capture the way transparent.Listen does on a
+// kernel with no IPv6: the IPv4 socket and nothing else.
+func listenIPv4Only(ctx context.Context, port int) ([]net.Listener, error) {
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return nil, fmt.Errorf("listen: %w", err)
+	}
+	return []net.Listener{listener}, nil
+}
+
+// TestReadinessNeedsTheCertificate pins the second half of readiness. The
+// workload trusts ca.crt, so a process whose listeners are bound is still
+// not ready while the file is missing.
+func TestReadinessNeedsTheCertificate(t *testing.T) {
+	t.Parallel()
+	proc := startingProcess(t, freeAddress(t), 0, nil)
+	listener, _, err := proc.bind(t.Context())
+	require.NoError(t, err, "bind")
+	t.Cleanup(func() { _ = listener.Close() })
+	require.NoError(t, proc.ready(), "readiness with the listener bound and the certificate on disk")
+
+	pem, err := os.ReadFile(proc.certPath)
+	require.NoError(t, err, "read the certificate")
+	require.NoError(t, os.Remove(proc.certPath), "remove the certificate")
+	notReady := proc.ready()
+	require.ErrorIs(t, notReady, errNotReady, "readiness without the certificate")
+	require.ErrorContains(t, notReady, proc.certPath+" is not readable", "the 503 names the missing file")
+
+	//nolint:gosec // G703: certPath is under the test's own temporary directory
+	require.NoError(t, os.WriteFile(proc.certPath, pem, 0o600), "restore the certificate")
+	assert.NoError(t, proc.ready(), "readiness once the certificate is back")
 }
 
 // noPort runs no transparent frontend.
@@ -225,9 +278,9 @@ func heldPort(t *testing.T) int {
 	return portOf(t, held.Addr())
 }
 
-// freePort is a loopback port nothing is listening on. The kernel hands out
-// one port at a time, so the port is free as soon as the listener that named
-// it closes.
+// freePort is a loopback port that was free when it returned. Nothing holds
+// it, so another socket can take it before the bind under test, and the row
+// then fails with EADDRINUSE.
 func freePort(t *testing.T) int {
 	t.Helper()
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -247,9 +300,8 @@ func portOf(t *testing.T, addr net.Addr) int {
 	return number
 }
 
-// freeAddress is a loopback address nothing is listening on. The kernel
-// hands out one port at a time, so the address is free as soon as the
-// listener that named it closes.
+// freeAddress is a loopback address that was free when it returned.
+// Nothing holds it until the bind under test.
 func freeAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")

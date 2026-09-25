@@ -99,6 +99,38 @@ func TestServerAnswersHealthAndInfo(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "the socket is unlinked once Run returns")
 }
 
+// TestServerWithNoAnswers covers a server built with neither Info nor
+// Ready. Both routes answer 503 with a body that names what is missing, and
+// the process keeps serving.
+func TestServerWithNoAnswers(t *testing.T) {
+	t.Parallel()
+	path := socketPath(t)
+	server, err := admin.New(t.Context(), admin.Options{Path: path})
+	require.NoError(t, err, "admin.New")
+	ctx, cancel := context.WithCancel(t.Context())
+	var group errgroup.Group
+	group.Go(func() error { return server.Run(ctx) })
+
+	tests := []struct {
+		path     string
+		wantBody string
+	}{
+		{path: "/info", wantBody: "no info is configured\n"},
+		{path: "/readyz", wantBody: "no readiness gate is configured\n"},
+	}
+	for _, tc := range tests {
+		status, body := get(t, path, tc.path)
+		assert.Equal(t, http.StatusServiceUnavailable, status, "%s status", tc.path)
+		assert.Equal(t, tc.wantBody, body, "%s body", tc.path)
+	}
+	status, body := get(t, path, "/healthz")
+	assert.Equal(t, http.StatusOK, status, "/healthz status after the 503s")
+	assert.Equal(t, "ok\n", body, "/healthz body after the 503s")
+
+	cancel()
+	require.NoError(t, group.Wait(), "Run after cancellation")
+}
+
 // TestRunReturnsNilOnCancellation covers the shutdown the context asks for.
 // TestRunReturnsTheServeFailure, an internal test, covers the other arm,
 // which needs the listener the Server does not export.

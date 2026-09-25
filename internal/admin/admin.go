@@ -57,13 +57,12 @@ type Options struct {
 	// Path is the socket's absolute file system path.
 	Path string
 	// Info is called for every /info request and its result is written as
-	// JSON.
+	// JSON. A nil Info answers 503.
 	Info func() any
 	// Ready decides /readyz. A nil error answers 200 and an error answers
 	// 503 with the error text, so a probe reads why the process is not
-	// serving yet. A nil Ready answers 503: readiness is what the kubelet
-	// releases a workload on, so a server with no gate reports not ready
-	// rather than ready.
+	// serving yet. A nil Ready answers 503, because the kubelet releases a
+	// workload on a 200.
 	Ready func() error
 	// Logger discards when nil.
 	Logger *slog.Logger
@@ -126,6 +125,10 @@ func routes(opts Options) *http.ServeMux {
 		writeText(w, http.StatusOK, "ok\n")
 	})
 	mux.HandleFunc("GET /info", func(w http.ResponseWriter, _ *http.Request) {
+		if opts.Info == nil {
+			writeText(w, http.StatusServiceUnavailable, "no info is configured\n")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")

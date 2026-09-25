@@ -233,6 +233,9 @@ type process struct {
 	server      *proxy.Server
 	admin       *admin.Server
 	transparent *transparent.Frontend
+	// listenCapture binds the capture sockets. Nil binds them with
+	// transparent.Listen.
+	listenCapture func(ctx context.Context, port int) ([]net.Listener, error)
 	// captureFamilies are the address families the netsetup receipt says
 	// the redirect covers. Every one of them needs a bound capture socket,
 	// or the redirect sends that family nowhere.
@@ -241,7 +244,7 @@ type process struct {
 	// that it is on disk.
 	certPath string
 	// listening turns true once every frontend this process runs is bound:
-	// the CONNECT listener, and the capture sockets when listen.transparent
+	// the CONNECT listener, and the capture sockets when listen.transparent_port
 	// is set. The shutdown path clears it when the drain starts.
 	listening atomic.Bool
 }
@@ -604,16 +607,18 @@ var errCapture = errors.New("transparent frontend")
 // on loopback. It returns no listeners when no transparent frontend is
 // configured.
 //
-// transparent.Listen treats a missing IPv6 socket as a valid start, because
-// a kernel with no IPv6 has no ip6tables ruleset redirecting anything to
-// one. The receipt names the families the init container programmed. A
-// family the receipt names and no socket bound refuses the start, because
-// the redirect sends that family nowhere.
+// The receipt names the families the init container programmed. A family
+// the receipt names and no socket bound refuses the start, because the
+// redirect sends that family nowhere.
 func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
 	if p.transparent == nil {
 		return nil, nil
 	}
-	listeners, err := transparent.Listen(ctx, p.cfg.Listen.TransparentPort)
+	listen := p.listenCapture
+	if listen == nil {
+		listen = transparent.Listen
+	}
+	listeners, err := listen(ctx, p.cfg.Listen.TransparentPort)
 	if errors.Is(err, syscall.EACCES) {
 		return nil, fmt.Errorf("%w: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
 			"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
