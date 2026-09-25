@@ -70,17 +70,20 @@ func TestAcceptance(t *testing.T) {
 			env.Setenv("PATH", binDir+string(os.PathListSeparator)+env.Getenv("PATH"))
 			return nil
 		},
+		Condition: condition,
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
-			"upstream": cmdUpstream,
-			"fakeas":   cmdFakeAS,
-			"satoken":  cmdSAToken,
-			"expand":   cmdExpand,
-			"freeport": cmdFreePort,
-			"shortdir": cmdShortDir,
-			"waitfile": cmdWaitFile,
-			"waitport": cmdWaitPort,
-			"sigterm":  cmdSigterm,
-			"audit":    cmdAudit,
+			"upstream":  cmdUpstream,
+			"fakeas":    cmdFakeAS,
+			"satoken":   cmdSAToken,
+			"expand":    cmdExpand,
+			"freeport":  cmdFreePort,
+			"shortdir":  cmdShortDir,
+			"waitfile":  cmdWaitFile,
+			"waitport":  cmdWaitPort,
+			"sigterm":   cmdSigterm,
+			"audit":     cmdAudit,
+			"dockerlab": cmdDockerLab,
+			"linuxbin":  cmdLinuxBin,
 		},
 	})
 }
