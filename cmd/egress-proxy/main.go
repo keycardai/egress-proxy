@@ -64,6 +64,7 @@ type flags struct {
 	impersonateUser       string
 	connect               string
 	transparentPort       int
+	transparentPortSet    bool
 	admin                 string
 	netsetupReceipt       string
 	caOutDir              string
@@ -89,6 +90,7 @@ func (f flags) overrides() config.Overrides {
 		ImpersonateUser:       f.impersonateUser,
 		Connect:               f.connect,
 		TransparentPort:       f.transparentPort,
+		TransparentPortSet:    f.transparentPortSet,
 		Admin:                 f.admin,
 		NetsetupReceipt:       f.netsetupReceipt,
 		CAOutDir:              f.caOutDir,
@@ -205,7 +207,8 @@ func command(stderr io.Writer, action func(context.Context, flags) error) *cli.C
 		ErrWriter:       stderr,
 		HideHelpCommand: true,
 		Flags:           flagSet(&opts),
-		Action: func(ctx context.Context, _ *cli.Command) error {
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			opts.transparentPortSet = cmd.Count("transparent-port") > 0
 			return action(ctx, opts)
 		},
 	}

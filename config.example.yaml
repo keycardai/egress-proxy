@@ -28,7 +28,7 @@ identity:
 #   connect: "127.0.0.1:3128"           # EGRESS_PROXY_CONNECT
 #   transparent_port: 1015              # EGRESS_PROXY_TRANSPARENT_PORT: redirect target on 127.0.0.1 and ::1. Unset disables it
 #   cleartext_ports: [80]               # captured ports use HTTP. Other ports use TLS
-#   admin: "/run/egress/admin.sock"     # EGRESS_PROXY_ADMIN; a Unix socket, never a port
+#   admin: "/run/egress/admin/admin.sock" # EGRESS_PROXY_ADMIN; a Unix socket, never a port
 # netsetup:
 #   receipt: "/run/egress/netsetup.json"  # EGRESS_PROXY_NETSETUP_RECEIPT: read when listen.transparent_port is set
 # ca:

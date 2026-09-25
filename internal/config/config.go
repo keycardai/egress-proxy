@@ -35,7 +35,7 @@ import (
 // Defaults for the process settings.
 const (
 	DefaultConnect = "127.0.0.1:3128"
-	DefaultAdmin   = "/run/egress/admin.sock"
+	DefaultAdmin   = "/run/egress/admin/admin.sock"
 	// DefaultCleartextPort is the captured port read as cleartext HTTP when
 	// listen.cleartext_ports is empty.
 	DefaultCleartextPort  = 80
@@ -330,6 +330,7 @@ type Overrides struct {
 	ImpersonateUser       string
 	Connect               string
 	TransparentPort       int
+	TransparentPortSet    bool
 	Admin                 string
 	NetsetupReceipt       string
 	CAOutDir              string
@@ -625,7 +626,7 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("identity.impersonate.user", overrides.ImpersonateUser != "",
 		func() { c.Identity.Impersonate.User = overrides.ImpersonateUser })
 	override("listen.connect", overrides.Connect != "", func() { c.Listen.Connect = overrides.Connect })
-	override("listen.transparent_port", overrides.TransparentPort != 0,
+	override("listen.transparent_port", overrides.TransparentPortSet || overrides.TransparentPort != 0,
 		func() { c.Listen.TransparentPort = overrides.TransparentPort })
 	override("listen.admin", overrides.Admin != "", func() { c.Listen.Admin = overrides.Admin })
 	override("netsetup.receipt", overrides.NetsetupReceipt != "",

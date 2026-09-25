@@ -27,7 +27,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 		want any
 	}{
 		{"listen.connect", cfg.Listen.Connect, "127.0.0.1:3128"},
-		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin.sock"},
+		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin/admin.sock"},
 		// Zero disables the transparent frontend.
 		{"listen.transparent_port", cfg.Listen.TransparentPort, 0},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},

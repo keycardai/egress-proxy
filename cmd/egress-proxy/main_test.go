@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		SandboxID: "sbx-env", ZoneURL: "https://env.example", ClientID: "env-client",
 		WorkloadTokenFile: "/env/token", ImpersonateUser: "env-user",
 		// The flag wins over EGRESS_PROXY_CONNECT.
-		Connect: "127.0.0.1:2", TransparentPort: 1015, Admin: "/env/admin.sock",
+		Connect: "127.0.0.1:2", TransparentPort: 1015, TransparentPortSet: true, Admin: "/env/admin.sock",
 		NetsetupReceipt: "/env/netsetup.json", CAOutDir: "/env/ca", CAStateDir: "/env/state",
 		ClientSecretFile:     "/env/client-secret",
 		CredentialStaticFile: "/env/credentials.yaml",
@@ -71,14 +72,16 @@ func TestCommandRequiresTheConfigPath(t *testing.T) { //nolint:paralleltest // t
 	require.Error(t, cmd.Run(t.Context(), []string{"egress-proxy"}), "Run without --config")
 }
 
-func TestTransparentPortOverrides(t *testing.T) { //nolint:paralleltest // t.Setenv
+func TestTransparentPortOverrides(t *testing.T) {
 	tests := []struct {
-		name string
-		env  string
-		args []string
-		want int
+		name     string
+		env      string
+		args     []string
+		unsetEnv bool
+		want     int
 	}{
-		{name: "document without an override", want: 1015},
+		{name: "document without an override", unsetEnv: true, want: 1015},
+		{name: "empty environment keeps the document", want: 1015},
 		{name: "flag disables capture", args: []string{"--transparent-port", "0"}, want: 0},
 		{name: "environment disables capture", env: "0", want: 0},
 		{name: "flag disables capture over environment", env: "1016", args: []string{"--transparent-port", "0"}, want: 0},
@@ -87,12 +90,16 @@ func TestTransparentPortOverrides(t *testing.T) { //nolint:paralleltest // t.Set
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(envPrefix+"TRANSPARENT_PORT", tc.env)
+			if tc.unsetEnv {
+				require.NoError(t, os.Unsetenv(envPrefix+"TRANSPARENT_PORT"), "omit the environment override")
+			}
 			var cfg *config.Config
 			cmd := command(io.Discard, func(_ context.Context, opts flags) error {
 				var err error
 				cfg, err = config.Parse([]byte("version: 1\nsandbox:\n  id: test\nlisten:\n  transparent_port: 1015\n"+
 					"endpoints:\n  - host: example.com\n"), opts.overrides())
-				return err
+				require.NoError(t, err, "parse the document")
+				return nil
 			})
 			args := append([]string{"egress-proxy", "--config", "/unused.yaml"}, tc.args...)
 			require.NoError(t, cmd.Run(t.Context(), args), "parse the command and document")
