@@ -2,6 +2,7 @@ package transparent_test
 
 import (
 	"net"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -107,4 +108,29 @@ func networkOf(t *testing.T, listener net.Listener) string {
 		return "tcp4"
 	}
 	return "tcp6"
+}
+
+// TestListenFailsWhenTheIPv6PortIsTaken holds the IPv6 wildcard port with a
+// V6ONLY socket, which leaves the IPv4 bind free. Only a kernel with no IPv6
+// may leave the IPv6 socket out, so this must fail and close the IPv4 socket
+// it opened.
+func TestListenFailsWhenTheIPv6PortIsTaken(t *testing.T) {
+	t.Parallel()
+	holder, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp6", "[::]:0")
+	if err != nil {
+		t.Skipf("no IPv6 on this host: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	_, port, err := net.SplitHostPort(holder.Addr().String())
+	require.NoError(t, err)
+
+	listeners, err := transparent.Listen(t.Context(), net.JoinHostPort("0.0.0.0", port))
+	require.Error(t, err, "a taken IPv6 port fails the call")
+	assert.Contains(t, err.Error(), "listen on [::]:"+port, "the refusal names the IPv6 socket")
+	require.ErrorIs(t, err, syscall.EADDRINUSE, "the refusal keeps the bind error")
+	assert.Empty(t, listeners, "a refused address leaves no socket open")
+
+	inet, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp4", net.JoinHostPort("0.0.0.0", port))
+	require.NoError(t, err, "the IPv4 socket Listen opened is closed again")
+	_ = inet.Close()
 }

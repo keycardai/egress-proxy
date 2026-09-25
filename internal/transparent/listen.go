@@ -2,10 +2,12 @@ package transparent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"strings"
+	"syscall"
 )
 
 // Listen opens the sockets the transparent frontend accepts redirected
@@ -27,10 +29,14 @@ import (
 //
 // The host must be empty or an IP address. A name is an error.
 //
-// The IPv6 socket is optional and its absence is not an error: a kernel with
-// no IPv6 has no ip6tables ruleset redirecting anything to it. The IPv4
-// socket is not optional. A frontend that binds nothing accepts nothing, and
-// the filter DROP then denies the workload every destination.
+// The IPv6 socket is optional only when the kernel has no IPv6, which
+// socket(2) reports as EAFNOSUPPORT. Such a kernel has no ip6tables ruleset
+// redirecting anything to it. Every other IPv6 error fails the call. gVisor
+// registers IPv6 even when net.ipv6.conf.all.disable_ipv6 is set (gvisor
+// runsc/boot/loader.go, newEmptySandboxNetworkStack), so under gVisor the
+// IPv6 socket always opens. The IPv4 socket is never optional. A frontend
+// that binds nothing accepts nothing, and the filter DROP then denies the
+// workload every destination.
 func Listen(ctx context.Context, address string) ([]net.Listener, error) {
 	config := &net.ListenConfig{}
 	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
@@ -51,9 +57,12 @@ func Listen(ctx context.Context, address string) ([]net.Listener, error) {
 		return nil, fmt.Errorf("listen on 0.0.0.0:%s: %w", port, err)
 	}
 	inet6, err := config.Listen(ctx, "tcp6", net.JoinHostPort("::", port))
-	if err != nil {
-		//nolint:nilerr // a kernel with no IPv6 redirects nothing to an IPv6 socket, so its absence is not a failure
+	if errors.Is(err, syscall.EAFNOSUPPORT) {
 		return []net.Listener{inet}, nil
+	}
+	if err != nil {
+		_ = inet.Close()
+		return nil, fmt.Errorf("listen on [::]:%s: %w", port, err)
 	}
 	return []net.Listener{inet, inet6}, nil
 }
