@@ -38,31 +38,30 @@ import (
 )
 
 func main() {
-	cmd := command(os.Stdout, nil, "/proc/sys/net/ipv4/ip_unprivileged_port_start")
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
+	if err := command(os.Stdout, nil).Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "egress-netsetup: %v\n", err)
 		os.Exit(1)
 	}
 }
 
+// settings are what the command line supplies.
 type settings struct {
-	proxyUID     int
-	redirectPort int
-	capturePorts []string
-	podCIDRs     []string
-	serviceCIDRs []string
-	dnsServers   []string
-	resolvConf   string
-	ipv6         string
-	iptables     string
-	ip6tables    string
-	receipt      string
-	dryRun       bool
-	verifyOnly   bool
-	keepNetAdmin bool
-
-	portStartPath  string
+	proxyUID       int
+	redirectPort   int
+	capturePorts   []string
+	podCIDRs       []string
+	serviceCIDRs   []string
+	dnsServers     []string
+	resolvConf     string
+	ipv6           string
+	iptables       string
+	ip6tables      string
+	receipt        string
+	dryRun         bool
+	verifyOnly     bool
+	keepNetAdmin   bool
 	portProtection string
+	portStartFile  string
 }
 
 // opener resolves the handle and the binary for one address family. A nil
@@ -85,8 +84,8 @@ func openTables(ctx context.Context, family netsetup.Family, override string) (n
 // the spec only references, and envFrom imports every key from one without
 // the spec naming any of them. Source:
 // https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
-func command(out io.Writer, open opener, portStartPath string) *cli.Command {
-	opts := settings{portStartPath: portStartPath}
+func command(out io.Writer, open opener) *cli.Command {
+	var opts settings
 	if open == nil {
 		open = openTables
 	}
@@ -145,8 +144,10 @@ func run(ctx context.Context, cmd *cli.Command, opts settings, open opener, out 
 
 const maxPort = 65535
 
+// checkRedirectPort refuses a redirect port that a process without
+// NET_BIND_SERVICE can bind. path holds net.ipv4.ip_unprivileged_port_start.
 func checkRedirectPort(port int, path string) error {
-	//nolint:gosec // G304: main supplies a fixed procfs path and tests supply a fixture
+	//nolint:gosec // G304: the path comes from this command's own flags
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read net.ipv4.ip_unprivileged_port_start: %w", err)
@@ -165,10 +166,14 @@ func checkRedirectPort(port int, path string) error {
 	return nil
 }
 
-// validate rejects a command line that asks for two different runs.
+// validate rejects an unknown --redirect-port-protection mode and a command
+// line that asks for two different runs.
 func (s settings) validate() error {
-	if s.portProtection != "required" && s.portProtection != "allow-unprotected" {
-		return fmt.Errorf("%w: --redirect-port-protection must be required or allow-unprotected", errUsage)
+	switch netsetup.PortProtection(s.portProtection) {
+	case netsetup.PortProtectionRequired, netsetup.PortProtectionAllowUnprotected:
+	default:
+		return fmt.Errorf("%w: --redirect-port-protection must be %s or %s", errUsage,
+			netsetup.PortProtectionRequired, netsetup.PortProtectionAllowUnprotected)
 	}
 	if s.dryRun && s.verifyOnly {
 		return fmt.Errorf("%w: --dry-run prints the ruleset and --verify reads the tables back. Give one",
@@ -237,10 +242,10 @@ func eachFamily(
 	out io.Writer,
 	action func(handle netsetup.Tables, built netsetup.Program) error,
 ) ([]netsetup.Program, error) {
-	if opts.portProtection == "allow-unprotected" {
-		fmt.Fprintln(out, "# WARNING: redirect-port protection is waived; a workload may take the proxy port "+
-			"and receive redirected traffic without proxy auditing")
-	} else if err := checkRedirectPort(cfg.RedirectPort, opts.portStartPath); err != nil {
+	if netsetup.PortProtection(opts.portProtection) == netsetup.PortProtectionAllowUnprotected {
+		fmt.Fprintln(out, "# WARNING: redirect-port protection is waived. A workload can bind the redirect port "+
+			"and receive redirected traffic that bypasses the proxy")
+	} else if err := checkRedirectPort(cfg.RedirectPort, opts.portStartFile); err != nil {
 		return nil, err
 	}
 	programs := make([]netsetup.Program, 0, len(cfg.Families()))
@@ -301,7 +306,7 @@ func program(ctx context.Context, cfg netsetup.Config, opts settings, open opene
 		return err
 	}
 	receipt := netsetup.NewReceipt(cfg, programs, true, time.Now())
-	receipt.RedirectPortProtection = opts.portProtection
+	receipt.RedirectPortProtection = netsetup.PortProtection(opts.portProtection)
 	if err := dropNetAdmin(opts.keepNetAdmin, &receipt, out); err != nil {
 		return err
 	}
@@ -442,10 +447,14 @@ func flagSet(opts *settings) []cli.Flag {
 			Usage: "the sidecar's transparent listener port",
 		},
 		&cli.StringFlag{
-			Name:        "redirect-port-protection",
-			Value:       "required",
+			Name: "redirect-port-protection", Value: string(netsetup.PortProtectionRequired),
 			Destination: &opts.portProtection,
-			Usage:       "required enforces port protection; allow-unprotected accepts proxy-port takeover",
+			Usage:       "required enforces port protection; allow-unprotected skips the check",
+		},
+		&cli.StringFlag{
+			Name: "port-start-file", Value: "/proc/sys/net/ipv4/ip_unprivileged_port_start",
+			Destination: &opts.portStartFile,
+			Usage:       "file net.ipv4.ip_unprivileged_port_start is read from",
 		},
 		&cli.StringSliceFlag{
 			Name: "capture-ports", Value: portStrings(defaults.CapturePorts), Destination: &opts.capturePorts,

@@ -101,31 +101,29 @@ The workload holds no capability and runs as a uid that is not
 the proxy's. The receipt is on an emptyDir with medium Memory that the
 workload does not mount.
 
-`--redirect-port-protection=required` is the default. It requires the runtime
-to enforce privileged-port binding and expose
-`net.ipv4.ip_unprivileged_port_start`. gVisor netstack release `20260921.0`
-does neither. The [upstream bind fix](https://github.com/google/gvisor/pull/14972)
-also needs to expose the threshold before it satisfies this check.
+`--redirect-port-protection` defaults to `required`. Program and verify runs
+then read `net.ipv4.ip_unprivileged_port_start` from `--port-start-file` and
+refuse a redirect port at or above it. A file that is missing or does not
+hold a port number fails the run. gVisor netstack release `20260921.0` does
+not enforce privileged ports and does not expose this sysctl
+([google/gvisor#14972](https://github.com/google/gvisor/pull/14972)).
 
-`--redirect-port-protection=allow-unprotected` explicitly waives the port
-check, including missing or invalid sysctl values. Program and verify runs
-warn that a workload may take the proxy port and receive redirected traffic
-without proxy auditing. A program run records the selected policy in
-`redirect_port_protection` in the receipt. An absent field in an older
-receipt provides no evidence of a port check. The exception changes no
-rules, rule verification, or capability handling. It permits listener
-takeover and disruption during proxy startup or restarts; it does not grant
-the workload the proxy uid's direct-egress exemption. This is a degraded
-compatibility mode, not a claim that the complete ruleset works on gVisor.
+`allow-unprotected` skips the check. The run prints a warning and the
+receipt records the mode in `redirect_port_protection`. The rules, their
+verification and the capability drop are unchanged. A workload can then bind
+the redirect port while the sidecar starts or restarts, and receive captured
+traffic that the proxy never sees. The workload's own traffic still goes
+through the ruleset. A receipt without `redirect_port_protection` says
+nothing about whether the port was checked.
 
 | Threat | Mitigation | Test |
 |---|---|---|
 | A workload calls `setuid` to the proxy uid. The nat chain returns early for that uid and the filter chain accepts it, so the workload's own traffic would be neither redirected nor dropped. This bypass is published against Istio (https://pulsesecurity.co.nz/advisories/istio-egress-bypass), and Istio states the same limit (https://istio.io/latest/docs/ops/best-practices/security/#understand-traffic-capture-limitations). | Traffic capture is not a boundary on its own. The workload securityContext is: run as a uid that is not the proxy's, `allowPrivilegeEscalation` false, `capabilities.drop` ALL. Without CAP_SETUID the call fails, and `no_new_privs` keeps an execve from granting it. The ruleset excludes the proxy uid and no other. The proxy uid may not be 0, which would exempt every root process in the pod. | `TestProgramRules`, `TestValidate` |
-| A workload binds the redirect port before the sidecar starts or while it restarts. | Before programming or verifying rules, netsetup reads `net.ipv4.ip_unprivileged_port_start` and refuses a redirect port at or above it. An unreadable or invalid value fails the default required mode. The explicit allow-unprotected exception waives this mitigation and records that policy in the receipt. The workload holds no NET_BIND_SERVICE capability. | `TestCheckRedirectPort`, `TestPortCheckPrecedesTableAccess`, `netsetup_ruleset.txtar` |
+| A workload binds the redirect port before the sidecar starts or while it restarts. | The workload holds no NET_BIND_SERVICE. Before it programs or verifies the rules, netsetup refuses a redirect port at or above `net.ipv4.ip_unprivileged_port_start`, and fails when it cannot read that value. `allow-unprotected` skips this check and the receipt records it. | `TestCheckRedirectPort`, `TestPortCheckPrecedesTableAccess`, `netsetup_ruleset.txtar` |
 | A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, DNS to the named resolvers, and the ICMPv6 Neighbour Discovery the kernel sends. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
 | A process with CAP_NET_RAW sends ICMPv6 of a neighbour discovery type, with any payload, to any IPv6 address. The ip6tables filter chain must accept neighbour discovery, because the kernel needs it to reach any IPv6 neighbour. | The ICMPv6 accepts match only packets from the kernel's own sockets: `-m owner ! --uid-owner 0-4294967294`. xt_owner matches a process's socket by its uid, and a kernel socket only when every uid condition is negated (linux `net/netfilter/xt_owner.c`, `owner_mt`). No process can send ICMPv6 past the DROP, whatever its uid. | `TestProgramRules`, `netsetup_ruleset.txtar` |
 | A workload leaves over IPv6, on a kernel whose ip6tables rules were never programmed. | Both address families are programmed. `--ipv6 auto` follows the kernel, `--ipv6 on` requires IPv6, and `--ipv6 off` programs an ip6tables ruleset that drops every IPv6 packet the pod sends. A probe that cannot tell whether the kernel has IPv6 fails the run. | `TestProgramRules`, `TestIPv6Modes`, `TestKernelHasIPv6`, `netsetup_ruleset.txtar` |
-| A rule another component put in OUTPUT decides the packet ahead of the ruleset, or a rule is added to a chain this package owns. | Each OUTPUT jump is inserted at position 1. After applying, the init container reads every rule back with `-C`, counts each chain it owns and checks that the first rule in each OUTPUT chain is exactly the jump. The NAT chain must end with REDIRECT followed by an unconditional RETURN, with exemptions before them. A denied IPv6 NAT chain contains only RETURN. Unexpected rules, misplaced jumps and reordered capture rules fail verification. | `TestApply`, `TestVerifyProblems`, `netsetup_ruleset.txtar` |
+| A rule another component put in OUTPUT decides the packet ahead of the ruleset, or a rule is added to a chain this package owns. | Each OUTPUT jump is inserted at position 1. After applying, the init container reads every rule back with `-C`, counts each chain it owns and checks that the first rule in each OUTPUT chain is exactly the jump. The nat chain must end with the REDIRECT and then an unconditional RETURN, so every exemption comes before the REDIRECT. The IPv6 deny nat chain holds only the RETURN. An extra rule, a misplaced jump or a reordered nat rule fails verification. | `TestApply`, `TestVerifyProblems`, `netsetup_ruleset.txtar` |
 | The process that programmed the rules changes them after it verified them. | The init container drops CAP_NET_ADMIN from the permitted, effective and inheritable sets and the bounding set of the thread that programmed the rules, sets `no_new_privs`, reads all of them back, and exits once it has written the receipt. The receipt records whether the drop happened. See the known limit on the drop's scope. | `TestKeepNetAdminIsRecorded`, `netsetup_ruleset.txtar` |
 | A rule the init container could not apply leaves the pod half governed, and an earlier run's receipt says it is contained. | Each family's ruleset goes in with one `iptables-restore --noflush` run. The kernel replaces each table in one operation at its `COMMIT` line, so a table that fails to load keeps the rules it held. The filter table commits before the nat table, so a nat table that fails leaves captured TCP dropped. A run that programs the rules unlinks the receipt before it reads its configuration, so any failure leaves none. | `TestApply`, `TestRestoreInsertsOnlyTheJumpsItIsGiven`, `TestAFailedRunLeavesNoReceipt`, `TestRemoveReceiptLeavesNothingBehind`, `netsetup_ruleset.txtar` |
 | A `--verify` run writes a receipt for rules it did not program, or replaces a receipt that says CAP_NET_ADMIN was kept. | `--verify` reads the tables back and writes nothing. It never writes or removes the receipt and never drops a capability. | `TestVerifyWritesNothing` |

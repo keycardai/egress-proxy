@@ -268,8 +268,18 @@ func missingJumps(handle Tables, program Program) ([]Rule, error) {
 }
 
 // Verify reports whether the tables hold this ruleset and nothing else.
+// It checks four things:
 //
-// iptables normalizes rule text, so -C checks membership.
+//   - Every rule is present. It asks the kernel with -C, because iptables -S
+//     prints rules in a normalized form that does not match the text this
+//     package writes.
+//   - Each owned chain holds as many rules as the program installs. With
+//     every rule present, an equal count means no other rule is there.
+//   - The filter chain ends with its DROP. The nat chain ends with the
+//     REDIRECT and then the unconditional RETURN, so every exemption comes
+//     before the REDIRECT.
+//   - Each OUTPUT jump is the first rule in its OUTPUT chain, so no other
+//     rule sees a packet before this ruleset does.
 func Verify(handle Tables, program Program, progress io.Writer) error {
 	var found problems
 	rules := program.Rules()
@@ -335,6 +345,8 @@ func jumpTarget(spec []string) string {
 	return ""
 }
 
+// chainProblems reports an owned chain that holds a rule this ruleset did
+// not install, or whose rules are out of order.
 func chainProblems(handle Tables, chain Chain) []string {
 	var found problems
 	rules, err := chainRules(handle, chain.Table, chain.Name)
@@ -356,6 +368,9 @@ func chainProblems(handle Tables, chain Chain) []string {
 	return found
 }
 
+// natOrderProblems reports a nat chain that does not end with the REDIRECT
+// and then the unconditional RETURN. A nat chain that holds only the RETURN
+// passes: that is the IPv6 deny ruleset.
 func natOrderProblems(rules []string) []string {
 	if len(rules) == 0 || rules[len(rules)-1] != "-A "+natChain+" -j RETURN" ||
 		(len(rules) > 1 && jumpTarget(strings.Fields(rules[len(rules)-2])) != "REDIRECT") {

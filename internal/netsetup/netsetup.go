@@ -45,7 +45,9 @@ func (f Family) String() string {
 const (
 	// DefaultProxyUID is the uid the sidecar runs as.
 	DefaultProxyUID = 1337
-	// DefaultRedirectPort is the sidecar's transparent listener port.
+	// DefaultRedirectPort is the sidecar's transparent listener port. It is
+	// below 1024, the default net.ipv4.ip_unprivileged_port_start, so a
+	// workload without NET_BIND_SERVICE cannot bind it.
 	DefaultRedirectPort = 1015
 	// DefaultReceiptPath is where the init container writes what it
 	// programmed and where the sidecar reads it. It is on an emptyDir with
