@@ -15,12 +15,14 @@
 # whatever uid execs the binary, drawn from the bounding set. The pod fills
 # that set with capabilities.add NET_BIND_SERVICE. docs/containers.md
 # states why both halves are needed.
+#
+# The setcap base is pinned by tag and digest in a literal FROM line, which
+# is the form Dependabot reads and updates.
 ARG KO_IMAGE
-ARG SETCAP_IMAGE=debian:bookworm-slim
 
 FROM ${KO_IMAGE} AS ko
 
-FROM ${SETCAP_IMAGE} AS setcap
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS setcap
 RUN apt-get update \
 	&& apt-get install --yes --no-install-recommends libcap2-bin \
 	&& rm -rf /var/lib/apt/lists/*

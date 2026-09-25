@@ -254,5 +254,6 @@ A build-time tool is not a dependency of the product. It goes in `go.mod` as
 a `tool` directive (`go get -tool <package>@<version>`), and its license is
 not constrained by the product allow-list because nothing imports it.
 
-Dependabot opens PRs for module, tool and action updates
-(`.github/dependabot.yml`). Those PRs run the same gates as any other change.
+Dependabot opens PRs for module, tool, action and base image updates
+(`.github/dependabot.yml`). It does not read `images/proxy/.ko.yaml`, so the
+proxy's distroless base digest is bumped by hand. Those PRs run the same gates as any other change.

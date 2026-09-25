@@ -11,7 +11,11 @@
 # `egress-proxy probe readyz` dials the admin socket. That socket is in this
 # container's mount namespace and never a port, so no httpGet probe reaches
 # it.
-defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+#
+# The base is pinned by tag and digest. Dependabot does not read this file,
+# so bump the digest by hand when the base changes:
+#   docker buildx imagetools inspect gcr.io/distroless/static-debian12:nonroot
+defaultBaseImage: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 defaultPlatforms:
   - linux/amd64
   - linux/arm64

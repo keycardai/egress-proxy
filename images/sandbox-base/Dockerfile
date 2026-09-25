@@ -17,8 +17,10 @@
 #      runAsNonRoot, allowPrivilegeEscalation false and every capability
 #      dropped, so update-ca-certificates cannot become root and the
 #      directories it writes must already belong to the uid it runs as.
-ARG BASE_IMAGE=debian:bookworm-slim
-FROM ${BASE_IMAGE}
+#
+# Base images are pinned by tag and digest in literal FROM lines, which is
+# the form Dependabot reads and updates.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 # AGENT_UID must equal the pod's workload securityContext.runAsUser. The
 # build hands the trust store to it, and the netsetup owner match tells this
