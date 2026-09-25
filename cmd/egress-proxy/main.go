@@ -540,9 +540,10 @@ func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) 
 	listeners, err := transparent.Listen(ctx, p.cfg.Listen.Transparent)
 	if errors.Is(err, syscall.EACCES) {
 		return nil, fmt.Errorf("transparent frontend: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
-			"so binding it needs CAP_NET_BIND_SERVICE. Grant it as a file capability on this binary, and leave "+
-			"allowPrivilegeEscalation unset or true on the sidecar: it sets no_new_privs, under which the kernel "+
-			"ignores file capabilities", err, p.cfg.TransparentPort())
+			"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
+			"grants only from the bounding set and, under no_new_privs, only when the process that ran this binary "+
+			"held it. Give the sidecar capabilities.add NET_BIND_SERVICE and make this binary the container "+
+			"entrypoint", err, p.cfg.TransparentPort())
 	}
 	if err != nil {
 		return nil, fmt.Errorf("transparent frontend: %w", err)

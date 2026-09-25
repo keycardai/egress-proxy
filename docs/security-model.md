@@ -93,9 +93,9 @@ chain's terminal DROP refuses everything the redirect does not cover.
 `internal/netsetup` builds and applies the rules. `cmd/egress-netsetup`
 verifies them, drops CAP_NET_ADMIN and writes the receipt.
 
-The pod contract this surface assumes: the init container holds NET_ADMIN
-and SETPCAP and runs before every other container. The sidecar runs as the
-proxy uid with NET_BIND_SERVICE. The pod sets
+The pod contract this surface assumes: the init container holds NET_ADMIN,
+NET_RAW and SETPCAP and runs before every other container. The sidecar runs
+as the proxy uid with NET_BIND_SERVICE. The pod sets
 `net.ipv4.ip_unprivileged_port_start` above the redirect port, normally 1024.
 The workload holds no capability and runs as a uid that is not
 the proxy's. The receipt is on an emptyDir with medium Memory that the
@@ -144,12 +144,19 @@ NET_BIND_SERVICE, which keeps it in the bounding set. Its binary holds
 `cap_net_bind_service=+ep` as a file capability, which grants only what the
 bounding set allows, and an execve fails with EPERM when the bounding set
 lacks it (capabilities(7), the transformation of capabilities during
-execve). The sidecar leaves `allowPrivilegeEscalation` unset.
+execve). The binary is the sidecar's entrypoint. Under `no_new_privs`, which
+`allowPrivilegeEscalation: false` sets, an execve keeps only the
+capabilities its caller held in its permitted set (linux
+`security/commoncap.c`, `cap_bprm_creds_from_file`). The runtime puts an
+added capability in the permitted set of the process that execs the
+entrypoint (containerd `oci/spec_opts.go`, `WithAddedCapabilities`), so the
+file capability holds under `allowPrivilegeEscalation: false`. A shell
+between the runtime and the binary holds no capability to pass on.
 
 | Threat | Mitigation | Test |
 |---|---|---|
 | A workload binds the redirect port during a sidecar restart and stands in for the proxy, deciding its own traffic. | The redirect target is port 1015. A process without CAP_NET_BIND_SERVICE can bind it only when `net.ipv4.ip_unprivileged_port_start` is at or below 1015, in either address family (linux `net/ipv6/af_inet6.c`, `__inet6_bind`). The sidecar reads the sysctl at start-up and refuses to start in that case. containerd 2.0 and later sets it to 0 in every pod that does not set it itself (containerd `docs/cri/config.md`, `enable_unprivileged_ports`), and Docker sets it to 0 too, so the pod sets it to 1024. Kubernetes lists it as a safe sysctl (https://kubernetes.io/docs/tasks/administer-cluster/sysctl-cluster/). | `TestContainment`, `TestContainmentReadsThisProcess`, `TestUnprivilegedPortStart`, `transparent_capture.txtar` (`bind EACCES`) |
-| The proxy cannot bind the redirect port, so no captured connection is served. | The filter chain drops what the listener does not receive, so the workload stays contained. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability on its binary. The kernel ignores file capabilities under `no_new_privs` (prctl(2), PR_SET_NO_NEW_PRIVS), and `allowPrivilegeEscalation: false` sets `no_new_privs` (Kubernetes API, `SecurityContext.allowPrivilegeEscalation`). A bind refused with EACCES names that field. | `transparent_capture.txtar` (the `no_new_privs` refusal) |
+| The proxy cannot bind the redirect port, so no captured connection is served. | The filter chain drops what the listener does not receive, so the workload stays contained. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability on its binary, under the pod contract above. A bind refused with EACCES names the capability the sidecar adds and that the binary must be the entrypoint. | `transparent_capture.txtar` (the `no_new_privs` refusal) |
 | The sidecar starts against rules that were never applied, applied for another uid, or applied for another redirect port, or while it could change them itself. | The sidecar reads the netsetup receipt at start-up and refuses to start when the receipt says the rules were not verified, when the capability was kept, when the proxy uid or the redirect port disagree, when the proxy uid is 0, when the receipt names no family, or when this process holds CAP_NET_ADMIN in its effective or permitted set. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestCapture`, `transparent_capture.txtar` (the refusal naming uid 1000) |
 | Another container that mounts the receipt volume replaces the receipt, so the sidecar starts on a receipt the init container did not write. | The sidecar refuses a receipt that group or other can write, and a receipt or directory owned by a uid other than root and its own. An emptyDir mount point is 0777 (kubernetes `pkg/volume/emptydir/empty_dir.go`, `perm`), so any uid that mounts it can put a file there. That file is owned by the uid that wrote it and is refused. The receipt is opened once, without following a symlink and without blocking, and its mode, owner and contents come from that one descriptor. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the receipt on a 0777 volume) |
 | A workload or another pod opens a connection straight to the transparent listener rather than being redirected into it, so the destination the proxy recovers is the proxy itself. | The frontend compares the recovered destination with the address it accepted on and denies a match with `not_redirected`, before it reads from the connection. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused`, `transparent_capture.txtar` (the connection from the upstream container) |
@@ -277,11 +284,10 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
   was not redirected is refused with `not_redirected` before any read, and
   holds its slot for the 250 ms drain before close. A NetworkPolicy on
   ingress to the redirect port closes it.
-- The sidecar cannot run under the restricted Pod Security Standard, which
-  requires `allowPrivilegeEscalation: false`
+- The pod does not meet the baseline Pod Security Standard. The netsetup
+  init container adds NET_ADMIN and NET_RAW, and baseline allows neither
   (https://kubernetes.io/docs/concepts/security/pod-security-standards/).
-  That sets `no_new_privs`, and the proxy then cannot bind the redirect port.
-  The sidecar needs the baseline level or an exemption.
+  The namespace needs the privileged level or an exemption for the pod.
 - The transparent frontend forwards no cleartext. A captured connection on a
   cleartext port is read for its `Host` and then refused, because every
   endpoint names an HTTPS destination.
