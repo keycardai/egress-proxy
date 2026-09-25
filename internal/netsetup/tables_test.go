@@ -273,6 +273,30 @@ func TestVerifyProblems(t *testing.T) {
 	}{
 		{name: "the tables hold the whole ruleset and nothing else"},
 		{
+			name: "an unconditional NAT return before capture",
+			edit: func(rules map[string][]string) {
+				chain := rules[natKey]
+				rules[natKey] = append([]string{chain[len(chain)-1]}, chain[:len(chain)-1]...)
+			},
+			want: []string{"NAT rule order"},
+		},
+		{
+			name: "capture before the proxy UID exemption",
+			edit: func(rules map[string][]string) {
+				chain := rules[natKey]
+				chain[0], chain[len(chain)-2] = chain[len(chain)-2], chain[0]
+			},
+			want: []string{"NAT rule order"},
+		},
+		{
+			name: "capture before the loopback exemption",
+			edit: func(rules map[string][]string) {
+				chain := rules[natKey]
+				chain[1], chain[len(chain)-2] = chain[len(chain)-2], chain[1]
+			},
+			want: []string{"NAT rule order"},
+		},
+		{
 			name: "a rule the rest of the system put in OUTPUT after the jumps",
 			edit: func(rules map[string][]string) {
 				rules["filter OUTPUT"] = append(rules["filter OUTPUT"], filterOther)
