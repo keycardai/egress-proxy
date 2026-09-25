@@ -6,21 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"syscall"
 
 	"github.com/moby/sys/capability"
+	"golang.org/x/sys/unix"
 )
 
 // capNetAdmin is the capability that programs the tables. Source: linux
 // include/uapi/linux/capability.h, CAP_NET_ADMIN 12.
 const capNetAdmin = capability.CAP_NET_ADMIN
-
-// prctl operations golang.org/x/sys and github.com/moby/sys/capability do
-// not cover. Source: linux include/uapi/linux/prctl.h.
-const (
-	prSetNoNewPrivs = 38
-	prGetNoNewPrivs = 39
-)
 
 // Sentinels for the read-back in confirmDropped. Each names a state that
 // leaves CAP_NET_ADMIN reachable after the drop returned zero.
@@ -67,8 +60,8 @@ func DropNetAdmin() error {
 	runtime.LockOSThread()
 	// no_new_privs first: it needs no capability, so it is in force even if
 	// what follows fails.
-	if _, _, errno := syscall.Syscall6(syscall.SYS_PRCTL, prSetNoNewPrivs, 1, 0, 0, 0, 0); errno != 0 {
-		return fmt.Errorf("set no_new_privs: %w", errno)
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("set no_new_privs: %w", err)
 	}
 	if err := capability.DropBound(capNetAdmin); err != nil {
 		return fmt.Errorf("drop CAP_NET_ADMIN from the bounding set: %w. PR_CAPBSET_DROP needs CAP_SETPCAP, "+
@@ -121,9 +114,9 @@ func confirmDropped() error {
 		return fmt.Errorf("%w: it is in the ambient set after capset, "+
 			"so an execve would carry it into the new program", errStillHeld)
 	}
-	set, _, errno := syscall.Syscall(syscall.SYS_PRCTL, prGetNoNewPrivs, 0, 0)
-	if errno != 0 {
-		return fmt.Errorf("read no_new_privs: %w", errno)
+	set, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
+	if err != nil {
+		return fmt.Errorf("read no_new_privs: %w", err)
 	}
 	if set != 1 {
 		return fmt.Errorf("%w after PR_SET_NO_NEW_PRIVS, "+
@@ -138,7 +131,7 @@ func confirmDropped() error {
 func ambientNetAdmin() (bool, error) {
 	held, err := capability.GetAmbient(capNetAdmin)
 	if err != nil {
-		if errors.Is(err, syscall.EINVAL) {
+		if errors.Is(err, unix.EINVAL) {
 			return false, nil
 		}
 		return false, fmt.Errorf("read the ambient capability set: %w", err)

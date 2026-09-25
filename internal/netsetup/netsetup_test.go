@@ -5,7 +5,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,7 +35,16 @@ func TestValidate(t *testing.T) {
 		{
 			name: "a negative uid",
 			edit: func(c *netsetup.Config) { c.ProxyUID = -1 },
-			want: []string{"proxy uid -1 is out of range 0-2147483647"},
+			want: []string{"proxy uid -1 is out of range 1-2147483647"},
+		},
+		{
+			name: "root as the proxy uid, which would exempt every root process in the pod",
+			edit: func(c *netsetup.Config) { c.ProxyUID = 0 },
+			want: []string{"proxy uid 0 is root"},
+		},
+		{
+			name: "the lowest uid the proxy may run as",
+			edit: func(c *netsetup.Config) { c.ProxyUID = 1 },
 		},
 		{
 			name: "the highest uid Kubernetes accepts for runAsUser",
@@ -45,7 +53,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "a uid above what Kubernetes accepts for runAsUser",
 			edit: func(c *netsetup.Config) { c.ProxyUID = math.MaxInt32 + 1 },
-			want: []string{"proxy uid 2147483648 is out of range 0-2147483647"},
+			want: []string{"proxy uid 2147483648 is out of range 1-2147483647"},
 		},
 		{
 			name: "a redirect port outside 1-65535",
@@ -58,9 +66,9 @@ func TestValidate(t *testing.T) {
 			want: []string{"no capture ports"},
 		},
 		{
-			name: "more capture ports than one multiport match carries",
+			name: "more capture ports than one multiport match holds",
 			edit: func(c *netsetup.Config) { c.CapturePorts = make([]int, 16) },
-			want: []string{"16 capture ports: one multiport match carries at most 15"},
+			want: []string{"16 capture ports: one multiport match holds at most 15"},
 		},
 		{
 			name: "the redirect port among the capture ports, which would redirect the listener to itself",
@@ -182,12 +190,6 @@ func addrTexts(addrs []netip.Addr) []string {
 		out[i] = addr.String()
 	}
 	return out
-}
-
-// mustContainOnce asserts a rendered ruleset carries a rule exactly once.
-func mustContainOnce(t *testing.T, rendered, rule string) {
-	t.Helper()
-	assert.Equal(t, 1, strings.Count(rendered, rule), "%q appears once in:\n%s", rule, rendered)
 }
 
 // TestKernelHasIPv6 pins what the probe does with each answer the

@@ -7,6 +7,8 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +54,10 @@ var (
 // versionTimeout bounds the --version run that identifies a binary.
 const versionTimeout = 10 * time.Second
 
+// restoreTimeout bounds one iptables-restore run, including its wait for the
+// xtables lock.
+const restoreTimeout = 30 * time.Second
+
 // legacyBinaries are the binaries this package resolves for a family, most
 // specific name first. The generic name is the image that ships one binary
 // under it.
@@ -63,8 +69,13 @@ func legacyBinaries(family Family) []string {
 }
 
 // versionPattern reads the backend out of a version string. iptables 1.8 and
-// later name it in parentheses, as in "iptables v1.8.10 (legacy)".
-var versionPattern = regexp.MustCompile(`^ip6?tables v[^ ]+ \((legacy|nf_tables)\)`)
+// later name it in parentheses, as in "iptables v1.8.10 (legacy)" and
+// "iptables-restore v1.8.10 (legacy)".
+var versionPattern = regexp.MustCompile(`^ip6?tables(?:-restore)? v[^ ]+ \((legacy|nf_tables)\)`)
+
+// restoreSuffix names a family's restore binary: iptables-legacy has
+// iptables-legacy-restore beside it, and iptables has iptables-restore.
+const restoreSuffix = "-restore"
 
 // Tool is an iptables binary that has identified itself.
 type Tool struct {
@@ -74,6 +85,9 @@ type Tool struct {
 	// and the acceptance record.
 	Version string
 	Backend Backend
+	// Restore is the resolved path of the restore binary that writes the
+	// rules. Its version names the same backend.
+	Restore string
 }
 
 // detectTool runs a binary's --version and reports which backend it uses.
@@ -102,42 +116,92 @@ func detectTool(ctx context.Context, name string) (Tool, error) {
 	return Tool{Path: path, Version: version, Backend: Backend(match[1])}, nil
 }
 
-// Open resolves the iptables binary for a family, asserts that it uses the
-// legacy backend, and returns a handle bound to it.
+// Open resolves the iptables binary for a family and the restore binary
+// beside it, asserts that both use the legacy backend, and returns a handle
+// bound to them.
 //
 // NEVER relax this to accept the nft backend. Modern base images symlink
 // iptables to the nft variant, which is why the backend is asserted rather
 // than inferred from the binary's name, and the sandbox runtimes this proxy
-// targets carry x_tables and not nftables.
+// targets have x_tables and not nftables.
 //
 // override names a binary explicitly and nothing else is tried. With no
 // override the legacy-specific name comes first and the generic name second,
 // which is the image that ships one binary under the generic name.
-func Open(ctx context.Context, family Family, override string) (*iptables.IPTables, Tool, error) {
+func Open(ctx context.Context, family Family, override string) (*Handle, Tool, error) {
 	candidates := legacyBinaries(family)
 	if override != "" {
 		candidates = []string{override}
 	}
 	reasons := make([]string, 0, len(candidates))
 	for _, name := range candidates {
-		tool, err := detectTool(ctx, name)
+		tool, err := legacyTool(ctx, family, name)
 		if err != nil {
 			reasons = append(reasons, err.Error())
 			continue
 		}
-		if tool.Backend != BackendLegacy {
-			reasons = append(reasons, fmt.Sprintf("%s uses the %s backend (%s)", tool.Path, tool.Backend, tool.Version))
+		restore, err := legacyTool(ctx, family, tool.Path+restoreSuffix)
+		if err != nil {
+			reasons = append(reasons, err.Error())
 			continue
 		}
-		handle, err := iptables.New(iptables.Path(tool.Path), iptables.IPFamily(protocol(family)),
+		tool.Restore = restore.Path
+		ipt, err := iptables.New(iptables.Path(tool.Path), iptables.IPFamily(protocol(family)),
 			iptables.Timeout(waitSeconds))
 		if err != nil {
 			return nil, Tool{}, fmt.Errorf("open %s: %w", tool.Path, err)
 		}
-		return handle, tool, nil
+		return &Handle{IPTables: ipt, restore: restore.Path}, tool, nil
 	}
 	return nil, Tool{}, fmt.Errorf("%w for %s: %s. Install a legacy iptables binary in this image",
 		ErrNoLegacyBackend, family, strings.Join(reasons, "; "))
+}
+
+// legacyTool identifies a binary and refuses one on another backend or for
+// the other family. The version names the program: iptables writes the IPv4
+// tables and ip6tables the IPv6 tables.
+func legacyTool(ctx context.Context, family Family, name string) (Tool, error) {
+	tool, err := detectTool(ctx, name)
+	if err != nil {
+		return Tool{}, err
+	}
+	program := "iptables"
+	if family == FamilyIPv6 {
+		program = "ip6tables"
+	}
+	if !strings.HasPrefix(tool.Version, program+" ") && !strings.HasPrefix(tool.Version, program+restoreSuffix+" ") {
+		//nolint:err113 // a reason Open joins under ErrNoLegacyBackend
+		return Tool{}, fmt.Errorf("%s reports %q, which is not %s, so it does not program %s", tool.Path,
+			tool.Version, program, family)
+	}
+	if tool.Backend != BackendLegacy {
+		//nolint:err113 // a reason Open joins under ErrNoLegacyBackend
+		return Tool{}, fmt.Errorf("%s uses the %s backend (%s)", tool.Path, tool.Backend, tool.Version)
+	}
+	return tool, nil
+}
+
+// Handle drives one family's tables. go-iptables reads them and the
+// family's restore binary writes them.
+type Handle struct {
+	*iptables.IPTables
+
+	restore string
+}
+
+// Restore loads input with iptables-restore --noflush. The kernel replaces
+// each table in one operation at its COMMIT line, so a table that fails to
+// load keeps the rules it held.
+func (h *Handle) Restore(ctx context.Context, input string) error {
+	ctx, cancel := context.WithTimeout(ctx, restoreTimeout)
+	defer cancel()
+	//nolint:gosec // G204: the path was resolved and its backend asserted by Open
+	cmd := exec.CommandContext(ctx, h.restore, "--noflush", "--wait="+strconv.Itoa(waitSeconds))
+	cmd.Stdin = strings.NewReader(input)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w: %s", h.restore, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func protocol(family Family) iptables.Protocol {
@@ -147,75 +211,60 @@ func protocol(family Family) iptables.Protocol {
 	return iptables.ProtocolIPv4
 }
 
-// Tables is the part of an iptables handle this package drives. Apply and
-// Verify take it, so a test drives them against a recorded ruleset.
+// Tables is the part of a Handle this package drives. Apply and Verify take
+// it, so a test drives them against a recorded ruleset.
 type Tables interface {
-	ClearChain(table, chain string) error
-	Append(table, chain string, rulespec ...string) error
-	Insert(table, chain string, pos int, rulespec ...string) error
-	InsertUnique(table, chain string, pos int, rulespec ...string) error
+	ChainExists(table, chain string) (bool, error)
 	Exists(table, chain string, rulespec ...string) (bool, error)
 	List(table, chain string) ([]string, error)
+	Restore(ctx context.Context, input string) error
 }
 
-// Apply puts the program in the tables, writing each rule to progress as it
-// goes. It walks the order Program lays out, which is the order --dry-run
-// prints.
+// Apply loads the program in one iptables-restore run, writing the input to
+// progress first.
 //
-// Every owned chain is flushed before it is refilled, so re-running installs
-// the same rules rather than a second copy. A failure stops the run and
-// names the rule that could not go in. Stopping leaves the chains stricter
-// than the finished ruleset rather than looser, which is a property of that
-// order.
-func Apply(handle Tables, program Program, progress io.Writer) error {
-	for _, step := range program.sealSteps() {
-		if err := clearChain(handle, step.Table, step.Chain); err != nil {
-			return err
-		}
-		if err := writeStep(handle, step, progress); err != nil {
-			return err
-		}
+// Each table is replaced in one kernel operation, so a chain holds either
+// its old rules or the whole new set and never sits empty under a live
+// jump. Re-running installs the same rules and no second copy. A failed run
+// leaves each table as it was, except that the filter table commits before
+// the nat table, so a failure in the nat table leaves the new filter chain
+// in force.
+func Apply(ctx context.Context, handle Tables, program Program, progress io.Writer) error {
+	jumps, err := missingJumps(handle, program)
+	if err != nil {
+		return err
 	}
-	for _, chain := range program.unsealedChains() {
-		if err := clearChain(handle, chain.Table, chain.Name); err != nil {
-			return err
-		}
-	}
-	for _, step := range program.fillSteps() {
-		if err := writeStep(handle, step, progress); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func clearChain(handle Tables, table, chain string) error {
-	if err := handle.ClearChain(table, chain); err != nil {
-		return fmt.Errorf("clear the %s chain in the %s table: %w", chain, table, err)
-	}
-	return nil
-}
-
-func writeStep(handle Tables, step Step, progress io.Writer) error {
+	input := program.Restore(jumps)
 	if progress != nil {
-		fmt.Fprintln(progress, step.String())
+		fmt.Fprint(progress, input)
 	}
-	if err := applyStep(handle, step); err != nil {
-		return fmt.Errorf("%s: %w", step, err)
+	if err := handle.Restore(ctx, input); err != nil {
+		return fmt.Errorf("load the %s ruleset: %w", program.Family, err)
 	}
 	return nil
 }
 
-func applyStep(handle Tables, step Step) error {
-	switch {
-	case step.Existing:
-		//nolint:wrapcheck // the caller names the step
-		return handle.InsertUnique(step.Table, step.Chain, step.At, step.Spec...)
-	case step.At > 0:
-		return handle.Insert(step.Table, step.Chain, step.At, step.Spec...) //nolint:wrapcheck // same
-	default:
-		return handle.Append(step.Table, step.Chain, step.Spec...) //nolint:wrapcheck // same
+// missingJumps lists the OUTPUT jumps not in the tables. A jump whose chain
+// does not exist yet is missing: iptables -C refuses a jump to a chain it
+// cannot find, rather than reporting it absent.
+func missingJumps(handle Tables, program Program) ([]Rule, error) {
+	var missing []Rule
+	for _, jump := range program.Jumps {
+		target := jumpTarget(jump.Spec)
+		exists, err := handle.ChainExists(jump.Table, target)
+		if err != nil {
+			return nil, fmt.Errorf("look for the %s chain in the %s table: %w", target, jump.Table, err)
+		}
+		if exists {
+			if exists, err = handle.Exists(jump.Table, jump.Chain, jump.Spec...); err != nil {
+				return nil, fmt.Errorf("look for %s: %w", jump, err)
+			}
+		}
+		if !exists {
+			missing = append(missing, jump)
+		}
 	}
+	return missing, nil
 }
 
 // Verify reports whether the tables hold this ruleset and nothing else.
@@ -231,26 +280,26 @@ func applyStep(handle Tables, step Step) error {
 // Each owned chain holds exactly as many rules as the program puts in it.
 // With every expected rule present, a matching count means the chain holds
 // no other rule, such as an ACCEPT above the terminal DROP. The filter
-// chain's terminal DROP is checked by position as well. Every accept is
-// inserted above it, so a DROP that is not last leaves the rules after it
-// accepting.
+// chain's terminal DROP is checked by position as well, because a DROP that
+// is not last leaves the rules after it accepting.
 //
 // Each OUTPUT jump is the first rule in its OUTPUT chain. A rule ahead of
 // the filter jump accepts what the terminal DROP would drop, and one ahead
 // of the nat jump rewrites the destination before the REDIRECT sees it.
 func Verify(handle Tables, program Program, progress io.Writer) error {
 	var found problems
-	for _, step := range program.Steps {
-		present, err := handle.Exists(step.Table, step.Chain, step.Spec...)
+	rules := program.Rules()
+	for _, rule := range slices.Concat(rules, program.Jumps) {
+		present, err := handle.Exists(rule.Table, rule.Chain, rule.Spec...)
 		switch {
 		case err != nil:
-			found.addf("%s: %v", step, err)
+			found.addf("%s: %v", rule, err)
 		case !present:
-			found.addf("not in the tables: %s", step)
+			found.addf("not in the tables: %s", rule)
 		}
-		if step.Existing {
-			found.add(jumpProblems(handle, step)...)
-		}
+	}
+	for _, jump := range program.Jumps {
+		found.add(jumpProblems(handle, jump)...)
 	}
 	for _, chain := range program.Chains {
 		found.add(chainProblems(handle, chain)...)
@@ -260,39 +309,34 @@ func Verify(handle Tables, program Program, progress io.Writer) error {
 	}
 	if progress != nil {
 		fmt.Fprintf(progress, "# %s verified: %d rules present, no rule this ruleset did not install, "+
-			"the terminal DROP is last, each OUTPUT jump is first\n", program.Family, len(program.Steps))
+			"the terminal DROP is last, each OUTPUT jump is first\n", program.Family, len(rules)+len(program.Jumps))
 	}
 	return nil
 }
 
-// jumpProblems reports a rule that runs before the OUTPUT jump attaching an
-// owned chain. Whatever runs first decides the packet, so a jump that is not
-// the first rule governs only what the rules ahead of it passed on.
+// jumpProblems reports an OUTPUT chain whose first rule is not the jump.
+// Whatever runs first decides the packet, so a jump that is not the first
+// rule governs only what the rules ahead of it passed on.
 //
-// The jump is found by its target, because iptables prints a rule back in
-// its own normalised form.
-func jumpProblems(handle Tables, step Step) []string {
-	target := jumpTarget(step.Spec)
-	if target == "" {
-		return nil
-	}
-	rules, err := chainRules(handle, step.Table, step.Chain)
+// The first rule must be the jump exactly, as iptables -S prints it. Another
+// rule to the same chain, such as one that matches a single interface,
+// governs less than the jump does.
+func jumpProblems(handle Tables, jump Rule) []string {
+	rules, err := chainRules(handle, jump.Table, jump.Chain)
 	if err != nil {
 		return []string{err.Error()}
 	}
-	for i, rule := range rules {
-		if !strings.HasSuffix(rule, " -j "+target) {
-			continue
-		}
-		if i == 0 {
-			return nil
-		}
-		return []string{fmt.Sprintf("the %s chain in the %s table jumps to %s only at position %d, so the "+
-			"rules ahead of it decide the packet first. Those rules are:\n    %s",
-			step.Chain, step.Table, target, i+1, strings.Join(rules[:i], "\n    "))}
+	want := "-A " + jump.Chain + " " + strings.Join(jump.Spec, " ")
+	if len(rules) > 0 && rules[0] == want {
+		return nil
 	}
-	// Exists already reports a jump that is not there at all.
-	return nil
+	ahead := rules
+	if i := slices.Index(rules, want); i >= 0 {
+		ahead = rules[:i]
+	}
+	return []string{fmt.Sprintf("the first rule in the %s chain in the %s table is not %q, so the rules "+
+		"ahead of it decide the packet first. Those rules are:\n    %s",
+		jump.Chain, jump.Table, want, strings.Join(ahead, "\n    "))}
 }
 
 // jumpTarget is the chain a rule jumps to, empty for a rule that names no
@@ -314,11 +358,11 @@ func chainProblems(handle Tables, chain Chain) []string {
 	if err != nil {
 		return []string{err.Error()}
 	}
-	if len(rules) != chain.Rules {
+	if len(rules) != len(chain.Rules) {
 		found.addf("the %s chain in the %s table holds %d rules and this ruleset installs %d, so it holds a "+
 			"rule this ruleset did not put there. A rule above the terminal DROP accepts what the DROP would "+
 			"drop. The chain is:\n    %s",
-			chain.Name, chain.Table, len(rules), chain.Rules, strings.Join(rules, "\n    "))
+			chain.Name, chain.Table, len(rules), len(chain.Rules), strings.Join(rules, "\n    "))
 	}
 	if chain.Name == filterChain {
 		found.add(terminalDropProblems(rules)...)
@@ -357,11 +401,10 @@ func terminalDropProblems(rules []string) []string {
 	case count == 0:
 		found.addf("the %s chain has no terminal DROP, so it enforces nothing", filterChain)
 	case count > 1:
-		found.addf("the %s chain holds %d DROP rules, so it was applied more than once", filterChain, count)
+		found.addf("the %s chain holds %d DROP rules and this ruleset installs one", filterChain, count)
 	case rules[len(rules)-1] != drop:
-		found.addf("the last rule in the %s chain is %q, not the terminal DROP. Every accept is inserted "+
-			"above the DROP, so a rule below it is never reached and a DROP that is not last leaves the rules "+
-			"after it accepting", filterChain, rules[len(rules)-1])
+		found.addf("the last rule in the %s chain is %q, not the terminal DROP. A DROP that is not last "+
+			"leaves the rules after it accepting", filterChain, rules[len(rules)-1])
 	}
 	return found
 }

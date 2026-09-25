@@ -22,11 +22,12 @@ const (
 	filterTable = "filter"
 )
 
-// ndpTypes are the ICMPv6 message types the filter chain accepts. Neighbour
-// Discovery and MLD have no socket, so the owner match cannot match them,
-// and conntrack marks them UNTRACKED, so the conntrack accept cannot match
-// them either. Without these accepts every one of them reaches the terminal
-// DROP and IPv6 egress stops as soon as a neighbour entry goes stale.
+// ndpTypes are the ICMPv6 message types the filter chain accepts from the
+// kernel. The kernel sends Neighbour Discovery and MLD from its own sockets,
+// so the proxy uid accept cannot match them. Conntrack marks them UNTRACKED,
+// so the conntrack accept cannot match them either. Without these accepts
+// every one of them reaches the terminal DROP, and IPv6 stops as soon as the
+// kernel needs a neighbour's link-layer address.
 //
 // RFC 4890 section 4.4.1 lists all eight as traffic that must not be
 // dropped. Redirect (137) is not among them: section 4.4.4 leaves it to
@@ -44,75 +45,51 @@ func ndpTypes() []int {
 	}
 }
 
-// Step is one rule a program installs.
-type Step struct {
+// Rule is one rule a program installs.
+type Rule struct {
 	Table string
 	Chain string
 	Spec  []string
-	// At is the position an insert puts the rule at. Zero appends.
-	At int
-	// Existing says the chain belongs to the rest of the system, not to
-	// this package. Such a rule is inserted at At only when no identical
-	// rule is anywhere in the chain. A rule already present at another
-	// position stays there, and Verify refuses it. NEVER delete one: OUTPUT
-	// must hold the jump at every instant, or its ACCEPT policy governs the
-	// pod.
-	Existing bool
-	// Seal says this rule holds the chain closed while the rest of it is
-	// filled. Apply appends it in the same pair of invocations that clears
-	// the chain, before it touches anything else.
-	Seal bool
 }
 
-// String renders a step as the iptables arguments it performs.
-func (s Step) String() string {
-	verb := "-A"
-	position := ""
-	if s.At > 0 {
-		verb, position = "-I", " "+strconv.Itoa(s.At)
-	}
-	return fmt.Sprintf("-t %s %s %s%s %s", s.Table, verb, s.Chain, position, strings.Join(s.Spec, " "))
+// String names the rule in an error or a report.
+func (r Rule) String() string {
+	return "-t " + r.Table + " -A " + r.Chain + " " + strings.Join(r.Spec, " ")
 }
 
-// Program is the ruleset for one address family. Two properties hold at
-// every point in the sequence.
-//
-// Re-running is idempotent. Each chain this package owns is flushed before
-// it is refilled, and each OUTPUT jump is appended only when it is absent.
-//
-// The chains are never less strict than they were before the run. The
-// filter chain is flushed and its terminal DROP installed before any other
-// chain is touched, and every accept is inserted above that DROP. A run that
-// dies part way leaves a chain that drops what it has not yet been told to
-// accept.
+// Program is the ruleset for one address family.
 type Program struct {
 	Family Family
-	// Chains are the chains this program creates and flushes, in the order
-	// it fills them. Nothing else may hold a rule in one.
+	// Chains are the chains this package owns, each with its rules in the
+	// order they run. Nothing else may hold a rule in one.
 	Chains []Chain
-	Steps  []Step
-	// accepts counts the rules inserted above the filter chain's DROP, which
-	// is the position the next one goes in at.
-	accepts int
+	// Jumps attach the owned chains to OUTPUT. Each goes in at position 1,
+	// ahead of any rule the rest of the system put there, and only when it
+	// is absent. NEVER delete one: OUTPUT must hold the jump at every
+	// instant, or its ACCEPT policy governs the pod.
+	Jumps []Rule
 }
 
-// Chain is a chain this package owns and how many rules the program puts in
-// it.
+// Chain is a chain this package owns and the rules it holds.
 type Chain struct {
 	Table string
 	Name  string
-	Rules int
+	Rules [][]string
 }
 
 // Program builds the ruleset for one address family. A prefix or a resolver
-// of the other family is left out, so one configuration carries both.
+// of the other family is left out, so one configuration covers both.
 func (c Config) Program(family Family) (Program, error) {
 	if err := c.Validate(); err != nil {
 		return Program{}, err
 	}
 	program := Program{
 		Family: family,
-		Chains: []Chain{{Table: natTable, Name: natChain}, {Table: filterTable, Name: filterChain}},
+		Chains: []Chain{{Table: filterTable, Name: filterChain}, {Table: natTable, Name: natChain}},
+		Jumps: []Rule{
+			{Table: filterTable, Chain: "OUTPUT", Spec: []string{"-j", filterChain}},
+			{Table: natTable, Chain: "OUTPUT", Spec: []string{"-p", "tcp", "-j", natChain}},
+		},
 	}
 	if family == FamilyIPv6 && c.IPv6 == IPv6Deny {
 		program.denyNat()
@@ -121,79 +98,58 @@ func (c Config) Program(family Family) (Program, error) {
 		program.nat(c, family)
 		program.filter(c, family)
 	}
-	// The jumps attach the chains. They go in last, so the chains are full
-	// before anything reaches them. Each is the first rule in its OUTPUT
-	// chain, ahead of any rule the rest of the system put there.
-	program.Steps = append(program.Steps,
-		Step{Table: natTable, Chain: "OUTPUT", At: 1, Existing: true, Spec: []string{"-p", "tcp", "-j", natChain}},
-		Step{Table: filterTable, Chain: "OUTPUT", At: 1, Existing: true, Spec: []string{"-j", filterChain}},
-	)
-	program.count()
 	return program, nil
 }
 
-// String renders the program as the iptables invocations it performs, in the
-// order it performs them. It is what the init container's --dry-run prints.
+// Rules lists every rule the program puts in an owned chain.
+func (p *Program) Rules() []Rule {
+	var out []Rule
+	for _, chain := range p.Chains {
+		for _, spec := range chain.Rules {
+			out = append(out, Rule{Table: chain.Table, Chain: chain.Name, Spec: spec})
+		}
+	}
+	return out
+}
+
+// String renders the program as the iptables-restore input a first run
+// loads. It is what the init container's --dry-run prints and what the
+// ruleset digest covers.
 func (p *Program) String() string {
+	return fmt.Sprintf("# %s ruleset\n", p.Family) + p.Restore(p.Jumps)
+}
+
+// Restore renders the program as iptables-restore --noflush input that also
+// inserts the given jumps. Declaring an owned chain flushes it, so loading
+// the input again replaces the chain's rules and adds no second copy.
+//
+// NEVER put the nat table first. The filter table commits first, so a nat
+// table that fails to load leaves captured TCP dropped rather than accepted.
+func (p *Program) Restore(jumps []Rule) string {
 	var out strings.Builder
-	fmt.Fprintf(&out, "# %s ruleset, %d rules\n", p.Family, len(p.Steps))
-	flush := func(table, chain string) {
-		fmt.Fprintf(&out, "-t %s -N %s\n-t %s -F %s\n", table, chain, table, chain)
-	}
-	for _, step := range p.sealSteps() {
-		flush(step.Table, step.Chain)
-		fmt.Fprintln(&out, step.String())
-	}
-	for _, chain := range p.unsealedChains() {
-		flush(chain.Table, chain.Name)
-	}
-	for _, step := range p.fillSteps() {
-		fmt.Fprintln(&out, step.String())
+	for _, table := range []string{filterTable, natTable} {
+		fmt.Fprintf(&out, "*%s\n", table)
+		for _, chain := range p.Chains {
+			if chain.Table == table {
+				fmt.Fprintf(&out, ":%s - [0:0]\n", chain.Name)
+			}
+		}
+		for _, chain := range p.Chains {
+			if chain.Table != table {
+				continue
+			}
+			for _, spec := range chain.Rules {
+				fmt.Fprintf(&out, "-A %s %s\n", chain.Name, strings.Join(spec, " "))
+			}
+		}
+		for _, jump := range jumps {
+			if jump.Table == table {
+				fmt.Fprintf(&out, "-I %s 1 %s\n", jump.Chain, strings.Join(jump.Spec, " "))
+			}
+		}
+		out.WriteString("COMMIT\n")
 	}
 	return out.String()
-}
-
-// sealSteps are the rules that hold a chain closed while the rest of it is
-// filled. Each goes in right after its own chain is flushed, before any
-// other chain is touched, which is the first part of the order Apply and
-// String both walk.
-//
-// The OUTPUT jump an earlier run installed is never deleted, so between the
-// flush and the seal that jump would reach an empty chain and the OUTPUT
-// policy, ACCEPT in a pod, would govern every protocol and port.
-func (p *Program) sealSteps() []Step {
-	return p.stepsWhere(true)
-}
-
-// fillSteps are every other rule, in the order they go in.
-func (p *Program) fillSteps() []Step {
-	return p.stepsWhere(false)
-}
-
-func (p *Program) stepsWhere(seal bool) []Step {
-	out := make([]Step, 0, len(p.Steps))
-	for _, step := range p.Steps {
-		if step.Seal == seal {
-			out = append(out, step)
-		}
-	}
-	return out
-}
-
-// unsealedChains are the owned chains no seal flushed, which are flushed
-// once every seal is in place.
-func (p *Program) unsealedChains() []Chain {
-	sealed := make(map[string]bool, len(p.Chains))
-	for _, step := range p.sealSteps() {
-		sealed[step.Table+" "+step.Chain] = true
-	}
-	out := make([]Chain, 0, len(p.Chains))
-	for _, chain := range p.Chains {
-		if !sealed[chain.Table+" "+chain.Name] {
-			out = append(out, chain)
-		}
-	}
-	return out
 }
 
 // nat sends outbound TCP to the sidecar's transparent listener and returns
@@ -203,8 +159,8 @@ func (p *Program) nat(cfg Config, family Family) {
 	// This exclusion is the setuid bypass the security model names, and the
 	// workload securityContext closes it.
 	p.add("-m", "owner", "--uid-owner", strconv.Itoa(cfg.ProxyUID), "-j", "RETURN")
-	// Loopback carries the redirected connections themselves and the
-	// explicit proxy listener. Redirecting it would loop.
+	// The redirected connections and the explicit proxy listener go over
+	// loopback. Redirecting it would loop.
 	p.add("-o", "lo", "-j", "RETURN")
 	for _, prefix := range prefixesFor(family, cfg.PodCIDRs) {
 		p.add("-d", prefix.String(), "-j", "RETURN")
@@ -214,22 +170,12 @@ func (p *Program) nat(cfg Config, family Family) {
 	}
 	p.add("-p", "tcp", "-m", "multiport", "--dports", portList(cfg.CapturePorts),
 		"-j", "REDIRECT", "--to-ports", strconv.Itoa(cfg.RedirectPort))
-	// Everything else is left alone here and handled by the filter table. A
-	// nat chain that is empty part way through a run redirects nothing, and
-	// the filter DROP covers what it does not redirect.
+	// Everything else is left alone here. The filter DROP covers it.
 	p.add("-j", "RETURN")
 }
 
-// filter seals the chain with the terminal DROP, then inserts the accepts
-// the proxy needs above it.
+// filter accepts what the proxy needs and drops everything else.
 func (p *Program) filter(cfg Config, family Family) {
-	// The DROP is the chain's seal, so Apply installs it in the invocation
-	// straight after the flush. UDP/443 falls here, so QUIC and HTTP/3 are
-	// dropped, along with ICMP, every other non-TCP protocol, and every TCP
-	// port outside CapturePorts.
-	p.Steps = append(p.Steps, Step{
-		Table: filterTable, Chain: filterChain, Spec: []string{"-j", "DROP"}, Seal: true,
-	})
 	p.acceptReplies()
 	// A REDIRECT rewrites the destination to loopback, and the reroute check
 	// after the nat table sends the packet out through lo. Both the
@@ -239,9 +185,7 @@ func (p *Program) filter(cfg Config, family Family) {
 	p.accept("-d", loopbackFor(family), "-j", "ACCEPT")
 	p.accept("-m", "owner", "--uid-owner", strconv.Itoa(cfg.ProxyUID), "-j", "ACCEPT")
 	if family == FamilyIPv6 {
-		for _, icmpType := range ndpTypes() {
-			p.accept("-p", "ipv6-icmp", "-m", "icmp6", "--icmpv6-type", strconv.Itoa(icmpType), "-j", "ACCEPT")
-		}
+		p.acceptNeighbourDiscovery()
 	}
 	// DNS falls back to TCP for a response that does not fit in a datagram,
 	// RFC 7766 section 5, so both protocols are accepted to each resolver.
@@ -250,6 +194,9 @@ func (p *Program) filter(cfg Config, family Family) {
 			p.accept("-d", server.String(), "-p", protocol, "--dport", "53", "-j", "ACCEPT")
 		}
 	}
+	// UDP/443 falls here, so QUIC and HTTP/3 are dropped, along with ICMP,
+	// every other non-TCP protocol, and every TCP port outside CapturePorts.
+	p.accept("-j", "DROP")
 }
 
 // denyNat puts a single RETURN in the nat chain. IPv6Deny redirects
@@ -259,20 +206,37 @@ func (p *Program) denyNat() {
 	p.add("-j", "RETURN")
 }
 
-// denyFilter drops the IPv6 traffic the pod originates, and leaves the pod
-// reachable over IPv6. A flow the pod starts never becomes ESTABLISHED,
-// because its first packet meets the DROP.
+// denyFilter drops the IPv6 traffic the pod originates. Replies to
+// connections opened into the pod still go out. A flow the pod starts never
+// becomes ESTABLISHED, because its first packet meets the DROP.
 func (p *Program) denyFilter() {
-	p.Steps = append(p.Steps, Step{
-		Table: filterTable, Chain: filterChain, Spec: []string{"-j", "DROP"}, Seal: true,
-	})
 	p.acceptReplies()
 	p.accept("-o", "lo", "-j", "ACCEPT")
 	p.accept("-d", loopbackFor(FamilyIPv6), "-j", "ACCEPT")
+	p.acceptNeighbourDiscovery()
+	p.accept("-j", "DROP")
+}
+
+// acceptNeighbourDiscovery accepts the ndpTypes the kernel sends, and no
+// ICMPv6 a process sends.
+//
+// xt_owner matches a packet from no socket, or from a kernel socket, only
+// when every uid condition in the rule is negated. It matches a process's
+// socket by the process's uid (linux net/netfilter/xt_owner.c, owner_mt).
+// The negated range covers every valid uid, so a process with CAP_NET_RAW
+// cannot send these types past the DROP, whatever its uid. The kernel sends
+// neighbour discovery from its own socket (linux net/ipv6/ndisc.c,
+// ndisc_alloc_skb).
+func (p *Program) acceptNeighbourDiscovery() {
 	for _, icmpType := range ndpTypes() {
-		p.accept("-p", "ipv6-icmp", "-m", "icmp6", "--icmpv6-type", strconv.Itoa(icmpType), "-j", "ACCEPT")
+		p.accept("-p", "ipv6-icmp", "-m", "owner", "!", "--uid-owner", kernelOnly,
+			"-m", "icmp6", "--icmpv6-type", strconv.Itoa(icmpType), "-j", "ACCEPT")
 	}
 }
+
+// kernelOnly is every valid uid. 4294967295 is (uid_t)-1, which no process
+// can hold.
+const kernelOnly = "0-4294967294"
 
 // acceptReplies accepts the packets of a connection conntrack has already
 // seen in both directions. Replies to connections opened into the pod leave
@@ -292,24 +256,19 @@ func (p *Program) acceptReplies() {
 
 // add appends a rule to the nat chain.
 func (p *Program) add(spec ...string) {
-	p.Steps = append(p.Steps, Step{Table: natTable, Chain: natChain, Spec: spec})
+	p.appendTo(natTable, spec)
 }
 
-// accept inserts one rule above the filter chain's terminal DROP, keeping
-// the accepts in the order they are written.
+// accept appends a rule to the filter chain.
 func (p *Program) accept(spec ...string) {
-	p.accepts++
-	p.Steps = append(p.Steps, Step{Table: filterTable, Chain: filterChain, At: p.accepts, Spec: spec})
+	p.appendTo(filterTable, spec)
 }
 
-// count fills in how many rules each owned chain holds, which is what
-// Verify compares the tables against.
-func (p *Program) count() {
+func (p *Program) appendTo(table string, spec []string) {
 	for i := range p.Chains {
-		for _, step := range p.Steps {
-			if step.Table == p.Chains[i].Table && step.Chain == p.Chains[i].Name {
-				p.Chains[i].Rules++
-			}
+		if p.Chains[i].Table == table {
+			p.Chains[i].Rules = append(p.Chains[i].Rules, spec)
+			return
 		}
 	}
 }

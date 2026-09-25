@@ -4,9 +4,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/keycardai/egress-proxy/internal/netsetup"
@@ -66,4 +68,81 @@ func TestRemoveReceiptLeavesNothingBehind(t *testing.T) {
 	_, err := os.Stat(path)
 	require.ErrorIs(t, err, fs.ErrNotExist, "the receipt is gone")
 	require.NoError(t, netsetup.RemoveReceipt(path), "removing a receipt that is already gone is not a failure")
+}
+
+// wantReceiptJSON is the receipt the sidecar reads. The field names are the
+// contract, so the whole document is pinned.
+const wantReceiptJSON = `{
+  "version": 1,
+  "verified_at": "2026-09-23T12:00:00Z",
+  "verified": true,
+  "proxy_uid": 1337,
+  "redirect_port": 1015,
+  "capture_ports": [
+    80,
+    443
+  ],
+  "families": [
+    "ipv4",
+    "ipv6"
+  ],
+  "ruleset_digest": "sha256:0123",
+  "capabilities_dropped": true
+}
+`
+
+// TestWriteReceipt pins the receipt's content and the modes it is written
+// with. An existing file or directory keeps its mode, which the rows that
+// start from one pin.
+//
+// It reads the umask, which is process-wide, so it does not run in
+// parallel.
+//
+//nolint:paralleltest // it sets the process umask to read it
+func TestWriteReceipt(t *testing.T) {
+	umask := os.FileMode(syscall.Umask(0)) //nolint:gosec // G115: a umask is 0 to 0777
+	syscall.Umask(int(umask))
+	receipt := netsetup.Receipt{
+		Version: 1, VerifiedAt: now, Verified: true, ProxyUID: 1337, RedirectPort: 1015,
+		CapturePorts: []int{80, 443}, Families: []string{"ipv4", "ipv6"},
+		RulesetDigest: "sha256:0123", CapabilitiesDropped: true,
+	}
+	tests := []struct {
+		name string
+		// fileMode and dirMode are what exists before the write. Zero means
+		// the path does not exist.
+		fileMode, dirMode os.FileMode
+		wantFile, wantDir os.FileMode
+	}{
+		{name: "a new receipt in a missing directory", wantFile: 0o644 &^ umask, wantDir: 0o755 &^ umask},
+		{name: "an existing receipt keeps its mode", fileMode: 0o600, dirMode: 0o755, wantFile: 0o600, wantDir: 0o755},
+		{
+			name:    "an existing directory keeps its mode, as an emptyDir mount point at 0777 does",
+			dirMode: 0o777, wantFile: 0o644 &^ umask, wantDir: 0o777,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "egress")
+			path := filepath.Join(dir, "netsetup.json")
+			if tc.dirMode != 0 {
+				require.NoError(t, os.Mkdir(dir, 0o700))
+				require.NoError(t, os.Chmod(dir, tc.dirMode))
+			}
+			if tc.fileMode != 0 {
+				require.NoError(t, os.WriteFile(path, []byte("earlier"), tc.fileMode))
+			}
+			require.NoError(t, netsetup.WriteReceipt(path, receipt), "write the receipt")
+
+			body, err := os.ReadFile(path)
+			require.NoError(t, err, "read the receipt back")
+			assert.JSONEq(t, wantReceiptJSON, string(body), "the receipt")
+			file, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantFile, file.Mode().Perm(), "the receipt's mode")
+			parent, err := os.Stat(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDir, parent.Mode().Perm(), "the directory's mode")
+		})
+	}
 }

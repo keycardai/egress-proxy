@@ -46,7 +46,8 @@ const (
 	// DefaultProxyUID is the uid the sidecar runs as.
 	DefaultProxyUID = 1337
 	// DefaultRedirectPort is the sidecar's transparent listener. It is below
-	// 1024, so an unprivileged workload cannot bind it during a sidecar
+	// 1024, so while net.ipv4.ip_unprivileged_port_start is at its default
+	// of 1024, an unprivileged workload cannot bind it during a sidecar
 	// restart and stand in for the proxy. The sidecar holds
 	// NET_BIND_SERVICE and no other capability.
 	DefaultRedirectPort = 1015
@@ -78,7 +79,7 @@ type Config struct {
 	RedirectPort int
 	// CapturePorts are the outbound TCP destination ports sent to that
 	// listener. Everything else on TCP is dropped by the filter table. One
-	// multiport match carries at most 15 of them.
+	// multiport match holds at most 15 of them.
 	CapturePorts []int
 	// PodCIDRs and ServiceCIDRs are cluster-internal ranges. Traffic to them
 	// is not redirected, because the proxy governs HTTP to external
@@ -136,7 +137,7 @@ func (m IPv6Mode) String() string {
 // transparent listener on 1015, capturing HTTP and HTTPS, on both address
 // families.
 //
-// It carries no resolvers and therefore does not validate on its own. The
+// It names no resolvers and therefore does not validate on its own. The
 // init container fills them from /etc/resolv.conf.
 func DefaultConfig() Config {
 	return Config{
@@ -160,8 +161,12 @@ func (c Config) Families() []Family {
 // everything that is wrong with the configuration.
 func (c Config) Validate() error {
 	var found problems
-	if c.ProxyUID < 0 || c.ProxyUID > maxUID {
-		found.addf("proxy uid %d is out of range 0-%d", c.ProxyUID, maxUID)
+	switch {
+	case c.ProxyUID == 0:
+		found.addf("proxy uid 0 is root. The ruleset exempts the proxy uid, so every root process in the pod " +
+			"would bypass it")
+	case c.ProxyUID < 0 || c.ProxyUID > maxUID:
+		found.addf("proxy uid %d is out of range 1-%d", c.ProxyUID, maxUID)
 	}
 	if c.RedirectPort < 1 || c.RedirectPort > maxPort {
 		found.addf("redirect port %d is out of range 1-%d", c.RedirectPort, maxPort)
@@ -190,7 +195,7 @@ func (c Config) capturePortProblems() []string {
 		found.addf("no capture ports: nothing would reach the proxy")
 	}
 	if len(c.CapturePorts) > maxMultiportPorts {
-		found.addf("%d capture ports: one multiport match carries at most %d",
+		found.addf("%d capture ports: one multiport match holds at most %d",
 			len(c.CapturePorts), maxMultiportPorts)
 	}
 	for _, port := range c.CapturePorts {
@@ -217,7 +222,7 @@ func (c Config) resolverProblems() []string {
 		case server.Is4In6():
 			found.addf("DNS server %s is IPv4 written as IPv6; write it as %s", server, server.Unmap())
 		case server.Zone() != "":
-			found.addf("DNS server %s carries a zone, which iptables cannot match", server)
+			found.addf("DNS server %s has a zone, which iptables cannot match", server)
 		}
 	}
 	return found

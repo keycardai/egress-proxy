@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -47,17 +46,17 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 			args: nil,
 			want: []string{
 				"# resolvers from " + resolv + ": 10.43.0.10",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
+				"-A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN",
+				"-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015",
+				"-A EGRESS_PROXY_FILTER_OUTPUT -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
 			},
 		},
 		{
 			name: "another uid, redirect port and capture port set",
 			args: []string{"--proxy-uid", "2000", "--redirect-port", "1016", "--capture-ports", "443,8443"},
 			want: []string{
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 2000 -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 443,8443 " +
+				"-A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 2000 -j RETURN",
+				"-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 443,8443 " +
 					"-j REDIRECT --to-ports 1016",
 			},
 		},
@@ -65,14 +64,14 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 			name: "cluster ranges, which are returned from the nat chain and still covered by the DROP",
 			args: []string{"--pod-cidrs", "10.42.0.0/16", "--service-cidrs", "10.43.0.0/16"},
 			want: []string{
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -d 10.42.0.0/16 -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -d 10.43.0.0/16 -j RETURN",
+				"-A EGRESS_PROXY_NAT_OUTPUT -d 10.42.0.0/16 -j RETURN",
+				"-A EGRESS_PROXY_NAT_OUTPUT -d 10.43.0.0/16 -j RETURN",
 			},
 		},
 		{
 			name: "resolvers named explicitly, which are not read from resolv.conf",
 			args: []string{"--dns-servers", "10.96.0.10"},
-			want: []string{"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.96.0.10 -p udp --dport 53 -j ACCEPT"},
+			want: []string{"-A EGRESS_PROXY_FILTER_OUTPUT -d 10.96.0.10 -p udp --dport 53 -j ACCEPT"},
 		},
 	}
 	for _, tc := range tests {
@@ -91,78 +90,88 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 	}
 }
 
-// TestIPv6OffDenies proves --ipv6 off programs an ip6tables ruleset that
-// drops what the pod sends, rather than skipping the family. Skipping it
-// would leave IPv6 ungoverned and nothing would report that.
-//
-// The skip reads the same kernel the command does.
-func TestIPv6OffDenies(t *testing.T) {
+// TestIPv6Modes drives every --ipv6 mode against each answer the kernel
+// probe can give. The probe is a stub, so every row runs on every host.
+func TestIPv6Modes(t *testing.T) {
 	t.Parallel()
-	has, err := netsetup.KernelHasIPv6()
-	require.NoError(t, err, "read whether this kernel has IPv6")
-	if !has {
-		t.Skip("there is no IPv6 on this kernel to deny")
+	has := func() (bool, error) { return true, nil }
+	hasNot := func() (bool, error) { return false, nil }
+	fails := func() (bool, error) { return false, errProbe }
+	tests := []struct {
+		name  string
+		mode  string
+		probe ipv6Probe
+		// wantIPv6 is what the ip6tables ruleset does: "proxy", "deny", or
+		// "" for none printed.
+		wantIPv6 string
+		wantOut  string
+		wantErr  string
+	}{
+		{name: "auto on a kernel with IPv6", mode: "auto", probe: has, wantIPv6: "proxy"},
+		{
+			name: "auto on a kernel without IPv6", mode: "auto", probe: hasNot,
+			wantOut: "this kernel has no IPv6, so no ip6tables ruleset is programmed",
+		},
+		{name: "on with IPv6", mode: "on", probe: has, wantIPv6: "proxy"},
+		{
+			name: "on without IPv6, which refuses rather than leave the mode unmet", mode: "on", probe: hasNot,
+			wantErr: "on was asked for and this kernel has no IPv6",
+		},
+		{
+			name: "off with IPv6, which programs a ruleset that drops what the pod sends", mode: "off", probe: has,
+			wantIPv6: "deny", wantOut: "every IPv6 packet this pod sends is dropped",
+		},
+		{
+			name: "off without IPv6", mode: "off", probe: hasNot,
+			wantOut: "this kernel has no IPv6, so no ip6tables ruleset is programmed",
+		},
+		{
+			name: "auto when the probe cannot tell", mode: "auto", probe: fails,
+			wantErr: "Name --ipv6 on or --ipv6 off rather than auto",
+		},
+		{
+			name: "off when the probe cannot tell, which still refuses", mode: "off", probe: fails,
+			wantErr: "permission denied",
+		},
 	}
-	resolv := resolvConf(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
-	var out bytes.Buffer
-	args := []string{"egress-netsetup", "--dry-run", "--resolv-conf", resolv, "--ipv6", "off"}
-	require.NoError(t, command(&out, nil).Run(context.Background(), args), "the dry run")
-	start := strings.Index(out.String(), "# ipv6 ruleset")
-	require.GreaterOrEqual(t, start, 0, "--ipv6 off prints an ip6tables ruleset")
-	for _, want := range []string{
-		"-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
-		"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
-		"every IPv6 packet this pod sends is dropped",
-	} {
-		assert.Contains(t, out.String(), want, "the printed ruleset")
-	}
-	ipv6 := out.String()[start:]
-	for _, absent := range []string{"REDIRECT", "fd00::a", "--dport 53"} {
-		assert.NotContains(t, ipv6, absent, "the denied family redirects nothing and accepts no egress")
-	}
-}
-
-// TestNoKernelIPv6ProgramsIPv4Alone proves a kernel without IPv6 gets the
-// IPv4 ruleset and no ip6tables invocation, which would fail on a kernel
-// with no ip6_tables module.
-func TestNoKernelIPv6ProgramsIPv4Alone(t *testing.T) {
-	t.Parallel()
-	has, err := netsetup.KernelHasIPv6()
-	require.NoError(t, err, "read whether this kernel has IPv6")
-	if has {
-		t.Skip("this kernel has IPv6, so every mode programs the family")
-	}
-	resolv := resolvConf(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
-	var out bytes.Buffer
-	args := []string{"egress-netsetup", "--dry-run", "--resolv-conf", resolv, "--ipv6", "off"}
-	require.NoError(t, command(&out, nil).Run(context.Background(), args), "the IPv4 dry run")
-	assert.Contains(t, out.String(), "# ipv4 ruleset", "the IPv4 ruleset is printed")
-	assert.NotContains(t, out.String(), "# ipv6 ruleset", "a kernel with no IPv6 gets no ip6tables ruleset")
-	assert.Contains(t, out.String(), "this kernel has no IPv6", "the run says why the family is absent")
-}
-
-// TestBothFamiliesArePrinted proves --ipv6 on renders the ip6tables ruleset
-// alongside the iptables one, each holding only its own family's resolver.
-// --ipv6 on requires a kernel with IPv6, which is what the skip reads.
-func TestBothFamiliesArePrinted(t *testing.T) {
-	t.Parallel()
-	has, err := netsetup.KernelHasIPv6()
-	require.NoError(t, err, "read whether this kernel has IPv6")
-	if !has {
-		t.Skip("--ipv6 on refuses a kernel with no IPv6")
-	}
-	resolv := resolvConf(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
-	var out bytes.Buffer
-	args := []string{"egress-netsetup", "--dry-run", "--resolv-conf", resolv, "--ipv6", "on"}
-	require.NoError(t, command(&out, nil).Run(context.Background(), args), "the dry run for both families")
-	for _, want := range []string{
-		"# ipv4 ruleset",
-		"# ipv6 ruleset",
-		"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
-		"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 13 -d fd00::a -p udp --dport 53 -j ACCEPT",
-		"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
-	} {
-		assert.Contains(t, out.String(), want, "the printed ruleset")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := settings{
+				proxyUID: 1337, redirectPort: 1015, capturePorts: []string{"80,443"},
+				dnsServers: []string{"10.43.0.10", "fd00::a"}, ipv6: tc.mode,
+			}
+			var out bytes.Buffer
+			cfg, err := opts.config(&out, tc.probe)
+			if tc.wantErr != "" {
+				require.Error(t, err, "the configuration is refused")
+				assert.Contains(t, err.Error(), tc.wantErr, "the refusal says why")
+				return
+			}
+			require.NoError(t, err, "build the configuration")
+			require.NoError(t, dryRun(cfg, &out), "the dry run")
+			printed := out.String()
+			if tc.wantOut != "" {
+				assert.Contains(t, printed, tc.wantOut, "the run says what it chose")
+			}
+			assert.Contains(t, printed, "# ipv4 ruleset", "the IPv4 ruleset is always printed")
+			start := strings.Index(printed, "# ipv6 ruleset")
+			switch tc.wantIPv6 {
+			case "":
+				assert.Negative(t, start, "no ip6tables ruleset is printed")
+			case "proxy":
+				require.GreaterOrEqual(t, start, 0, "an ip6tables ruleset is printed")
+				assert.Contains(t, printed[start:], "-j REDIRECT --to-ports 1015", "IPv6 TCP is redirected")
+				assert.Contains(t, printed[start:], "-d fd00::a -p udp --dport 53 -j ACCEPT", "the IPv6 resolver is accepted")
+				assert.NotContains(t, printed, "every IPv6 packet this pod sends is dropped", "IPv6 is not denied")
+			case "deny":
+				require.GreaterOrEqual(t, start, 0, "an ip6tables ruleset is printed")
+				for _, absent := range []string{"REDIRECT", "fd00::a", "--dport 53", "--uid-owner 1337"} {
+					assert.NotContains(t, printed[start:], absent, "the denied family redirects nothing and accepts no egress")
+				}
+				assert.Contains(t, printed[start:], "-A EGRESS_PROXY_FILTER_OUTPUT -j DROP", "the family is dropped")
+			}
+		})
 	}
 }
 
@@ -185,6 +194,7 @@ func TestCommandRefusals(t *testing.T) {
 			name: "a redirect port among the capture ports",
 			args: []string{"--capture-ports", "80,1015"}, want: "is the redirect port",
 		},
+		{name: "root as the proxy uid", args: []string{"--proxy-uid", "0"}, want: "proxy uid 0 is root"},
 		{name: "an argument the command takes none of", args: []string{"extra"}, want: `unexpected argument "extra"`},
 		{
 			name: "a resolv.conf that is not there",
@@ -199,63 +209,44 @@ func TestCommandRefusals(t *testing.T) {
 			err := command(&out, nil).Run(context.Background(), append(dryRunArgs(resolv), tc.args...))
 			require.Error(t, err, "the command refuses")
 			assert.Contains(t, err.Error(), tc.want, "the refusal says why")
-			assert.NotContains(t, out.String(), "-t nat -A", "nothing is printed for a refused run")
+			assert.NotContains(t, out.String(), "-A EGRESS_PROXY_", "nothing is printed for a refused run")
 		})
 	}
 }
 
 // appliedTables answers every read the way the tables read back once this
 // ruleset was applied, so netsetup.Verify passes against it. It records
-// every call that would change the tables, which is what proves a --verify
-// run changed none.
+// every Restore, which is what proves a --verify run changed nothing.
 type appliedTables struct {
 	rules  map[string][]string
 	writes []string
-	// fail makes the first write whose invocation contains it return
-	// errWrite.
+	// fail makes a Restore whose input contains it return errWrite.
 	fail string
 }
 
 var (
-	errWrite = errors.New("iptables: write refused")
+	errWrite = errors.New("iptables-restore: line refused")
 	errOpen  = errors.New("no iptables binary with the legacy backend")
+	errProbe = errors.New("read /proc/net/if_inet6: permission denied")
 )
 
 func chainKey(table, chain string) string { return table + " " + chain }
 
 // tablesHolding renders what the tables hold once the programs are applied.
-// An insert at position n lands at index n-1, which is how the accepts end
-// up above the DROP that was appended first.
 func tablesHolding(programs ...netsetup.Program) *appliedTables {
 	rules := make(map[string][]string)
 	for _, program := range programs {
-		for _, step := range program.Steps {
-			at := chainKey(step.Table, step.Chain)
-			rule := "-A " + step.Chain + " " + strings.Join(step.Spec, " ")
-			if step.At > 0 {
-				rules[at] = slices.Insert(rules[at], step.At-1, rule)
-				continue
-			}
-			rules[at] = append(rules[at], rule)
+		for _, rule := range slices.Concat(program.Rules(), program.Jumps) {
+			at := chainKey(rule.Table, rule.Chain)
+			rules[at] = append(rules[at], "-A "+rule.Chain+" "+strings.Join(rule.Spec, " "))
 		}
 	}
 	return &appliedTables{rules: rules}
 }
 
-func (f *appliedTables) ClearChain(table, chain string) error {
-	return f.write("-t " + table + " -F " + chain)
-}
-
-func (f *appliedTables) Append(table, chain string, spec ...string) error {
-	return f.write("-t " + table + " -A " + chain + " " + strings.Join(spec, " "))
-}
-
-func (f *appliedTables) Insert(table, chain string, pos int, spec ...string) error {
-	return f.write("-t " + table + " -I " + chain + " " + strconv.Itoa(pos) + " " + strings.Join(spec, " "))
-}
-
-func (f *appliedTables) InsertUnique(table, chain string, pos int, spec ...string) error {
-	return f.Insert(table, chain, pos, spec...)
+func (f *appliedTables) ChainExists(table, chain string) (bool, error) {
+	_, ok := f.rules[chainKey(table, chain)]
+	return ok, nil
 }
 
 func (f *appliedTables) Exists(table, chain string, spec ...string) (bool, error) {
@@ -266,9 +257,9 @@ func (f *appliedTables) List(table, chain string) ([]string, error) {
 	return append([]string{"-N " + chain}, f.rules[chainKey(table, chain)]...), nil
 }
 
-func (f *appliedTables) write(call string) error {
-	f.writes = append(f.writes, call)
-	if f.fail != "" && strings.Contains(call, f.fail) {
+func (f *appliedTables) Restore(_ context.Context, input string) error {
+	f.writes = append(f.writes, input)
+	if f.fail != "" && strings.Contains(input, f.fail) {
 		return errWrite
 	}
 	return nil
@@ -287,7 +278,7 @@ func verifyFixture(t *testing.T, receipt string) ([]string, *appliedTables) {
 		ipv6:         "off",
 	}
 	var sink bytes.Buffer
-	cfg, err := opts.config(&sink)
+	cfg, err := opts.config(&sink, netsetup.KernelHasIPv6)
 	require.NoError(t, err, "build the configuration the command line describes")
 	programs := make([]netsetup.Program, 0, len(cfg.Families()))
 	for _, family := range cfg.Families() {
@@ -305,7 +296,7 @@ func verifyFixture(t *testing.T, receipt string) ([]string, *appliedTables) {
 
 // keptCapabilityReceipt is what the init container writes when it was given
 // --keep-net-admin: the rules are in force and the process that programmed
-// them can still change them, so the sidecar refuses it.
+// them can still change them.
 const keptCapabilityReceipt = `{
   "version": 1,
   "verified_at": "2026-01-02T03:04:05Z",
@@ -323,11 +314,9 @@ const keptCapabilityReceipt = `{
 // back and reports, and it never mints the evidence of containment that only
 // a run which programmed the rules may write.
 //
-// The receipt is the sidecar's sole check on its own containment. A --verify
-// run that wrote one would launder the case this test's second row pins: an
-// init container that kept CAP_NET_ADMIN leaves a receipt the sidecar
-// refuses, and a later --verify must not replace it with one that says the
-// capability went.
+// The second row pins the case a written receipt would hide: an init
+// container that kept CAP_NET_ADMIN leaves a receipt that says so, and a
+// later --verify must not replace it with one that says the capability went.
 func TestVerifyWritesNothing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -366,9 +355,8 @@ func TestVerifyWritesNothing(t *testing.T) {
 }
 
 // TestKeepNetAdminIsRecorded proves a run given --keep-net-admin writes a
-// receipt that says the capability was kept, so the sidecar can refuse it.
-// The drop itself needs CAP_NET_ADMIN to test, so this test covers only
-// what the receipt records.
+// receipt that says the capability was kept. The drop itself needs
+// CAP_NET_ADMIN, so netsetup_ruleset.txtar covers it.
 func TestKeepNetAdminIsRecorded(t *testing.T) {
 	t.Parallel()
 	receipt := filepath.Join(t.TempDir(), "netsetup.json")
@@ -415,14 +403,14 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 			want:    []string{"no iptables binary with the legacy backend"},
 		},
 		{
-			name: "a rule cannot go in",
+			name: "the ruleset cannot be loaded",
 			tables: func(t *testing.T, receipt string) *appliedTables {
 				t.Helper()
 				_, tables := verifyFixture(t, receipt)
 				tables.fail = "-j REDIRECT"
 				return tables
 			},
-			want: []string{"iptables: write refused", "-j REDIRECT"},
+			want: []string{"load the ipv4 ruleset", "iptables-restore: line refused"},
 		},
 		{
 			name: "the tables do not read back as the ruleset",

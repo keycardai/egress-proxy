@@ -17,18 +17,99 @@ func denying(cfg netsetup.Config) netsetup.Config {
 	return cfg
 }
 
-// render builds one family's ruleset and returns it as the iptables
-// invocations it performs.
-func render(t *testing.T, cfg netsetup.Config, family netsetup.Family) string {
+func build(t *testing.T, cfg netsetup.Config, family netsetup.Family) netsetup.Program {
 	t.Helper()
 	program, err := cfg.Program(family)
 	require.NoError(t, err, "build the %s ruleset", family)
-	return program.String()
+	return program
 }
+
+// The expected iptables-restore input for each ruleset. Each is pinned
+// whole, so a rule that is added, dropped or moved fails the test.
+const (
+	wantIPv4 = `# ipv4 ruleset
+*filter
+:EGRESS_PROXY_FILTER_OUTPUT - [0:0]
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d 127.0.0.0/8 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d 10.43.0.10 -p udp --dport 53 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d 10.43.0.10 -p tcp --dport 53 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -j DROP
+-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT
+COMMIT
+*nat
+:EGRESS_PROXY_NAT_OUTPUT - [0:0]
+-A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -o lo -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -d 10.42.0.0/16 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -d 10.43.0.0/16 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015
+-A EGRESS_PROXY_NAT_OUTPUT -j RETURN
+-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT
+COMMIT
+`
+	wantIPv6 = `# ipv6 ruleset
+*filter
+:EGRESS_PROXY_FILTER_OUTPUT - [0:0]
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d ::1/128 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 130 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 131 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 132 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 133 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 134 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 135 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 136 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 143 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d fd00::a -p udp --dport 53 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d fd00::a -p tcp --dport 53 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -j DROP
+-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT
+COMMIT
+*nat
+:EGRESS_PROXY_NAT_OUTPUT - [0:0]
+-A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -o lo -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015
+-A EGRESS_PROXY_NAT_OUTPUT -j RETURN
+-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT
+COMMIT
+`
+	// The denied family redirects nothing and accepts no egress: no owner
+	// exemption, no resolver and no cluster range.
+	wantIPv6Deny = `# ipv6 ruleset
+*filter
+:EGRESS_PROXY_FILTER_OUTPUT - [0:0]
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d ::1/128 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 130 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 131 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 132 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 133 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 134 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 135 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 136 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 143 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -j DROP
+-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT
+COMMIT
+*nat
+:EGRESS_PROXY_NAT_OUTPUT - [0:0]
+-A EGRESS_PROXY_NAT_OUTPUT -j RETURN
+-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT
+COMMIT
+`
+)
 
 // TestProgramRules pins the rules each family gets. Program is a pure
 // function of the configuration, so these cases test rule generation and
-// nothing about the host.
+// nothing about the host. The acceptance scenario proves what the kernel
+// does with them.
 func TestProgramRules(t *testing.T) {
 	t.Parallel()
 	cluster := valid()
@@ -40,149 +121,100 @@ func TestProgramRules(t *testing.T) {
 		name   string
 		cfg    netsetup.Config
 		family netsetup.Family
-		want   []string
-		// absent are rules this family's ruleset must not carry.
-		absent []string
+		want   string
 	}{
+		{name: "the IPv4 ruleset", cfg: cluster, family: netsetup.FamilyIPv4, want: wantIPv4},
+		// The pod and service CIDRs in the configuration are IPv4, so the
+		// IPv6 nat chain returns early for none of them.
+		{name: "the IPv6 ruleset", cfg: cluster, family: netsetup.FamilyIPv6, want: wantIPv6},
+		{name: "the IPv6 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv6, want: wantIPv6Deny},
+		{name: "the IPv4 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv4, want: wantIPv4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			program := build(t, tc.cfg, tc.family)
+			assert.Equal(t, tc.want, program.String(), "the iptables-restore input")
+		})
+	}
+}
+
+// TestTheTerminalDropIsLast checks the property Verify relies on in every
+// ruleset: the filter chain holds one DROP and it is the last rule.
+func TestTheTerminalDropIsLast(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		cfg    netsetup.Config
+		family netsetup.Family
+	}{
+		{name: "IPv4", cfg: valid(), family: netsetup.FamilyIPv4},
+		{name: "IPv6", cfg: valid(), family: netsetup.FamilyIPv6},
+		{name: "IPv6 under IPv6Deny", cfg: denying(valid()), family: netsetup.FamilyIPv6},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			program := build(t, tc.cfg, tc.family)
+			var filter [][]string
+			for _, chain := range program.Chains {
+				if chain.Table == "filter" {
+					filter = chain.Rules
+				}
+			}
+			require.NotEmpty(t, filter, "the filter chain holds rules")
+			drops := 0
+			for _, spec := range filter {
+				if strings.Join(spec, " ") == "-j DROP" {
+					drops++
+				}
+			}
+			assert.Equal(t, 1, drops, "the filter chain holds one DROP")
+			assert.Equal(t, []string{"-j", "DROP"}, filter[len(filter)-1], "the DROP is the last rule")
+		})
+	}
+}
+
+// TestRestoreInsertsOnlyTheJumpsItIsGiven proves a re-run leaves out a jump
+// that is already in OUTPUT, and that the filter table is committed before
+// the nat table whichever jumps go in.
+func TestRestoreInsertsOnlyTheJumpsItIsGiven(t *testing.T) {
+	t.Parallel()
+	program := build(t, valid(), netsetup.FamilyIPv4)
+	filterJump, natJump := program.Jumps[0], program.Jumps[1]
+	tests := []struct {
+		name  string
+		jumps []netsetup.Rule
+		want  []string
+	}{
+		{name: "no jump, as on a re-run", jumps: nil, want: nil},
 		{
-			name: "the IPv4 ruleset", cfg: cluster, family: netsetup.FamilyIPv4,
-			want: []string{
-				// The proxy's own traffic is excluded, so it can reach an
-				// upstream. This is the setuid bypass the security model names.
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -o lo -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -d 10.42.0.0/16 -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -d 10.43.0.0/16 -j RETURN",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 " +
-					"-j REDIRECT --to-ports 1015",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -j RETURN",
-				// The DROP is appended before any accept, so a run that dies
-				// part way leaves the chain dropping what it was not yet told
-				// to accept.
-				"-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 2 -o lo -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 3 -d 127.0.0.0/8 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -m owner --uid-owner 1337 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 6 -d 10.43.0.10 -p tcp --dport 53 -j ACCEPT",
-				"-t nat -I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
-				"-t filter -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
-			},
-			absent: []string{"fd00::a", "::1/128", "ipv6-icmp", "RELATED"},
+			name:  "the nat jump alone",
+			jumps: []netsetup.Rule{natJump},
+			want:  []string{"-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT"},
 		},
 		{
-			name: "the IPv6 ruleset", cfg: cluster, family: netsetup.FamilyIPv6,
-			want: []string{
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 3 -d ::1/128 -j ACCEPT",
-				// Neighbour Discovery and MLD have no socket, so the owner
-				// match cannot match them and conntrack marks them UNTRACKED.
-				// Without these accepts IPv6 egress stops as soon as a
-				// neighbour entry goes stale.
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 12 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 13 -d fd00::a -p udp --dport 53 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 14 -d fd00::a -p tcp --dport 53 -j ACCEPT",
-			},
-			// RFC 4890 section 4.4.4 leaves Redirect to policy, and this
-			// policy drops it.
-			absent: []string{"10.43.0.10", "127.0.0.0/8", "--icmpv6-type 137", "--icmpv6-type 128", "RELATED"},
-		},
-		{
-			name: "the IPv6 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv6,
-			want: []string{
-				"-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 2 -o lo -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 3 -d ::1/128 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 11 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT",
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -j RETURN",
-				"-t nat -I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
-				"-t filter -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
-			},
-			// Each of these would let the pod originate IPv6.
-			absent: []string{
-				"REDIRECT", "--uid-owner", "--dport 53", "fd00::a", "RELATED",
-				"10.42.0.0/16", "10.43.0.0/16",
-			},
-		},
-		{
-			// The IPv6 mode does not change the IPv4 ruleset.
-			name: "the IPv4 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv4,
-			want: []string{
-				"-t nat -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 " +
-					"-j REDIRECT --to-ports 1015",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 5 -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
-			},
-			absent: []string{"fd00::a", "ipv6-icmp"},
+			name:  "both jumps, as on a first run",
+			jumps: []netsetup.Rule{filterJump, natJump},
+			want:  []string{"-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT", "-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rendered := render(t, tc.cfg, tc.family)
-			for _, rule := range tc.want {
-				mustContainOnce(t, rendered, rule)
+			input := program.Restore(tc.jumps)
+			var inserts []string
+			for line := range strings.Lines(input) {
+				if strings.HasPrefix(line, "-I ") {
+					inserts = append(inserts, strings.TrimSpace(line))
+				}
 			}
-			for _, rule := range tc.absent {
-				assert.NotContains(t, rendered, rule, "the %s ruleset names nothing of the other family", tc.family)
-			}
+			assert.Equal(t, tc.want, inserts, "the jumps the input inserts")
+			filter, nat := strings.Index(input, "*filter\n"), strings.Index(input, "*nat\n")
+			require.GreaterOrEqual(t, filter, 0, "the input loads the filter table")
+			assert.Less(t, filter, nat, "the filter table commits before the nat table")
 		})
 	}
-}
-
-// TestTheTerminalDropIsLast proves the ordering the whole ruleset rests on:
-// the DROP is appended first and every accept goes in above it, so no accept
-// is ever ordered after the DROP.
-func TestTheTerminalDropIsLast(t *testing.T) {
-	t.Parallel()
-	program, err := valid().Program(netsetup.FamilyIPv4)
-	require.NoError(t, err, "build the ruleset")
-	var filter []netsetup.Step
-	for _, step := range program.Steps {
-		if step.Table == "filter" && strings.HasPrefix(step.Chain, "EGRESS_PROXY_") {
-			filter = append(filter, step)
-		}
-	}
-	require.NotEmpty(t, filter, "the filter chain holds rules")
-	assert.Equal(t, []string{"-j", "DROP"}, filter[0].Spec, "the DROP is the first rule installed")
-	assert.Zero(t, filter[0].At, "the DROP is appended, not inserted")
-	for i, step := range filter[1:] {
-		assert.Equal(t, i+1, step.At, "accept %d is inserted above the DROP at position %d", i, i+1)
-	}
-}
-
-// TestTheDryRunPrintsTheOrderTheRunPerforms proves --dry-run shows the seal
-// going in before any other chain is flushed, so a manifest review reads the
-// order the tables are changed in rather than a listing by chain.
-func TestTheDryRunPrintsTheOrderTheRunPerforms(t *testing.T) {
-	t.Parallel()
-	program, err := valid().Program(netsetup.FamilyIPv4)
-	require.NoError(t, err, "build the ruleset")
-	rendered := program.String()
-	drop := strings.Index(rendered, "-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP")
-	natFlush := strings.Index(rendered, "-t nat -F EGRESS_PROXY_NAT_OUTPUT")
-	require.Positive(t, drop, "the terminal DROP is printed")
-	require.Positive(t, natFlush, "the nat chain flush is printed")
-	assert.Less(t, drop, natFlush, "the filter chain is sealed before any other chain is touched")
-}
-
-// TestProgramCountsItsOwnChains pins what Verify compares the tables
-// against. A chain that holds more rules than the program installs holds a
-// rule this ruleset did not put there.
-func TestProgramCountsItsOwnChains(t *testing.T) {
-	t.Parallel()
-	program, err := valid().Program(netsetup.FamilyIPv4)
-	require.NoError(t, err, "build the ruleset")
-	counted := 0
-	for _, chain := range program.Chains {
-		assert.Positive(t, chain.Rules, "the %s chain holds rules", chain.Name)
-		counted += chain.Rules
-	}
-	// Everything the program installs goes in an owned chain except the two
-	// OUTPUT jumps, which attach them.
-	assert.Equal(t, len(program.Steps)-2, counted, "every step but the two jumps goes in an owned chain")
 }
 
 // TestRulesetDigestCoversTheRules proves two rulesets that differ are
@@ -190,15 +222,11 @@ func TestProgramCountsItsOwnChains(t *testing.T) {
 // tables.
 func TestRulesetDigestCoversTheRules(t *testing.T) {
 	t.Parallel()
-	base := valid()
 	other := valid()
 	other.RedirectPort = 1016
-	first, err := base.Program(netsetup.FamilyIPv4)
-	require.NoError(t, err)
-	same, err := base.Program(netsetup.FamilyIPv4)
-	require.NoError(t, err)
-	changed, err := other.Program(netsetup.FamilyIPv4)
-	require.NoError(t, err)
+	first := build(t, valid(), netsetup.FamilyIPv4)
+	same := build(t, valid(), netsetup.FamilyIPv4)
+	changed := build(t, other, netsetup.FamilyIPv4)
 	assert.Equal(t, netsetup.RulesetDigest([]netsetup.Program{first}),
 		netsetup.RulesetDigest([]netsetup.Program{same}), "one configuration digests the same twice")
 	assert.NotEqual(t, netsetup.RulesetDigest([]netsetup.Program{first}),

@@ -1,7 +1,8 @@
 // Command egress-netsetup programs the iptables rules that send a sandbox
 // pod's outbound TCP traffic into the egress proxy and drop everything else.
-// It runs as an init container with NET_ADMIN and SETPCAP, gives both up
-// once the rules are in place, and exits.
+// It runs as an init container with NET_ADMIN and SETPCAP, gives up
+// NET_ADMIN once the rules are in place, and exits. SETPCAP is what lets it
+// take NET_ADMIN out of the bounding set.
 //
 // A run that puts the whole ruleset in force writes a receipt, a JSON file on
 // the emptyDir that the init container and the sidecar are intended to share.
@@ -11,11 +12,10 @@
 // receipt is how it checks its own containment against rules it has no way to
 // see. netsetup.Receipt holds the format and what makes the file trustworthy.
 //
-// Re-running installs the same rules rather than a second copy: each chain
-// it owns is flushed before it is refilled, and each OUTPUT jump is
-// appended only when it is absent. A run that fails part way leaves the
-// chains stricter than the finished ruleset, never looser, unlinks the
-// receipt and exits non-zero.
+// Each family's ruleset goes in with one iptables-restore run, and the
+// kernel replaces each table in one operation. Re-running installs the same
+// rules and no second copy. A run that fails unlinks the receipt and exits
+// non-zero. netsetup.Apply says what a failure leaves in the tables.
 //
 // --dry-run prints the ruleset and --verify reads the tables back. Neither
 // writes the receipt.
@@ -90,8 +90,8 @@ func command(out io.Writer, open opener) *cli.Command {
 	return &cli.Command{
 		Name:  "egress-netsetup",
 		Usage: "programs the sandbox egress rules with iptables-legacy",
-		Description: "Re-running it installs the same rules rather than a second copy. A run that fails\n" +
-			"part way leaves the chains stricter than the finished ruleset, never looser.",
+		Description: "Re-running it installs the same rules and no second copy. Each table is replaced\n" +
+			"in one kernel operation, so a failed run leaves the table as it was.",
 		Writer:          out,
 		ErrWriter:       out,
 		HideVersion:     true,
@@ -114,7 +114,7 @@ func run(ctx context.Context, cmd *cli.Command, opts settings, open opener, out 
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	cfg, err := opts.config(out)
+	cfg, err := opts.config(out, netsetup.KernelHasIPv6)
 	if err != nil {
 		return err
 	}
@@ -146,8 +146,12 @@ func (s settings) validate() error {
 	return nil
 }
 
+// ipv6Probe reports whether the kernel has IPv6. netsetup.KernelHasIPv6 is
+// the probe every caller outside a test passes.
+type ipv6Probe func() (bool, error)
+
 // config turns the flags into a validated ruleset input.
-func (s settings) config(out io.Writer) (netsetup.Config, error) {
+func (s settings) config(out io.Writer, hasIPv6 ipv6Probe) (netsetup.Config, error) {
 	cfg := netsetup.Config{ProxyUID: s.proxyUID, RedirectPort: s.redirectPort}
 	var err error
 	if cfg.CapturePorts, err = parsePorts(s.capturePorts); err != nil {
@@ -168,7 +172,7 @@ func (s settings) config(out io.Writer) (netsetup.Config, error) {
 		}
 		fmt.Fprintf(out, "# resolvers from %s: %s\n", s.resolvConf, joinAddrs(cfg.DNSServers))
 	}
-	if cfg.IPv6, err = resolveIPv6(s.ipv6, out); err != nil {
+	if cfg.IPv6, err = resolveIPv6(s.ipv6, hasIPv6, out); err != nil {
 		return cfg, fmt.Errorf("--ipv6: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -214,7 +218,7 @@ func eachFamily(
 		if err != nil {
 			return nil, fmt.Errorf("netsetup: %w", err)
 		}
-		fmt.Fprintf(out, "# %s: %s (%s)\n", family, tool.Path, tool.Version)
+		fmt.Fprintf(out, "# %s: %s (%s), %s\n", family, tool.Path, tool.Version, tool.Restore)
 		if err := action(handle, built); err != nil {
 			return nil, fmt.Errorf("netsetup: %w", err)
 		}
@@ -248,7 +252,7 @@ func verify(ctx context.Context, cfg netsetup.Config, opts settings, open opener
 func program(ctx context.Context, cfg netsetup.Config, opts settings, open opener, out io.Writer) error {
 	programs, err := eachFamily(ctx, cfg, opts, open, out,
 		func(handle netsetup.Tables, built netsetup.Program) error {
-			if err := netsetup.Apply(handle, built, out); err != nil {
+			if err := netsetup.Apply(ctx, handle, built, out); err != nil {
 				return err //nolint:wrapcheck // eachFamily names the family that failed
 			}
 			return netsetup.Verify(handle, built, out)
@@ -268,13 +272,11 @@ func program(ctx context.Context, cfg netsetup.Config, opts settings, open opene
 }
 
 // dropNetAdmin gives up the capability that programs the tables, after they
-// are verified. The receipt records whether it went, because the sidecar
-// refuses a receipt written by a process that could still change the rules.
-// The drop covers the calling thread, and the process exits as soon as the
-// receipt is written.
+// are verified. The receipt records whether it went. The drop covers the
+// calling thread, and the process exits as soon as the receipt is written.
 func dropNetAdmin(keep bool, receipt *netsetup.Receipt, out io.Writer) error {
 	if keep {
-		fmt.Fprintln(out, "# --keep-net-admin: CAP_NET_ADMIN is still held, and the sidecar refuses this receipt")
+		fmt.Fprintln(out, "# --keep-net-admin: CAP_NET_ADMIN is still held, and the receipt says so")
 		return nil
 	}
 	if err := netsetup.DropNetAdmin(); err != nil {
@@ -291,11 +293,11 @@ func dropNetAdmin(keep bool, receipt *netsetup.Receipt, out io.Writer) error {
 //
 // A probe that cannot answer fails the run rather than guessing. See
 // netsetup.IPv6Mode for what an ungoverned family costs.
-func resolveIPv6(mode string, out io.Writer) (netsetup.IPv6Mode, error) {
+func resolveIPv6(mode string, hasIPv6 ipv6Probe, out io.Writer) (netsetup.IPv6Mode, error) {
 	if mode != "auto" && mode != "on" && mode != "off" {
 		return netsetup.IPv6None, fmt.Errorf("%w: %q is not auto, on or off", errUsage, mode)
 	}
-	has, err := netsetup.KernelHasIPv6()
+	has, err := hasIPv6()
 	if err != nil {
 		return netsetup.IPv6None, fmt.Errorf("%w. Name --ipv6 on or --ipv6 off rather than auto", err)
 	}

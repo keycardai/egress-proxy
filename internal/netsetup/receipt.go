@@ -19,8 +19,7 @@ const receiptVersion = 1
 // capability sets. Nothing outside Linux programs these tables.
 var ErrCapabilitiesNotSupported = errors.New("capabilities exist only on Linux")
 
-// The modes the init container leaves behind. Anything looser lets another
-// uid decide what the sidecar believes about its own containment.
+// The modes WriteReceipt creates the receipt and its directory with.
 const (
 	receiptMode    = 0o644
 	receiptDirMode = 0o755
@@ -28,23 +27,18 @@ const (
 
 // Receipt is what the init container programmed and verified.
 //
-// The sidecar cannot read the tables itself: that needs CAP_NET_ADMIN and
-// the sidecar runs without it. The receipt is how the container that holds
-// the capability tells the container that does not what is in force, so the
-// sidecar refuses to start when the rules do not match what it is about to
-// do.
+// The sidecar runs without CAP_NET_ADMIN, so it cannot read the tables. The
+// receipt tells it what the init container put in force.
 //
-// It is not a secret and it carries none. It is trusted because of where it
-// is: an emptyDir with medium Memory that the sidecar and the init container
-// share and the workload does not mount. The sidecar refuses a receipt any
-// other uid can write.
+// It holds no secret. It is trusted because of where it is: an emptyDir
+// with medium Memory that the sidecar and the init container share and the
+// workload does not mount.
 type Receipt struct {
 	Version int `json:"version"`
 	// VerifiedAt is when the tables were last read back and found to hold
 	// the whole ruleset, in UTC.
 	VerifiedAt time.Time `json:"verified_at"`
-	// Verified says the tables were read back and hold every rule. A
-	// receipt that says false is a receipt the sidecar refuses.
+	// Verified says the tables were read back and hold every rule.
 	Verified bool `json:"verified"`
 	// ProxyUID is the uid whose traffic is neither redirected nor dropped.
 	// The sidecar must run as it: any other uid has its own egress
@@ -85,12 +79,13 @@ func NewReceipt(cfg Config, programs []Program, verified bool, now time.Time) Re
 	}
 }
 
-// WriteReceipt writes the receipt at path, creating the directory it goes
-// in.
+// WriteReceipt writes the receipt at path. The receipt is not a secret, and
+// the sidecar reads it as another uid.
 //
-// The file is 0644 and the directory 0755: the receipt is not a secret and
-// the sidecar reads it as another uid, which also has to traverse the
-// directory. Nothing but the owner can write either.
+// A new file is created 0644 and a missing directory 0755. An existing file
+// or directory keeps its mode. An emptyDir mount point is 0777 (kubernetes
+// pkg/volume/emptydir/empty_dir.go, perm), so with the default path any uid
+// that mounts the volume can replace the receipt.
 func WriteReceipt(path string, receipt Receipt) error {
 	if err := os.MkdirAll(filepath.Dir(path), receiptDirMode); err != nil {
 		return fmt.Errorf("create the directory for %s: %w", path, err)
