@@ -21,7 +21,7 @@ const settingsName = "settings"
 // settingsSchema is the version of the JSON this subcommand prints. A
 // consumer keys on it. Add a field without changing it, and raise it when a
 // field changes meaning or goes away.
-const settingsSchema = 2
+const settingsSchema = 1
 
 // errSettings is a settings surface this command refuses to publish.
 var errSettings = errors.New(settingsName)

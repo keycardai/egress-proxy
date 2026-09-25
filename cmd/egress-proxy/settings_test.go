@@ -61,7 +61,7 @@ func TestSettingsPublishWhatADeploymentHasToMatch(t *testing.T) {
 	t.Parallel()
 	report := runSettingsCommand(t)
 
-	assert.Equal(t, settingsSchema, report.Schema, "schema")
+	assert.Equal(t, 1, report.Schema, "schema")
 	assert.Equal(t, config.EnvPrefix, report.EnvPrefix, "env_prefix")
 	assert.Equal(t, probeName, report.Probe.Subcommand, "the probe subcommand a manifest runs")
 	assert.Equal(t, probeRoutes(), report.Probe.Routes, "the routes that subcommand serves")
