@@ -454,14 +454,22 @@ func TestOpenAssertsTheLegacyBackend(t *testing.T) {
 			version: "iptables v1.8.9 (legacy)", code: 3, want: "--version: exit status 3",
 		},
 	}
-	for _, tc := range tests {
+	// Every binary is written before any case runs. A file open for writing
+	// while another goroutine forks stays open in the child until it execs,
+	// and executing the file then fails with ETXTBSY
+	// (https://github.com/golang/go/issues/22315).
+	paths := make([]string, len(tests))
+	for i, tc := range tests {
+		dir := t.TempDir()
+		paths[i] = fakeBinary(t, dir, "iptables", tc.version, tc.code)
+		if tc.restore != "" {
+			fakeBinary(t, dir, "iptables-restore", tc.restore, 0)
+		}
+	}
+	for i, tc := range tests {
+		path := paths[i]
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dir := t.TempDir()
-			path := fakeBinary(t, dir, "iptables", tc.version, tc.code)
-			if tc.restore != "" {
-				fakeBinary(t, dir, "iptables-restore", tc.restore, 0)
-			}
 			handle, tool, err := netsetup.Open(context.Background(), tc.family, path)
 			if tc.wantBackend == "" {
 				require.ErrorIs(t, err, netsetup.ErrNoLegacyBackend, "the error the caller keys on")
