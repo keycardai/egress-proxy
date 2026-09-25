@@ -37,6 +37,10 @@ func TestListen(t *testing.T) {
 			address: "[::]:0", wantNetworks: []string{"tcp4", "tcp6"},
 		},
 		{
+			name:    "an empty host, which binds the same pair",
+			address: ":0", wantNetworks: []string{"tcp4", "tcp6"},
+		},
+		{
 			name:    "an IPv4 literal, which binds that family alone",
 			address: "127.0.0.1:0", wantNetworks: []string{"tcp4"},
 		},
@@ -47,6 +51,14 @@ func TestListen(t *testing.T) {
 		{
 			name:    "an address that names no port",
 			address: "0.0.0.0", wantErr: "is not host:port",
+		},
+		{
+			name:    "localhost, which is a name and not an address",
+			address: "localhost:0", wantErr: "host must be an IP address",
+		},
+		{
+			name:    "a DNS name",
+			address: "proxy.example.com:0", wantErr: "host must be an IP address",
 		},
 		{
 			name:    "a port no socket can bind",

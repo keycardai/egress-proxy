@@ -25,6 +25,8 @@ import (
 // net/netfilter/nf_conntrack_proto.c, getorigdst), so it answers either
 // socket. One socket per family works on both.
 //
+// The host must be empty or an IP address. A name is an error.
+//
 // The IPv6 socket is optional and its absence is not an error: a kernel with
 // no IPv6 has no ip6tables ruleset redirecting anything to it. The IPv4
 // socket is not optional. A frontend that binds nothing accepts nothing, and
@@ -35,16 +37,14 @@ func Listen(ctx context.Context, address string) ([]net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen.transparent %q is not host:port: %w", address, err)
 	}
-	if literal, parseErr := netip.ParseAddr(host); parseErr == nil && !literal.IsUnspecified() {
-		network := "tcp4"
-		if literal.Is6() {
-			network = "tcp6"
+	if host != "" {
+		literal, parseErr := netip.ParseAddr(host)
+		if parseErr != nil {
+			return nil, fmt.Errorf("listen.transparent %q: host must be an IP address: %w", address, parseErr)
 		}
-		listener, listenErr := config.Listen(ctx, network, address)
-		if listenErr != nil {
-			return nil, fmt.Errorf("listen on %s: %w", address, listenErr)
+		if !literal.IsUnspecified() {
+			return listenLiteral(ctx, config, literal, address)
 		}
-		return []net.Listener{listener}, nil
 	}
 	inet, err := config.Listen(ctx, "tcp4", net.JoinHostPort("0.0.0.0", port))
 	if err != nil {
@@ -56,6 +56,21 @@ func Listen(ctx context.Context, address string) ([]net.Listener, error) {
 		return []net.Listener{inet}, nil
 	}
 	return []net.Listener{inet, inet6}, nil
+}
+
+// listenLiteral binds the one family a specific address belongs to.
+func listenLiteral(
+	ctx context.Context, config *net.ListenConfig, literal netip.Addr, address string,
+) ([]net.Listener, error) {
+	network := "tcp4"
+	if literal.Is6() {
+		network = "tcp6"
+	}
+	listener, err := config.Listen(ctx, network, address)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", address, err)
+	}
+	return []net.Listener{listener}, nil
 }
 
 // Addresses renders what a set of listeners is bound to, for the start-up
