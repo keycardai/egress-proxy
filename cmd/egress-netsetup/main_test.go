@@ -402,8 +402,8 @@ func TestKeepNetAdminIsRecorded(t *testing.T) {
 
 // TestAFailedRunLeavesNoReceipt starts each run with a receipt an earlier
 // run left, then makes the run fail. The stale receipt says the rules are in
-// force, so every failure after the configuration is accepted must unlink
-// it. The last row makes the unlink fail too, and the error names both.
+// force, so every failure must leave no receipt. The last row makes the
+// unlink itself fail, which stops the run before any table is opened.
 func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -415,7 +415,10 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 		// receiptIsDir puts a non-empty directory at the receipt path, which
 		// os.Remove cannot unlink.
 		receiptIsDir bool
-		want         []string
+		// noResolvers names no --dns-servers and a resolv.conf that is not
+		// there, so the configuration fails before any table is opened.
+		noResolvers bool
+		want        []string
 	}{
 		{
 			name:    "the iptables binary cannot be opened",
@@ -438,10 +441,16 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 			want:   []string{"the ruleset is not in force", "not in the tables"},
 		},
 		{
-			name:         "the stale receipt cannot be removed either",
-			openErr:      errOpen,
+			name:        "the configuration cannot be built",
+			tables:      untouched,
+			noResolvers: true,
+			want:        []string{"Name the resolvers with --dns-servers"},
+		},
+		{
+			name:         "the stale receipt cannot be removed, which stops the run before any table is opened",
+			tables:       untouched,
 			receiptIsDir: true,
-			want:         []string{"no iptables binary with the legacy backend", "remove the stale netsetup receipt"},
+			want:         []string{"remove the stale netsetup receipt"},
 		},
 	}
 	for _, tc := range tests {
@@ -459,10 +468,12 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 				}
 				return tc.tables(t, receipt).open(ctx, family, override)
 			}
-			args := []string{
-				"egress-netsetup", "--keep-net-admin",
-				"--dns-servers", "10.43.0.10", "--ipv6", "off", "--receipt", receipt,
+			resolvers := []string{"--dns-servers", "10.43.0.10"}
+			if tc.noResolvers {
+				resolvers = []string{"--resolv-conf", filepath.Join(t.TempDir(), "missing")}
 			}
+			args := append([]string{"egress-netsetup", "--keep-net-admin", "--ipv6", "off", "--receipt", receipt},
+				resolvers...)
 			var out bytes.Buffer
 			err := command(&out, open).Run(context.Background(), args)
 
@@ -477,6 +488,13 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 			require.ErrorIs(t, err, os.ErrNotExist, "the earlier run's receipt is gone")
 		})
 	}
+}
+
+// untouched fails the test if the run opens any table.
+func untouched(t *testing.T, _ string) familyTables {
+	t.Helper()
+	t.Error("the run opened a table")
+	return familyTables{}
 }
 
 // TestVerifyRefusesFlagsItWouldIgnore proves the command line refuses a

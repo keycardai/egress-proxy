@@ -114,6 +114,15 @@ func run(ctx context.Context, cmd *cli.Command, opts settings, open opener, out 
 	if err := opts.validate(); err != nil {
 		return err
 	}
+	// NEVER let a run that programs the rules fail with an earlier run's
+	// receipt in place. The receipt is the sidecar's only evidence of its own
+	// containment, and one an earlier run wrote says rules are in force that
+	// this run may never have put there.
+	if !opts.dryRun && !opts.verifyOnly {
+		if err := netsetup.RemoveReceipt(opts.receipt); err != nil {
+			return fmt.Errorf("netsetup: %w", err)
+		}
+	}
 	cfg, err := opts.config(out, netsetup.KernelHasIPv6)
 	if err != nil {
 		return err
@@ -124,10 +133,7 @@ func run(ctx context.Context, cmd *cli.Command, opts settings, open opener, out 
 	case opts.verifyOnly:
 		return verify(ctx, cfg, opts, open, out)
 	}
-	// NEVER let a failure past this point leave an earlier run's receipt in
-	// place. The receipt is the sidecar's only evidence of its own
-	// containment, and one written before the rules were flushed says they
-	// are in force when they are not.
+	// A receipt WriteReceipt left part written is removed too.
 	if err := program(ctx, cfg, opts, open, out); err != nil {
 		return errors.Join(err, netsetup.RemoveReceipt(opts.receipt))
 	}
