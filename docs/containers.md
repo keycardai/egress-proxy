@@ -17,9 +17,9 @@ repository enforces it, the text says so and names the enforcer.
 
 | Image | Built by | What is in it |
 |---|---|---|
-| proxy | `make image-proxy`, ko from `images/proxy/.ko.yaml` and then `images/proxy/Dockerfile` | `gcr.io/distroless/static-debian12:nonroot`, the `egress-proxy` binary with `cap_net_bind_service=+ep` on it, and the public root certificates it verifies upstreams and the zone against. No shell and no package manager. |
-| netsetup | `make image-netsetup`, `images/netsetup/Dockerfile` with the repository root as its build context | Alpine, the `egress-netsetup` binary, the legacy `iptables` and `ip6tables` binaries with their xtables extension libraries, and a shell. |
-| sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian bookworm-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
+| proxy | `make image-proxy`, ko from `images/proxy/.ko.yaml` and then `images/proxy/Dockerfile` | `gcr.io/distroless/static-debian13:nonroot`, the `egress-proxy` binary with `cap_net_bind_service=+ep` on it, and the public root certificates it verifies upstreams and the zone against. No shell and no package manager. |
+| netsetup | `make image-netsetup`, `images/netsetup/Dockerfile` with the repository root as its build context | Debian trixie-slim, the `egress-netsetup` binary, the legacy `iptables` and `ip6tables` binaries with their xtables extension libraries, and a shell. |
+| sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian trixie-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
 
 `make images` builds all three locally and drives what each one does, under
 `test/images`. Nothing in this repository pushes an image. Publishing is a

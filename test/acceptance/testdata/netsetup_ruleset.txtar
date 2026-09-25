@@ -207,7 +207,7 @@ exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:443
 stdout '^captured '$LAB_UPSTREAM4':443$'
 
 -- Dockerfile --
-FROM debian:bookworm-slim
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 RUN apt-get -qq update \
  && DEBIAN_FRONTEND=noninteractive apt-get -qq install --no-install-recommends -y iptables \
  && rm -rf /var/lib/apt/lists/*

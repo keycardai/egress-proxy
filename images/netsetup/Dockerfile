@@ -8,7 +8,7 @@
 # needs the iptables binaries and a shell to drive them with.
 # Base images are pinned by tag and digest in literal FROM lines, which is
 # the form Dependabot reads and updates.
-FROM golang:1.27-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS build
+FROM golang:1.27-trixie@sha256:433790e515d27dc6003e847e644cc0af956985cf315c1c58a3b73ee2dd305183 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -16,12 +16,14 @@ COPY . .
 # CGO off, so the binary runs on any base image.
 RUN CGO_ENABLED=0 go build -trimpath -o /out/egress-netsetup ./cmd/egress-netsetup
 
-FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 # egress-netsetup refuses any iptables binary that reports the nf_tables
 # backend, so it resolves the legacy binaries. The iptables package holds
-# the xtables extension libraries those binaries load for -m owner, -m
-# conntrack, -m multiport and -m icmp6. The iptables-legacy package holds
-# the binaries themselves.
-RUN apk add --no-cache iptables iptables-legacy
+# iptables-legacy, ip6tables-legacy and their restore binaries, and the
+# xtables extension libraries they load for -m owner, -m conntrack,
+# -m multiport and -m icmp6.
+RUN apt-get update \
+	&& apt-get install --yes --no-install-recommends iptables \
+	&& rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/egress-netsetup /usr/local/bin/egress-netsetup
 ENTRYPOINT ["/usr/local/bin/egress-netsetup"]

@@ -204,7 +204,7 @@ func TestProxyImageHoldsTheBindCapability(t *testing.T) {
 // a stage that can read a file capability. It is passed on standard input,
 // so it needs no build context.
 const capabilityReaderDockerfile = `ARG PROXY_IMAGE
-ARG SETCAP_IMAGE=debian:bookworm-slim
+ARG SETCAP_IMAGE=debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 FROM ${PROXY_IMAGE} AS proxy
 FROM ${SETCAP_IMAGE}
 RUN apt-get update \
