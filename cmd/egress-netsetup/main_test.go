@@ -232,16 +232,42 @@ var (
 
 func chainKey(table, chain string) string { return table + " " + chain }
 
-// tablesHolding renders what the tables hold once the programs are applied.
-func tablesHolding(programs ...netsetup.Program) *appliedTables {
+// tablesHolding renders what one family's tables hold once its program is
+// applied.
+func tablesHolding(program netsetup.Program) *appliedTables {
 	rules := make(map[string][]string)
-	for _, program := range programs {
-		for _, rule := range slices.Concat(program.Rules(), program.Jumps) {
-			at := chainKey(rule.Table, rule.Chain)
-			rules[at] = append(rules[at], "-A "+rule.Chain+" "+strings.Join(rule.Spec, " "))
-		}
+	for _, rule := range slices.Concat(program.Rules(), program.Jumps) {
+		at := chainKey(rule.Table, rule.Chain)
+		rules[at] = append(rules[at], "-A "+rule.Chain+" "+strings.Join(rule.Spec, " "))
 	}
 	return &appliedTables{rules: rules}
+}
+
+// familyTables holds each family's tables apart, as iptables and ip6tables
+// do. A family it does not name gets empty tables.
+type familyTables map[netsetup.Family]*appliedTables
+
+// open is an opener that hands out each family's own tables.
+//
+//nolint:ireturn // it stands in for the opener, which returns the interface
+func (f familyTables) open(
+	_ context.Context, family netsetup.Family, _ string,
+) (netsetup.Tables, netsetup.Tool, error) {
+	tables, ok := f[family]
+	if !ok {
+		tables = &appliedTables{rules: map[string][]string{}}
+		f[family] = tables
+	}
+	return tables, netsetup.Tool{Path: "/sbin/iptables", Version: "v1.8.9 (legacy)"}, nil
+}
+
+// writes lists every Restore input across the families.
+func (f familyTables) writes() []string {
+	var out []string
+	for _, tables := range f {
+		out = append(out, tables.writes...)
+	}
+	return out
 }
 
 func (f *appliedTables) ChainExists(table, chain string) (bool, error) {
@@ -268,7 +294,7 @@ func (f *appliedTables) Restore(_ context.Context, input string) error {
 // verifyFixture is a --verify command line and tables that hold exactly the
 // ruleset it describes. Verify passes, so what the run wrote is all that is
 // left to assert.
-func verifyFixture(t *testing.T, receipt string) ([]string, *appliedTables) {
+func verifyFixture(t *testing.T, receipt string) ([]string, familyTables) {
 	t.Helper()
 	opts := settings{
 		proxyUID:     1337,
@@ -280,18 +306,18 @@ func verifyFixture(t *testing.T, receipt string) ([]string, *appliedTables) {
 	var sink bytes.Buffer
 	cfg, err := opts.config(&sink, netsetup.KernelHasIPv6)
 	require.NoError(t, err, "build the configuration the command line describes")
-	programs := make([]netsetup.Program, 0, len(cfg.Families()))
+	tables := make(familyTables, len(cfg.Families()))
 	for _, family := range cfg.Families() {
 		built, err := cfg.Program(family)
 		require.NoError(t, err, "build the %s ruleset", family)
-		programs = append(programs, built)
+		tables[family] = tablesHolding(built)
 	}
 	args := []string{
 		"egress-netsetup", "--verify",
 		"--proxy-uid", "1337", "--redirect-port", "1015", "--capture-ports", "80,443",
 		"--dns-servers", "10.43.0.10", "--ipv6", "off", "--receipt", receipt,
 	}
-	return args, tablesHolding(programs...)
+	return args, tables
 }
 
 // keptCapabilityReceipt is what the init container writes when it was given
@@ -336,12 +362,9 @@ func TestVerifyWritesNothing(t *testing.T) {
 			}
 			args, tables := verifyFixture(t, receipt)
 			var out bytes.Buffer
-			open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
-				return tables, netsetup.Tool{Path: "/sbin/iptables", Version: "v1.8.9 (legacy)"}, nil
-			}
-			require.NoError(t, command(&out, open).Run(context.Background(), args), "the verify run")
+			require.NoError(t, command(&out, tables.open).Run(context.Background(), args), "the verify run")
 
-			assert.Empty(t, tables.writes, "--verify changes no rule")
+			assert.Empty(t, tables.writes(), "--verify changes no rule")
 			assert.Contains(t, out.String(), "Nothing was written", "the run says it wrote nothing")
 			body, err := os.ReadFile(receipt)
 			if tc.before == "" {
@@ -361,15 +384,12 @@ func TestKeepNetAdminIsRecorded(t *testing.T) {
 	t.Parallel()
 	receipt := filepath.Join(t.TempDir(), "netsetup.json")
 	_, tables := verifyFixture(t, receipt)
-	open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
-		return tables, netsetup.Tool{Path: "/sbin/iptables", Version: "v1.8.9 (legacy)"}, nil
-	}
 	args := []string{
 		"egress-netsetup", "--keep-net-admin",
 		"--dns-servers", "10.43.0.10", "--ipv6", "off", "--receipt", receipt,
 	}
 	var out bytes.Buffer
-	require.NoError(t, command(&out, open).Run(context.Background(), args), "the run")
+	require.NoError(t, command(&out, tables.open).Run(context.Background(), args), "the run")
 
 	body, err := os.ReadFile(receipt)
 	require.NoError(t, err, "the run writes a receipt")
@@ -391,7 +411,7 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 		// openErr fails the open. Otherwise the run gets tables.
 		openErr error
 		// tables is what the run applies to and reads back.
-		tables func(t *testing.T, receipt string) *appliedTables
+		tables func(t *testing.T, receipt string) familyTables
 		// receiptIsDir puts a non-empty directory at the receipt path, which
 		// os.Remove cannot unlink.
 		receiptIsDir bool
@@ -404,20 +424,18 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 		},
 		{
 			name: "the ruleset cannot be loaded",
-			tables: func(t *testing.T, receipt string) *appliedTables {
+			tables: func(t *testing.T, receipt string) familyTables {
 				t.Helper()
 				_, tables := verifyFixture(t, receipt)
-				tables.fail = "-j REDIRECT"
+				tables[netsetup.FamilyIPv4].fail = "-j REDIRECT"
 				return tables
 			},
 			want: []string{"load the ipv4 ruleset", "iptables-restore: line refused"},
 		},
 		{
-			name: "the tables do not read back as the ruleset",
-			tables: func(*testing.T, string) *appliedTables {
-				return &appliedTables{rules: map[string][]string{}}
-			},
-			want: []string{"the ruleset is not in force", "not in the tables"},
+			name:   "the tables do not read back as the ruleset",
+			tables: func(*testing.T, string) familyTables { return familyTables{} },
+			want:   []string{"the ruleset is not in force", "not in the tables"},
 		},
 		{
 			name:         "the stale receipt cannot be removed either",
@@ -435,11 +453,11 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 			} else {
 				require.NoError(t, os.WriteFile(receipt, []byte(keptCapabilityReceipt), 0o644), "an earlier run's receipt")
 			}
-			open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
+			open := func(ctx context.Context, family netsetup.Family, override string) (netsetup.Tables, netsetup.Tool, error) {
 				if tc.openErr != nil {
 					return nil, netsetup.Tool{}, tc.openErr
 				}
-				return tc.tables(t, receipt), netsetup.Tool{Path: "/sbin/iptables", Version: "v1.8.9 (legacy)"}, nil
+				return tc.tables(t, receipt).open(ctx, family, override)
 			}
 			args := []string{
 				"egress-netsetup", "--keep-net-admin",

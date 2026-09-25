@@ -58,9 +58,9 @@ const (
 //
 //	dockerlab
 //
-// It exports $LAB, a name unique to this run, $LAB_IMAGE, and the
-// addresses $LAB_UPSTREAM4, $LAB_UPSTREAM6, $LAB_WORKLOAD4, $LAB_WORKLOAD6
-// and $LAB_GATEWAY4. The containers $LAB-upstream and $LAB-workload, the
+// It exports the Docker client settings, $LAB, a name unique to this run,
+// $LAB_IMAGE, and the addresses $LAB_UPSTREAM4, $LAB_UPSTREAM6,
+// $LAB_WORKLOAD4, $LAB_WORKLOAD6 and $LAB_GATEWAY4. The containers $LAB-upstream and $LAB-workload, the
 // network and the image are removed when the script ends, whether it passed
 // or failed.
 func cmdDockerLab(ts *testscript.TestScript, neg bool, args []string) {
@@ -77,6 +77,7 @@ func cmdDockerLab(ts *testscript.TestScript, neg bool, args []string) {
 	octet := labOctetLow + sum%labOctetSpan
 	four := fmt.Sprintf("192.168.%d.", octet)
 	six := fmt.Sprintf("fd00:e9:%x::", octet)
+	dockerClientEnv(ts)
 	for name, value := range map[string]string{
 		"LAB": lab, "LAB_IMAGE": image,
 		"LAB_UPSTREAM4": four + "10", "LAB_UPSTREAM6": six + "10",
@@ -97,6 +98,25 @@ func cmdDockerLab(ts *testscript.TestScript, neg bool, args []string) {
 	if out, err := create.CombinedOutput(); err != nil {
 		ts.Fatalf("docker network create: %v: %s", err, out)
 	}
+}
+
+// dockerClientEnv gives the script the Docker client settings of the
+// process running the tests. testscript sets HOME to a directory that does
+// not exist, and the client keeps its configuration under HOME unless
+// DOCKER_CONFIG names another place.
+func dockerClientEnv(ts *testscript.TestScript) {
+	for _, name := range []string{"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"} {
+		if value, ok := os.LookupEnv(name); ok {
+			ts.Setenv(name, value)
+		}
+	}
+	config := os.Getenv("DOCKER_CONFIG")
+	if config == "" {
+		home, err := os.UserHomeDir()
+		ts.Check(err)
+		config = filepath.Join(home, ".docker")
+	}
+	ts.Setenv("DOCKER_CONFIG", config)
 }
 
 // cmdLinuxBin cross-compiles egress-netsetup and netfixture into DIR:
