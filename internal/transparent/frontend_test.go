@@ -320,47 +320,71 @@ func TestTheConnectionCapHoldsUntilAConnectionCloses(t *testing.T) {
 	waitConn(t, handed)
 }
 
-// TestAnIdleListenerHoldsNoSlot serves two listeners against a cap of one.
-// The first listener signals once it waits in Accept, and only then does the
-// second start. A connection to the second must be handled while the first
-// sits idle.
+// TestAnIdleListenerHoldsNoSlot serves one listener per family against a
+// cap of one, as a wildcard address is served. The idle listener signals
+// once it waits in Accept, and only then does the other start. A connection
+// to the other must be handled while the idle one waits.
 func TestAnIdleListenerHoldsNoSlot(t *testing.T) {
 	t.Parallel()
-	handed := make(chan net.Conn, 1)
-	front, err := transparent.New(transparent.Options{
-		MaxConnections: 1,
-		IdleTimeout:    30 * time.Second,
-		PeekTimeout:    time.Second,
-		OriginalDst: func(net.Conn) (netip.AddrPort, error) {
-			return netip.MustParseAddrPort("192.0.2.77:443"), nil
-		},
-		Handler: func(conn net.Conn, _ proxy.Redirected) { handed <- conn },
-	})
-	require.NoError(t, err, "build the frontend")
-	idle, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	busy, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	waiting := &signalListener{Listener: idle, accepting: make(chan struct{}, 1)}
-	ctx, cancel := context.WithCancel(t.Context())
-	var group errgroup.Group
-	t.Cleanup(func() {
-		cancel()
-		assert.NoError(t, group.Wait(), "Serve after cancellation")
-	})
-	group.Go(func() error { return front.Serve(ctx, waiting) })
-	select {
-	case <-waiting.accepting:
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "the idle listener never waited in Accept")
+	tests := []struct {
+		name   string
+		idle   string
+		dialed string
+	}{
+		{name: "an idle IPv6 listener, then an IPv4 connection", idle: "[::1]:0", dialed: "127.0.0.1:0"},
+		{name: "an idle IPv4 listener, then an IPv6 connection", idle: "127.0.0.1:0", dialed: "[::1]:0"},
 	}
-	group.Go(func() error { return front.Serve(ctx, busy) })
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handed := make(chan net.Conn, 1)
+			front, err := transparent.New(transparent.Options{
+				MaxConnections: 1,
+				IdleTimeout:    30 * time.Second,
+				PeekTimeout:    time.Second,
+				OriginalDst: func(net.Conn) (netip.AddrPort, error) {
+					return netip.MustParseAddrPort("192.0.2.77:443"), nil
+				},
+				Handler: func(conn net.Conn, _ proxy.Redirected) { handed <- conn },
+			})
+			require.NoError(t, err, "build the frontend")
+			idle := listenOrSkip(t, tc.idle)
+			dialed := listenOrSkip(t, tc.dialed)
+			waiting := &signalListener{Listener: idle, accepting: make(chan struct{}, 1)}
+			ctx, cancel := context.WithCancel(t.Context())
+			var group errgroup.Group
+			t.Cleanup(func() {
+				cancel()
+				assert.NoError(t, group.Wait(), "Serve after cancellation")
+			})
+			group.Go(func() error { return front.Serve(ctx, waiting) })
+			select {
+			case <-waiting.accepting:
+			case <-time.After(10 * time.Second):
+				require.FailNow(t, "the idle listener never waited in Accept")
+			}
+			group.Go(func() error { return front.Serve(ctx, dialed) })
 
-	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", busy.Addr().String())
-	require.NoError(t, err, "dial the second listener")
-	t.Cleanup(func() { _ = conn.Close() })
-	held := waitConn(t, handed)
-	_ = held.Close()
+			conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", dialed.Addr().String())
+			require.NoError(t, err, "dial the second listener")
+			t.Cleanup(func() { _ = conn.Close() })
+			held := waitConn(t, handed)
+			t.Cleanup(func() { _ = held.Close() })
+			assert.Equal(t, dialed.Addr().String(), held.LocalAddr().String(),
+				"the connection handled is the one made to the second listener")
+		})
+	}
+}
+
+// listenOrSkip binds a loopback address, and skips the test on a host that
+// lacks the address family.
+func listenOrSkip(t *testing.T, address string) net.Listener {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", address)
+	if err != nil {
+		t.Skipf("cannot listen on %s: %v", address, err)
+	}
+	return listener
 }
 
 // signalListener reports each time Serve waits in Accept.
