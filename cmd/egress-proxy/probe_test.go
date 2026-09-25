@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -137,6 +138,19 @@ func serveEndlessBody(listener net.Listener) {
 		}
 		go func() {
 			defer func() { _ = conn.Close() }()
+			// Read the request before answering. A response that arrives
+			// while the transport still holds the connection idle is
+			// discarded as unsolicited, and the probe then fails.
+			reader := bufio.NewReader(conn)
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				if line == "\r\n" {
+					break
+				}
+			}
 			if _, err := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"); err != nil {
 				return
 			}
