@@ -7,7 +7,8 @@
 // A run that puts the whole ruleset in force writes a receipt, a JSON file on
 // the emptyDir that the init container and the sidecar are intended to share.
 // It names the proxy uid, the redirect port, the capture ports and the families
-// programmed, a digest of the ruleset, and whether CAP_NET_ADMIN went. The
+// programmed, a digest of the ruleset, whether CAP_NET_ADMIN went, and the
+// network namespace the rules govern. The
 // sidecar runs without that capability and cannot read the tables, so the
 // receipt is how it checks its own containment against rules it has no way to
 // see. netsetup.Receipt holds the format and what makes the file trustworthy.
@@ -307,6 +308,9 @@ func program(ctx context.Context, cfg netsetup.Config, opts settings, open opene
 	}
 	receipt := netsetup.NewReceipt(cfg, programs, true, time.Now())
 	receipt.RedirectPortProtection = netsetup.PortProtection(opts.portProtection)
+	if err := recordNetNamespace(&receipt); err != nil {
+		return err
+	}
 	if err := dropNetAdmin(opts.keepNetAdmin, &receipt, out); err != nil {
 		return err
 	}
@@ -314,6 +318,21 @@ func program(ctx context.Context, cfg netsetup.Config, opts settings, open opene
 		return fmt.Errorf("netsetup: %w", err)
 	}
 	fmt.Fprintf(out, "# receipt %s: %s\n", opts.receipt, receipt.RulesetDigest)
+	return nil
+}
+
+// recordNetNamespace puts the network namespace the rules were programmed in
+// on the receipt. The sidecar refuses a receipt from any other namespace. A
+// platform that does not report one leaves the field empty.
+func recordNetNamespace(receipt *netsetup.Receipt) error {
+	namespace, err := netsetup.CurrentNetNamespace()
+	switch {
+	case errors.Is(err, netsetup.ErrNetNamespaceNotSupported):
+		return nil
+	case err != nil:
+		return fmt.Errorf("netsetup: %w", err)
+	}
+	receipt.NetNamespace = &namespace
 	return nil
 }
 

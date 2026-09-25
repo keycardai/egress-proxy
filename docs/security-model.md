@@ -89,17 +89,20 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 The `egress-netsetup` init container programs an iptables ruleset in the
 pod's network namespace. The nat chain redirects the workload's outbound TCP
 on the capture ports to the sidecar's transparent listener. The filter
-chain's terminal DROP refuses everything the redirect does not cover.
+chain's terminal DROP refuses every port outside the capture and redirect.
 `internal/netsetup` builds and applies the rules. `cmd/egress-netsetup`
 verifies them, drops CAP_NET_ADMIN and writes the receipt.
 
-The pod contract this surface assumes: the init container holds NET_ADMIN
-and SETPCAP and runs before every other container. The sidecar runs as the
+The pod contract requires the init container to hold NET_ADMIN, NET_RAW, and
+SETPCAP and to run before every other container. The sidecar runs as the
 proxy uid with NET_BIND_SERVICE. The pod sets
 `net.ipv4.ip_unprivileged_port_start` above the redirect port, normally 1024.
-The workload holds no capability and runs as a uid that is not
-the proxy's. The receipt is on an emptyDir with medium Memory that the
-workload does not mount.
+The workload holds no capability and runs as another uid. The receipt is on
+an emptyDir with medium Memory that the workload does not mount.
+The pod sets `hostNetwork: false`, so every container is in the pod's own
+network namespace. The sidecar's namespace check does not detect
+`hostNetwork: true`. Both containers are then in the node's network
+namespace, and the identities match.
 
 `--redirect-port-protection` defaults to `required`. Program and verify runs
 then read `net.ipv4.ip_unprivileged_port_start` from `--port-start-file` and
@@ -129,6 +132,41 @@ nothing about whether the port was checked.
 | A `--verify` run writes a receipt for rules it did not program, or replaces a receipt that says CAP_NET_ADMIN was kept. | `--verify` reads the tables back and writes nothing. It never writes or removes the receipt and never drops a capability. | `TestVerifyWritesNothing` |
 | Re-running the init container replaces the filter chain while the OUTPUT jump an earlier run installed still points at it. An empty chain under that jump lets the OUTPUT policy, ACCEPT in a pod, allow every protocol and port. | The flush and the refill are one table replacement in one `iptables-restore` run. Apply makes no other write. The chain holds its old rules or its new ones and is never empty under a live jump. | `TestApply`, `netsetup_ruleset.txtar` |
 | The init container talks to the nft backend, whose rules the sandbox runtimes this proxy targets never apply. | The backend of the iptables binary and of the restore binary beside it is read from each version string, not from the name, and a version that names no backend is refused. With no override the legacy-specific name is tried before the generic one. | `TestOpenAssertsTheLegacyBackend`, `TestOpenSearchesPathForTheLegacyName` |
+
+### Transparent frontend
+
+The netsetup ruleset sends the workload's outbound TCP to
+`listen.transparent_port` on loopback, with no proxy variable set. `internal/transparent`
+accepts those connections, and the proxy sends each through the same decision
+pipeline as a CONNECT tunnel.
+
+The pod must set `net.ipv4.ip_unprivileged_port_start` to `1024` in
+`securityContext.sysctls`. The sidecar drops every capability and adds
+NET_BIND_SERVICE, which keeps that capability in its bounding set. Its binary
+has the file capability `cap_net_bind_service=+ep`, so the kernel grants it
+only when the bounding set allows it. An execve fails with EPERM when the set
+lacks it (capabilities(7), the transformation of capabilities during
+execve). The binary must be the sidecar's entrypoint. With
+`allowPrivilegeEscalation: false`, `no_new_privs` keeps only capabilities the
+caller held in its permitted set (Linux `security/commoncap.c`,
+`cap_bprm_creds_from_file`). The runtime puts added capabilities in that set
+when it execs the entrypoint (containerd `oci/spec_opts.go`,
+`WithAddedCapabilities`). A shell between the runtime and the binary has no
+capability to pass on.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| A workload binds the redirect port during a sidecar restart and decides its own traffic. | The redirect target is port 1015. A process without CAP_NET_BIND_SERVICE can bind it only when `net.ipv4.ip_unprivileged_port_start` is at or below 1015, in either address family (Linux `net/ipv6/af_inet6.c`, `__inet6_bind`). The sidecar reads the sysctl and refuses to start in that case. It skips this check when the receipt records `allow-unprotected`. containerd 2.0 and later, and Docker, set it to 0 unless the pod sets it. The pod sets it to 1024. Kubernetes lists it as a safe sysctl (https://kubernetes.io/docs/tasks/administer-cluster/sysctl-cluster/). | `TestContainmentPortStart`, `TestContainmentReadsThisProcess`, `TestUnprivilegedPortStart`, `transparent_capture.txtar` (`bind EACCES`, the allow-unprotected pod) |
+| The proxy cannot bind the redirect port, so it cannot serve captured connections. | The filter chain drops traffic the listener does not receive. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability. A bind that fails with EACCES names the capability the sidecar needs and requires the binary to be its entrypoint. | `transparent_capture.txtar` (the `no_new_privs` refusal) |
+| The sidecar starts with rules that were not applied, target another uid or port, or remain changeable by this process. | The sidecar reads the netsetup receipt at start-up. It refuses an unverified receipt, a receipt that says the capability was kept, a mismatched proxy uid or redirect port, uid 0, a receipt with no family, or a process that holds CAP_NET_ADMIN in its effective or permitted set. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestCapture`, `transparent_capture.txtar` (the refusal naming uid 1000) |
+| Another container replaces the receipt on the shared volume, so the sidecar starts with data the init container did not write. | The sidecar refuses a receipt that group or other can write, or a receipt or directory owned by a uid other than root or its own. An emptyDir mount point is 0777 (Kubernetes `pkg/volume/emptydir/empty_dir.go`, `perm`), so any uid that mounts it can create a file there. The owner check refuses that file. The sidecar opens the receipt once without following a symlink or blocking, so its mode, owner, and contents come from one descriptor. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the receipt on a 0777 volume) |
+| The sidecar starts on a receipt written in another network namespace. The rules it describes govern that namespace, not the one the sidecar and the workload share. | The init container records the device and inode of `/proc/self/ns/net` in the receipt. Two processes are in the same network namespace when both values are equal (namespaces(7), The /proc/[pid]/ns/ directory). The sidecar reads its own and refuses a receipt that names another namespace or none. The check does not detect `hostNetwork: true`. See the netsetup pod contract. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestNetNamespaceAt`, `TestKeepNetAdminIsRecorded`, `TestCapture`, `transparent_capture.txtar` (the proxy in a second container) |
+| Another pod connects to the transparent listener, or a DNAT rule in the pod sends outside traffic to it. SO_ORIGINAL_DST then returns the pre-DNAT address, so the connection looks redirected and would be served with this sandbox's credentials. | The listener binds 127.0.0.1 and ::1 and no other address. REDIRECT sends a locally generated packet to loopback (Linux `net/netfilter/nf_nat_redirect.c`, gVisor `pkg/tcpip/stack/iptables_targets.go`), so every captured connection still arrives. The kernel drops an IPv4 packet to 127.0.0.0/8 that arrives on another interface unless `route_localnet` is set (Linux `Documentation/networking/ip-sysctl.rst`), and drops an IPv6 packet to ::1 (Linux `net/ipv6/ip6_input.c`, `ip6_rcv_core`, RFC 4291 section 2.5.3). | `TestListen`, `transparent_capture.txtar` (the connection from the upstream container, the DNAT to 127.0.0.1) |
+| A workload connects straight to the transparent listener instead of being redirected, so the recovered destination is the proxy itself. | The frontend compares the recovered destination with the address it accepted on. It denies a match with `not_redirected` before reading from the connection. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused`, `transparent_capture.txtar` (the workload's connection to 127.0.0.1) |
+| A redirected TLS connection has no server name, so the proxy cannot evaluate a host policy. A direct connection to an address has no server name because RFC 6066 section 3 forbids an IP literal in `server_name`. | The connection is denied with `no_sni` and closed. The refusal records the pre-redirect address, so the audit record shows its destination. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused`, `transparent_capture.txtar` |
+| A redirected connection names a destination that differs from its original address, so the proxy decides one host and reaches another. | The name must carry the original port. An address literal must match the original address. A mismatch gets `host_mismatch`. The proxy resolves the name again before dialing, so the dial guard still catches a permitted name that resolves into a denied range. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` |
+| A client sends nothing or a partial ClientHello and holds a goroutine and connection slot. | The peek has a ten-second read deadline. The connection then gets `no_sni`, or `cleartext_not_forwarded` on a cleartext port. The transparent listener has required connection and idle limits. The peek waits for one byte beyond the data it has served, then hands over all data it received. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` (silent and partial clients), `TestTheConnectionCapHoldsUntilAConnectionCloses`, `TestNewRefusals`, `TestCapturedConnectionsAreServedOneAfterAnother` |
+| A captured cleartext connection sends a credential to a destination in cleartext. | Endpoints name HTTPS destinations. The frontend reads the `Host` header on a cleartext port, then denies the connection with `cleartext_not_forwarded`. A deny-listed host gets `deny_always`, and an uncovered host gets `no_matching_endpoint`. The proxy forwards no cleartext, even to a covered host and port. | `TestRedirectedConnectionsAreRefused` (a cleartext connection to a covered name and port), `transparent_capture.txtar` (the `http://` request) |
 
 ### Decision process
 
@@ -240,6 +278,20 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
   (capabilities(7), prctl(2)). The other threads the Go runtime started keep
   the capability in their permitted and bounding sets. The process runs no
   code of its own on them and exits once it has written the receipt.
+- The connection cap is per frontend. `limits.max_connections` bounds the
+  CONNECT and transparent frontends separately, so a process configured for
+  1024 can hold 2048. The transparent frontend takes a slot after accept, so
+  each socket also holds one unread connection at the limit.
+- The pod does not meet the baseline Pod Security Standard. The netsetup
+  init container adds NET_ADMIN and NET_RAW, which baseline does not allow
+  (https://kubernetes.io/docs/concepts/security/pod-security-standards/).
+  The namespace needs the privileged level or an exemption for this pod.
+- The transparent frontend forwards no cleartext. It reads `Host` on a
+  cleartext port and then refuses the connection because every endpoint names
+  an HTTPS destination.
+- The proxy checks the netsetup receipt once at start-up. It cannot detect a
+  later rule change, so the init container gives up CAP_NET_ADMIN before it
+  writes the receipt and the sidecar refuses to start with that capability.
 - The proxy mints a credential for each request which is not cached. A busy
   resource receives one exchange per request.
 - A rotated client secret takes effect on the next start because the proxy

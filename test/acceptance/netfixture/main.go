@@ -1,26 +1,34 @@
-// Command netfixture is the network fixture the netsetup ruleset scenario
-// runs on both sides of the rules. It is a test fixture and ships in no image
-// the product publishes.
+// Command netfixture is a network fixture for the netsetup and transparent
+// capture scenarios. It runs on both sides of the rules and ships in no
+// product image.
 //
 // Every probe prints one line and exits 0, so the script asserts on what the
 // line says:
 //
 //	netfixture serve tcp:PORT|udp:PORT...  answer "upstream PORT" on each port
-//	netfixture capture ADDRESS             answer "captured ORIGINAL" for each redirected connection
+//	netfixture capture PORT                answer "captured ORIGINAL" for each redirected connection
 //	netfixture dial HOST:PORT              print the first line a TCP peer sends
 //	netfixture udp HOST:PORT               send one datagram and print the reply
 //	netfixture ping HOST                   send one ICMP echo request and print the result
 //	netfixture ndp HOST                    send one neighbour solicitation from a raw socket
+//	netfixture https ADDRESS CERT KEY      answer HTTPS with the request path and log each request
+//	netfixture get URL                     fetch URL without a proxy and print the status and body
+//
+// get ignores proxy variables. A request goes through the proxy only when
+// the capture redirects it.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -51,10 +59,14 @@ const (
 	// solicitReserved is the reserved field that opens a neighbour
 	// solicitation body.
 	solicitReserved = 4
+	// httpsArgs is the number of arguments for https ADDRESS CERT KEY.
+	httpsArgs         = 4
+	requestTimeout    = 30 * time.Second
+	readHeaderTimeout = 10 * time.Second
 )
 
-var errUsage = errors.New("usage: netfixture serve SPEC... | capture ADDRESS | dial ADDRESS | " +
-	"udp ADDRESS | ping HOST | ndp HOST")
+var errUsage = errors.New("usage: netfixture serve SPEC... | capture PORT | dial ADDRESS | " +
+	"udp ADDRESS | ping HOST | ndp HOST | https ADDRESS CERT KEY | get URL")
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -72,14 +84,29 @@ func run(args []string, out io.Writer) error {
 		return serve(args[1:])
 	case "capture":
 		return capture(args[1])
+	case "https":
+		if len(args) != httpsArgs {
+			return errUsage
+		}
+		return serveHTTPS(args[1], args[2], args[3])
+	case "get":
+		return get(args[1], out)
+	default:
+		return probe(args[0], args[1], out)
+	}
+}
+
+// probe runs a probe that prints one line and exits 0.
+func probe(command, target string, out io.Writer) error {
+	switch command {
 	case "dial":
-		fmt.Fprintln(out, dial(args[1]))
+		fmt.Fprintln(out, dial(target))
 	case "udp":
-		fmt.Fprintln(out, datagram(args[1]))
+		fmt.Fprintln(out, datagram(target))
 	case "ping":
-		fmt.Fprintln(out, ping(args[1]))
+		fmt.Fprintln(out, ping(target))
 	case "ndp":
-		fmt.Fprintln(out, solicit(args[1]))
+		fmt.Fprintln(out, solicit(target))
 	default:
 		return errUsage
 	}
@@ -114,9 +141,14 @@ func serve(specs []string) error {
 }
 
 // capture answers each connection a REDIRECT sent it with the destination
-// the connection was opened to.
-func capture(address string) error {
-	listeners, err := transparent.Listen(context.Background(), address)
+// the connection was opened to. It binds the port on loopback, as the proxy
+// does.
+func capture(portText string) error {
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return errUsage
+	}
+	listeners, err := transparent.Listen(context.Background(), port)
 	if err != nil {
 		return err //nolint:wrapcheck // the command prints it as it is
 	}
@@ -155,6 +187,44 @@ func answerDatagrams(conn net.PacketConn, reply string) error {
 		}
 		_, _ = conn.WriteTo([]byte(reply), peer)
 	}
+}
+
+// serveHTTPS answers each request with its path, so the client output shows
+// which request reached the upstream.
+func serveHTTPS(address, certFile, keyFile string) error {
+	server := &http.Server{
+		Addr:              address,
+		ReadHeaderTimeout: readHeaderTimeout,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(os.Stderr, "request %s %s host=%s\n", r.Method, r.URL.RequestURI(), r.Host)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			//nolint:gosec // G705: this fixture echoes text as text/plain
+			fmt.Fprintf(w, "hello from upstream %s\n", r.URL.Path)
+		}),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	return server.ListenAndServeTLS(certFile, keyFile) //nolint:wrapcheck // the command prints it as it is
+}
+
+// get makes one request with Transport.Proxy nil, so HTTPS_PROXY cannot route
+// it.
+func get(url string, out io.Writer) error {
+	client := &http.Client{
+		Timeout:   requestTimeout,
+		Transport: &http.Transport{Proxy: nil},
+	}
+	//nolint:noctx,gosec // the client timeout bounds the request. G704: the URL is this fixture's argument
+	resp, err := client.Get(url)
+	if err != nil {
+		return err //nolint:wrapcheck // the command prints it as it is
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err //nolint:wrapcheck // the command prints it as it is
+	}
+	fmt.Fprintf(out, "%d %s", resp.StatusCode, body)
+	return nil
 }
 
 // dial connects over TCP and prints the first line the peer sends. A SYN

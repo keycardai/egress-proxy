@@ -71,7 +71,12 @@ stdout '"capabilities_dropped": true'
 stdout '"redirect_port_protection": "required"'
 stdout '"families": \[\s*"ipv4",\s*"ipv6"\s*\]'
 
-exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture :1015
+# The receipt names the network namespace the rules were programmed in. stat
+# reads the same device and inode through /proc/self/ns/net in this container.
+exec docker exec $LAB-workload sh -c 'grep -q "\"device\": $(stat -L -c %d /proc/self/ns/net),$" /run/egress/netsetup.json && grep -q "\"inode\": $(stat -L -c %i /proc/self/ns/net)$" /run/egress/netsetup.json && echo same namespace'
+stdout '^same namespace$'
+
+exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture 1015
 exec docker exec -u 1337 $LAB-workload netfixture dial 127.0.0.1:1015
 stdout '^captured 127.0.0.1:1015$'
 
@@ -104,7 +109,7 @@ stdout '^captured '$LAB_UPSTREAM4':80$'
 exec docker exec -u 1000 $LAB-workload netfixture dial [$LAB_UPSTREAM6]:443
 stdout '^captured \['$LAB_UPSTREAM6'\]:443$'
 
-# Must fail: TCP on a port the redirect does not cover. The SYN is dropped.
+# Must fail: TCP on a port the capture and redirect do not cover. The SYN is dropped.
 exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:8443
 stdout '^tcp TIMEOUT$'
 exec docker exec -u 1000 $LAB-workload netfixture dial [$LAB_UPSTREAM6]:8443

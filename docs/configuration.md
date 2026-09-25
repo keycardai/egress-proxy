@@ -127,7 +127,9 @@ that the endpoint list denies.
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
 | `connect` | `127.0.0.1:3128` | `--connect`, `EGRESS_PROXY_CONNECT` | The CONNECT frontend in `host:port` form. A workload that honors `HTTPS_PROXY` reaches the proxy through this address. |
-| `admin` | `/run/egress/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
+| `transparent_port` | unset | `--transparent-port`, `EGRESS_PROXY_TRANSPARENT_PORT` | The redirect target. The netsetup init container sends captured TCP here, so clients reach the proxy without a proxy variable. The frontend binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every captured connection to loopback. Other pods cannot connect to it. Unset or 0 disables the transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start` so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when the port is not below it. containerd 2.0 and later sets the sysctl to 0, so set it to `1024` in the pod's `securityContext.sysctls`. The proxy binds the port with `NET_BIND_SERVICE` from a file capability. Add `NET_BIND_SERVICE` to the sidecar and run the binary as its entrypoint. Linux only. |
+| `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP. It gets the destination from the `Host` header. It reads every other captured port as TLS and gets the destination from the ClientHello. Endpoints name HTTPS destinations, so the proxy reads a cleartext connection and then refuses it. `config.digest` includes this setting only when `transparent_port` is set. |
+| `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
 
 The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
@@ -138,6 +140,28 @@ has mode 0600 in a directory with mode 0700. The proxy sets that directory
 mode on every start and refuses to start when the directory does not end up
 at mode 0700, so no other uid in the pod can reach the socket. Keep
 `ca.out_dir` out of that directory: the workload cannot traverse it.
+
+### `netsetup`
+
+| Key | Default | Flag and variable | Description |
+|---|---|---|---|
+| `receipt` | `/run/egress/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it only when `listen.transparent_port` is set. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. |
+
+The proxy reads the receipt before it serves requests. It refuses to start if
+the active rules differ from the receipt: the rules were not verified, the
+init container kept `CAP_NET_ADMIN`, the proxy uid or redirect port differs,
+the proxy uid is 0, the receipt names no address family, the receipt names
+another network namespace or none, this process holds
+`CAP_NET_ADMIN`, group or other can write the receipt, the receipt or its
+directory belongs to a uid other than root or the proxy, or
+`net.ipv4.ip_unprivileged_port_start` is at or below the redirect port. It
+skips the last check when the receipt records `allow-unprotected` in
+`redirect_port_protection`. The directory itself can be writable by every uid
+because an `emptyDir` mount point is writable that way. Each refusal names both values and the setting to change.
+
+The init container is `egress-netsetup`. Its settings are arguments, not
+environment variables, so the pod spec shows the whole ruleset.
+`--dry-run` prints the rules without applying them.
 
 ### `ca`
 
@@ -196,7 +220,7 @@ control character. A control character would split the request head.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections that the CONNECT listener accepts. Further accepts wait until a connection ends. |
+| `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections one frontend serves. Further accepts wait until a connection ends. Each frontend has its own limit, so a process configured for `1024` with both frontends can hold `2048`. The transparent frontend takes a slot after accept, so each socket also holds one accepted connection unread at the limit. |
 | `idle_timeout` | `5m` | `--idle-timeout`, `EGRESS_PROXY_IDLE_TIMEOUT` | The time before the proxy closes a connection that neither reads nor writes. The proxy applies this limit on the frontend, inside a tunnel, and on the upstream connection. It refuses a request head that has not arrived after 10 seconds. |
 | `response_header_timeout` | `30s` | `--response-header-timeout`, `EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT` | The time an upstream has to send a response head once the proxy writes the request. A slower upstream gets `upstream_failed`. This limit does not bound a body, so a server-sent event stream runs as long as it stays active. |
 | `exchange_timeout` | `10s` | `--exchange-timeout`, `EGRESS_PROXY_EXCHANGE_TIMEOUT` | The upper bound for one token exchange, including discovery. The dial and TLS handshake to the zone each have five seconds inside this budget, and discovery has at most ten seconds whatever the budget, because the SDK caps its own metadata fetch there. A request that spends the budget gets `exchange_failed`. This setting limits a call but does not decide the answer, so `config.digest` excludes it. |
@@ -307,8 +331,12 @@ file and failing stage without including raw parser diagnostics.
 ## Decisions and reason codes
 
 The proxy writes one JSON line to stdout for every decision. `scope` is
-`connection` for the decision made when a CONNECT arrives. It is `request` for
-each request inside the tunnel. `connection_id` joins the two records.
+`connection` for the decision made when a CONNECT arrives or when the
+transparent frontend recovers a captured connection's destination. It is
+`request` for each request inside the tunnel. `connection_id` joins the two
+records. A captured connection also carries `destination.original_address`,
+the address the client opened before the redirect rewrote it. That field
+identifies a captured connection in the audit stream.
 `decision.reason` has one of these values:
 
 | Reason | Verdict | Scope | Meaning |
@@ -317,8 +345,9 @@ each request inside the tunnel. `connection_id` joins the two records.
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. |
 | `cleartext_not_forwarded` | deny | both | The connection or request carries cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
-| `no_sni` | deny | connection | The TLS handshake inside the tunnel named no server. |
-| `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, or the request `Host` header differs from the SNI and port. |
+| `no_sni` | deny | connection | The TLS handshake named no server, either inside a tunnel or on a captured connection whose ClientHello had no `server_name`. RFC 6066 section 3 forbids an IP literal there, so a client connecting straight to an address sends none. |
+| `not_redirected` | deny | connection | The destination recovered from a connection on the transparent listener is that listener's own address, so the connection was opened to the proxy rather than redirected into it. |
+| `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |

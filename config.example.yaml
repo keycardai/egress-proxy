@@ -26,7 +26,11 @@ identity:
 
 # listen:
 #   connect: "127.0.0.1:3128"           # EGRESS_PROXY_CONNECT
-#   admin: "/run/egress/admin.sock"     # EGRESS_PROXY_ADMIN; a Unix socket, never a port
+#   transparent_port: 1015              # EGRESS_PROXY_TRANSPARENT_PORT: redirect target on 127.0.0.1 and ::1. Unset disables it
+#   cleartext_ports: [80]               # captured ports use HTTP. Other ports use TLS
+#   admin: "/run/egress/admin/admin.sock" # EGRESS_PROXY_ADMIN; a Unix socket, never a port
+# netsetup:
+#   receipt: "/run/egress/netsetup.json"  # EGRESS_PROXY_NETSETUP_RECEIPT: read when listen.transparent_port is set
 # ca:
 #   out_dir: "/shared-ca"               # EGRESS_PROXY_CA_OUT_DIR; receives ca.crt and nothing else
 #   state_dir: ""                       # EGRESS_PROXY_CA_STATE_DIR; a memory-backed volume holding the CA across restarts

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,14 +27,18 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/credential"
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/strictdoc"
 )
 
 // Defaults for the process settings.
 const (
-	DefaultConnect        = "127.0.0.1:3128"
-	DefaultAdmin          = "/run/egress/admin.sock"
+	DefaultConnect = "127.0.0.1:3128"
+	DefaultAdmin   = "/run/egress/admin/admin.sock"
+	// DefaultCleartextPort is the captured port read as cleartext HTTP when
+	// listen.cleartext_ports is empty.
+	DefaultCleartextPort  = 80
 	DefaultCAOutDir       = "/shared-ca"
 	DefaultLeafTTL        = 24 * time.Hour
 	DefaultCacheSize      = 1024
@@ -93,8 +98,11 @@ type Document struct {
 	Limits   Limits    `json:"limits"`
 	// Credentials names the source from which the proxy reads credentials.
 	Credentials Credentials `json:"credentials"`
-	Policy      Policy      `json:"policy"`
-	Endpoints   []Endpoint  `json:"endpoints"`
+	// Netsetup describes what the init container programmed into network
+	// firewall rules. The proxy reads it before serving a transparent frontend.
+	Netsetup  Netsetup   `json:"netsetup"`
+	Policy    Policy     `json:"policy"`
+	Endpoints []Endpoint `json:"endpoints"`
 }
 
 // Credentials names the source for endpoint credentials. A document without a
@@ -165,8 +173,26 @@ type Impersonate struct {
 type Listen struct {
 	// Connect is the CONNECT frontend, host:port.
 	Connect string `json:"connect"`
+	// TransparentPort is the redirect target for captured TCP. The frontend
+	// binds it on 127.0.0.1 and ::1 and no other address. Zero disables the
+	// transparent frontend.
+	//
+	// The port is below 1024, so an unprivileged workload cannot bind it during
+	// a sidecar restart and stand in for the proxy. The proxy holds
+	// NET_BIND_SERVICE and no other capability.
+	TransparentPort int `json:"transparent_port"`
+	// CleartextPorts lists captured destination ports to read as cleartext
+	// HTTP. The destination comes from the Host header. Empty means port 80.
+	// Every other captured port is read as TLS.
+	CleartextPorts []int `json:"cleartext_ports"`
 	// Admin is the path of the admin Unix socket.
 	Admin string `json:"admin"`
+}
+
+// Netsetup contains the init container's receipt. The proxy reads it before
+// serving a transparent frontend and refuses a mismatched uid or port.
+type Netsetup struct {
+	Receipt string `json:"receipt"`
 }
 
 // CA configures the certificate authority that the proxy terminates the
@@ -303,7 +329,10 @@ type Overrides struct {
 	WorkloadTokenFile     string
 	ImpersonateUser       string
 	Connect               string
+	TransparentPort       int
+	TransparentPortSet    bool
 	Admin                 string
+	NetsetupReceipt       string
 	CAOutDir              string
 	CAStateDir            string
 	ClientSecretFile      string
@@ -372,8 +401,8 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // can make two sidecars answer the same request differently.
 //
 // sandbox.id stays out: it annotates a record but decides nothing, and it
-// already has its own field on every record. So do listen, ca and limits,
-// which bound how the process runs without changing any answer.
+// It already has its own field on every record. The same holds for ca, limits,
+// and listen addresses, which bound the process without changing any answer.
 //
 // The compiled deny list goes in because it is platform policy that a build
 // carries rather than a document. Two binaries that deny different
@@ -386,6 +415,10 @@ type decisionInputs struct {
 	UpstreamCAFiles    []string         `json:"upstream_ca_files"`
 	CredentialSource   credentialSource `json:"credential_source"`
 	DenyList           string           `json:"deny_list"`
+	// CleartextPorts decides how the frontend reads a captured port. It refuses
+	// a port read as cleartext where the same port read as TLS uses its server
+	// name. It is empty with no transparent frontend, where nothing is captured.
+	CleartextPorts []int `json:"cleartext_ports,omitempty"`
 }
 
 // credentialSource names the configured source.
@@ -414,10 +447,9 @@ func canonicalPrefixes(prefixes []netip.Prefix) []string {
 	return out
 }
 
-// canonicalEndpoints orders an endpoint list by host and then path prefix.
-// The matcher sorts each host's prefixes by descending length and validation
-// refuses a repeated host and prefix pair, so document order changes no
-// answer and must change no digest.
+// canonicalEndpoints orders endpoints by host, port, and path prefix. The
+// matcher sorts prefixes by length, and validation rejects duplicates, so
+// document order changes neither the answer nor the digest.
 func canonicalEndpoints(endpoints []Endpoint) []Endpoint {
 	out := append([]Endpoint(nil), endpoints...)
 	sort.Slice(out, func(i, j int) bool {
@@ -503,6 +535,9 @@ func (c *Config) digestDecisionInputs() (string, error) {
 		CredentialSource:   credentialSource{Kind: c.CredentialSource(), StaticFile: c.Credentials.StaticFile},
 		DenyList:           policy.CompiledDigest(),
 	}
+	if c.Listen.TransparentPort != 0 {
+		inputs.CleartextPorts = sortedPorts(c.Listen.CleartextPorts)
+	}
 	encoded, err := json.Marshal(inputs)
 	if err != nil {
 		return "", fmt.Errorf("%w: encode the decision inputs: %w", errInvalid, err)
@@ -518,6 +553,10 @@ func (c *Config) digestDecisionInputs() (string, error) {
 func (c *Config) applyDefaults() {
 	defaultString(&c.Listen.Connect, DefaultConnect)
 	defaultString(&c.Listen.Admin, DefaultAdmin)
+	defaultString(&c.Netsetup.Receipt, netsetup.DefaultReceiptPath)
+	if len(c.Listen.CleartextPorts) == 0 {
+		c.Listen.CleartextPorts = []int{DefaultCleartextPort}
+	}
 	defaultString(&c.CA.OutDir, DefaultCAOutDir)
 	if c.CA.LeafTTL == 0 {
 		c.CA.LeafTTL = Duration(DefaultLeafTTL)
@@ -587,7 +626,11 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("identity.impersonate.user", overrides.ImpersonateUser != "",
 		func() { c.Identity.Impersonate.User = overrides.ImpersonateUser })
 	override("listen.connect", overrides.Connect != "", func() { c.Listen.Connect = overrides.Connect })
+	override("listen.transparent_port", overrides.TransparentPortSet || overrides.TransparentPort != 0,
+		func() { c.Listen.TransparentPort = overrides.TransparentPort })
 	override("listen.admin", overrides.Admin != "", func() { c.Listen.Admin = overrides.Admin })
+	override("netsetup.receipt", overrides.NetsetupReceipt != "",
+		func() { c.Netsetup.Receipt = overrides.NetsetupReceipt })
 	override("ca.out_dir", overrides.CAOutDir != "", func() { c.CA.OutDir = overrides.CAOutDir })
 	override("ca.state_dir", overrides.CAStateDir != "", func() { c.CA.StateDir = overrides.CAStateDir })
 	override("ca.leaf_ttl", overrides.LeafTTL != 0, func() { c.CA.LeafTTL = Duration(overrides.LeafTTL) })
@@ -643,7 +686,9 @@ func (c *Config) validate() error {
 	seen := make(map[string]int, len(c.Endpoints))
 	for i, endpoint := range c.Endpoints {
 		endpoint.validate(i, &found)
-		key := endpoint.Host + endpoint.PathPrefix
+		// An endpoint identifies a service by host, port, and prefix. Compile
+		// uses the same identity, so both checks reject the same duplicate.
+		key := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)) + endpoint.PathPrefix
 		if previous, ok := seen[key]; ok {
 			found.addf("endpoints[%d]: host %q with path_prefix %q repeats endpoints[%d]",
 				i, endpoint.Host, endpoint.PathPrefix, previous)
@@ -663,6 +708,7 @@ func (c *Config) validateProcess(found *problems) {
 	if !filepath.IsAbs(c.Listen.Admin) {
 		found.addf("listen.admin %q must be an absolute path; the admin surface is a Unix socket", c.Listen.Admin)
 	}
+	c.validateTransparent(found)
 	c.CA.validate(found)
 	for i, file := range c.TLS.UpstreamCAFiles {
 		if strings.TrimSpace(file) == "" {
@@ -911,4 +957,40 @@ func requireOnly(
 	if !onlyAllowed {
 		found.addf("endpoints[%d]: a %s placement %s", i, kind, extra)
 	}
+}
+
+// validateTransparent checks the transparent frontend and its receipt. A
+// transparent frontend without a receipt cannot show that the rules send it
+// traffic, so it requires a receipt path.
+func (c *Config) validateTransparent(found *problems) {
+	for i, port := range c.Listen.CleartextPorts {
+		if port < 1 || port > maxPort {
+			found.addf("listen.cleartext_ports[%d] is %d, outside 1-%d", i, port, maxPort)
+		}
+	}
+	if c.Listen.TransparentPort == 0 {
+		return
+	}
+	if c.Listen.TransparentPort < 0 || c.Listen.TransparentPort > maxPort {
+		found.addf("listen.transparent_port is %d, outside 1-%d", c.Listen.TransparentPort, maxPort)
+	}
+	if !filepath.IsAbs(c.Netsetup.Receipt) {
+		found.addf("netsetup.receipt %q must be an absolute path. The transparent frontend starts only after "+
+			"the receipt shows the rules redirect to it", c.Netsetup.Receipt)
+	}
+}
+
+// sortedPorts sorts and removes duplicate ports to canonicalize for the digest.
+func sortedPorts(ports []int) []int {
+	seen := make(map[int]struct{}, len(ports))
+	out := make([]int, 0, len(ports))
+	for _, port := range ports {
+		if _, ok := seen[port]; ok {
+			continue
+		}
+		seen[port] = struct{}{}
+		out = append(out, port)
+	}
+	sort.Ints(out)
+	return out
 }

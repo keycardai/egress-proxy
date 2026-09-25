@@ -1,0 +1,343 @@
+# The transparent frontend and netsetup init container run together in
+# Docker. One container serves HTTPS for upstream.test. The other is the pod.
+#
+# In the pod, egress-netsetup programs the rules as root and gives up
+# NET_ADMIN. The proxy runs as uid 1337 with NET_BIND_SERVICE and nothing
+# else. The workload runs as uid 1000. Clients set no proxy variable. The
+# redirect sends their requests through the proxy.
+#
+# These attempts must fail: a direct UDP datagram on port 443, a TCP
+# connection on an uncovered port in either address family, a setuid to the
+# proxy uid, a bind of the redirect port, a cleartext request to an endpoint
+# on port 80, a connection from another container to the redirect port, and
+# outside traffic a DNAT in the pod sends to the listener.
+#
+# The container sets net.ipv4.ip_unprivileged_port_start to 1024, as the pod
+# does in securityContext.sysctls. Docker and containerd 2.0 set it to 0 by
+# default. The redirect port stays protected because it is below 1024.
+#
+# The receipt is on a tmpfs mounted at mode 0777, the mode of an emptyDir
+# mount point.
+
+[!docker] skip 'the Docker daemon is not available'
+
+dockerlab
+linuxbin bin
+tlscert tls upstream.test
+
+# The proxy writes its audit stream and log to a mounted directory, so the
+# script reads both from the host. The emptyDir is writable by every uid in
+# the pod, and the proxy runs as 1337.
+mkdir out
+chmod 0777 out
+
+exec docker build -q -t $LAB_IMAGE -f Dockerfile $WORK
+
+# The upstream serves HTTPS for upstream.test.
+exec docker run -d --name $LAB-upstream --network $LAB --ip $LAB_UPSTREAM4 --ip6 $LAB_UPSTREAM6 -v $WORK/tls:/tls:ro $LAB_IMAGE netfixture https :443 /tls/leaf.crt /tls/leaf.key
+
+# The pod maps upstream.test to its IPv4 address. The successful requests use
+# IPv4. The IPv6 cases name the address directly.
+exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6 $LAB_WORKLOAD6 --add-host upstream.test:$LAB_UPSTREAM4 --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=1024 --mount type=tmpfs,destination=/run/egress,tmpfs-mode=0777 -e HOME=/tmp -e CURL_CA_BUNDLE=/shared-ca/ca.crt -e GIT_SSL_CAINFO=/shared-ca/ca.crt -e REQUESTS_CA_BUNDLE=/shared-ca/ca.crt -e NODE_EXTRA_CA_CERTS=/shared-ca/ca.crt -e SSL_CERT_FILE=/shared-ca/ca.crt -v $WORK:/work:ro -v $WORK/out:/out $LAB_IMAGE sleep 600
+
+# The init container loads both address families with iptables-legacy, reads
+# every rule back, drops NET_ADMIN, and writes the receipt.
+exec docker exec $LAB-workload egress-netsetup --receipt /run/egress/netsetup.json
+stdout '^# ipv4: /usr/sbin/iptables-legacy \(iptables v[0-9.]+ \(legacy\)\), /usr/sbin/iptables-legacy-restore$'
+stdout '^# ipv6: /usr/sbin/ip6tables-legacy \(ip6tables v[0-9.]+ \(legacy\)\), /usr/sbin/ip6tables-legacy-restore$'
+stdout -count=2 '^-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015$'
+stdout -count=2 '^-A EGRESS_PROXY_FILTER_OUTPUT -j DROP$'
+stdout '^# ipv4 verified: \d+ rules present, no rule this ruleset did not install, NAT rule order checked, the terminal DROP is last'
+stdout '^# ipv6 verified: \d+ rules present, no rule this ruleset did not install, NAT rule order checked, the terminal DROP is last'
+stdout '^# CAP_NET_ADMIN dropped from every capability set on this thread, no_new_privs set$'
+stdout '^# receipt /run/egress/netsetup.json: sha256:'
+exec docker exec $LAB-workload stat -c '%a %u' /run/egress
+stdout '^777 0$'
+
+# Must fail: the workload binds the redirect port and stands in for the proxy
+# during a restart. The port is below 1024, and uid 1000 has no capability,
+# so the kernel refuses the bind before the proxy takes the port.
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/bindport.py
+stdout '^bind EACCES$'
+
+# Must fail: the workload calls setuid to the proxy uid. That puts its
+# traffic in the exclusion the nat and filter chains give the proxy.
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/setuid.py
+stdout '^setuid EPERM$'
+
+# The proxy starts only after the receipt shows that the rules redirect to it
+# and that it cannot change them. A sidecar with another uid is refused.
+! exec docker exec -u 1000 $LAB-workload egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca
+stderr 'the ruleset excludes uid 1337 and this process runs as uid 1000'
+
+# Must fail: a proxy in another network namespace starts on this pod's
+# receipt. A second container has its own namespace. Root writes the receipt
+# there at 0644 and the proxy runs as uid 1337, so only the namespace differs.
+# timeout stops a proxy that starts, so a missing refusal fails this step
+# instead of the whole test.
+exec docker exec $LAB-workload cat /run/egress/netsetup.json
+cp stdout netsetup.json
+stdin netsetup.json
+! exec docker run --rm -i --network $LAB --sysctl net.ipv4.ip_unprivileged_port_start=1024 --mount type=tmpfs,destination=/run/egress,tmpfs-mode=0777 -v $WORK:/work:ro $LAB_IMAGE sh -c 'cat >/run/egress/netsetup.json && exec timeout 20 setpriv --reuid 1337 --regid 1337 --clear-groups egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca'
+stderr 'the receipt was written in network namespace device \d+ inode \d+ and this process is in network namespace device \d+ inode \d+'
+stderr 'the init container and the sidecar are not in the same pod network'
+! stderr 'is owned by|runs as uid|ip_unprivileged_port_start is|CAP_NET_ADMIN'
+
+# A pod that sets no sysctl gets 0 from Docker, as on a kernel that does not
+# enforce privileged ports. netsetup runs with allow-unprotected and the
+# receipt records it, so the proxy starts without checking the sysctl.
+# timeout stops the proxy once it serves.
+! exec docker run --rm --network $LAB --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=0 --mount type=tmpfs,destination=/run/egress,tmpfs-mode=0777 -v $WORK:/work:ro $LAB_IMAGE sh -c 'egress-netsetup --receipt /run/egress/netsetup.json --redirect-port-protection allow-unprotected && exec timeout 10 setpriv --reuid 1337 --regid 1337 --clear-groups egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca'
+stdout '^# WARNING: redirect-port protection is waived'
+stderr 'capturing redirected connections'
+! stderr 'ip_unprivileged_port_start is'
+
+# Under no_new_privs, execve keeps only the caller's capabilities. setpriv
+# holds none, so the file capability grants nothing and the bind fails. The
+# refusal names the capability the sidecar needs.
+! exec docker exec -u 1337 $LAB-workload setpriv --no-new-privs egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca-nnp --admin /tmp/admin-nnp/admin.sock
+stderr 'listen tcp4 127.0.0.1:1015: bind: permission denied'
+stderr 'capabilities.add NET_BIND_SERVICE and make this binary the container entrypoint'
+
+exec docker exec -d -u 1337 $LAB-workload sh -c '/usr/local/bin/egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /shared-ca >/out/audit.jsonl 2>/out/proxy.log'
+waitgrep out/proxy.log 'capturing redirected connections'
+exec docker exec $LAB-workload stat -c '%a %u' /run/egress
+stdout '^777 0$'
+grep '"msg":"transparent network capture enabled".*"proxy_uid":1337.*"redirect_port":1015' out/proxy.log
+grep '"transparent":"127.0.0.1:1015,\[::1\]:1015"' out/proxy.log
+
+# Five clients reach the upstream without a proxy variable.
+exec docker exec -u 1000 $LAB-workload curl -sS https://upstream.test/allowed/curl
+stdout '^hello from upstream /allowed/curl$'
+
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/get.py https://upstream.test/allowed/python
+stdout '^200 hello from upstream /allowed/python$'
+
+exec docker exec -u 1000 $LAB-workload node /work/probes/get.js https://upstream.test/allowed/node
+stdout '^200 hello from upstream /allowed/node$'
+
+exec docker exec -u 1000 $LAB-workload netfixture get https://upstream.test/allowed/go
+stdout '^200 hello from upstream /allowed/go$'
+
+# git speaks HTTPS to the upstream, which is not a git server. The upstream
+# prints the refusal, so the request crossed the proxy.
+! exec docker exec -u 1000 $LAB-workload git ls-remote https://upstream.test/allowed/git.git
+stderr 'not valid: is this a git repository'
+
+# The proxy refuses an uncovered path inside the tunnel. The workload reads
+# the reason over its TLS connection.
+exec docker exec -u 1000 $LAB-workload curl -sS -D - -o /dev/null https://upstream.test/denied/x
+stdout 'HTTP/1.1 403 Forbidden'
+stdout 'X-Keycard-Deny-Reason: no_matching_endpoint'
+
+# Must fail: a cleartext request on port 80 to the host and path the HTTPS
+# case allows. The endpoint list covers that host and port, so the connection
+# decision allows it. The cleartext rule refuses it after the frontend reads
+# the Host header and names the destination.
+exec docker exec -u 1000 $LAB-workload curl -sS -D - -o /dev/null http://upstream.test/allowed/x
+stdout 'HTTP/1.1 403 Forbidden'
+stdout 'X-Keycard-Deny-Reason: cleartext_not_forwarded'
+
+# Must fail: a UDP datagram to the upstream on port 443. The filter chain has
+# no accept for it, so the OUTPUT DROP makes the send fail.
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/udp.py $LAB_UPSTREAM4
+stdout '^udp EPERM$'
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/udp.py $LAB_UPSTREAM6
+stdout '^udp EPERM$'
+
+# Must fail: TCP on a port the capture and redirect do not cover, in either
+# address family. The SYN is dropped, so the connection never establishes.
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/tcp.py $LAB_UPSTREAM4 8443
+stdout '^tcp TIMEOUT$'
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/tcp.py $LAB_UPSTREAM6 8443
+stdout '^tcp TIMEOUT$'
+
+# An IPv6 connection on a captured port also reaches the proxy. The ip6tables
+# redirect sends it to the same listener. RFC 6066 section 3 forbids an IP
+# literal in server_name, so the client offers no server name and is refused.
+! exec docker exec -u 1000 $LAB-workload curl -sS -6 --max-time 20 https://[$LAB_UPSTREAM6]/allowed/x
+
+# Must fail: another container connects to the redirect port on the pod's
+# address. The listener binds loopback alone, so the kernel refuses it.
+exec docker exec $LAB-upstream netfixture dial $LAB_WORKLOAD4:1015
+stdout '^tcp REFUSED$'
+
+# Must fail: a DNAT in the pod sends outside traffic to the listener. The
+# kernel drops a packet to 127.0.0.0/8 that arrives on another interface
+# while route_localnet is 0, so the connection never establishes.
+exec docker exec $LAB-workload cat /proc/sys/net/ipv4/conf/all/route_localnet
+stdout '^0$'
+exec docker exec $LAB-workload iptables-legacy -t nat -I PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 127.0.0.1:1015
+exec docker exec $LAB-upstream netfixture dial $LAB_WORKLOAD4:8080
+stdout '^tcp TIMEOUT$'
+exec docker exec $LAB-workload iptables-legacy -t nat -D PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 127.0.0.1:1015
+
+# Must fail: the workload connects straight to the listener. Nothing
+# redirected it, so the recovered destination is the listener itself. The
+# proxy refuses it before reading from the connection.
+exec docker exec -u 1000 $LAB-workload netfixture dial 127.0.0.1:1015
+stdout '^tcp read EOF$'
+
+# Every decision has an audit record with the pre-redirect destination. That
+# field identifies a captured connection instead of a CONNECT tunnel.
+audit out/audit.jsonl scope=connection destination.host=upstream.test destination.port=443 destination.original_address=$LAB_UPSTREAM4:443 decision.verdict=allow decision.reason=endpoint_allowed
+audit out/audit.jsonl scope=request request.path=/allowed/curl destination.original_address=$LAB_UPSTREAM4:443 decision.reason=endpoint_allowed decision.endpoint=upstream.test:443/allowed/ outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/python decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/node decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/go decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/git.git/info/refs decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/denied/x decision.verdict=deny decision.reason=no_matching_endpoint
+audit out/audit.jsonl scope=connection destination.original_address=[$LAB_UPSTREAM6]:443 decision.verdict=deny decision.reason=no_sni
+audit out/audit.jsonl scope=connection destination.host=upstream.test destination.port=80 destination.original_address=$LAB_UPSTREAM4:80 decision.verdict=deny decision.reason=cleartext_not_forwarded
+audit out/audit.jsonl scope=connection destination.original_address=127.0.0.1:1015 decision.verdict=deny decision.reason=not_redirected
+audit -all out/audit.jsonl sandbox_id=transparent-capture
+
+# Dropped traffic never reached the proxy, so no record names an uncovered
+# port. The DNAT sent nothing to the proxy either.
+! audit out/audit.jsonl destination.port=8443
+! audit out/audit.jsonl destination.port=8080
+
+# The check reads the tables back instead of trusting that nothing changed.
+# A rule inserted into an owned chain is a rule this ruleset did not install.
+# These checks run last because the inserted rules open what the ruleset
+# closes until they are removed. --verify never writes or removes the receipt,
+# so it remains after a failed check.
+exec docker exec $LAB-workload iptables-legacy -I EGRESS_PROXY_FILTER_OUTPUT 1 -j ACCEPT
+! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
+stderr 'holds a rule this ruleset did not put there'
+exec docker exec $LAB-workload test -f /run/egress/netsetup.json
+exec docker exec $LAB-workload iptables-legacy -D EGRESS_PROXY_FILTER_OUTPUT -j ACCEPT
+
+# A rule ahead of the OUTPUT jump decides the packet first. Checking the jump
+# with -C cannot see that rule.
+exec docker exec $LAB-workload iptables-legacy -I OUTPUT 1 -j ACCEPT
+! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
+stderr 'the first rule in the OUTPUT chain in the filter table is not "-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT"'
+exec docker exec $LAB-workload iptables-legacy -D OUTPUT -j ACCEPT
+
+# With both rules gone, the check passes again. Each refusal above came from
+# the rule that case inserted.
+exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
+stdout '# ipv4 verified: '
+stdout '# ipv6 verified: '
+
+-- Dockerfile --
+FROM debian:bookworm-slim
+RUN apt-get -qq update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -qq install --no-install-recommends -y \
+      iptables ca-certificates curl git python3 python3-requests nodejs libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+COPY bin/ /usr/local/bin/
+# The proxy holds NET_BIND_SERVICE and no other capability. It can bind the
+# redirect port below 1024 as an unprivileged uid.
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/egress-proxy \
+ && mkdir -p /shared-ca \
+ && chown 1337:1337 /shared-ca
+
+-- config.yaml --
+version: 1
+sandbox:
+  id: transparent-capture
+listen:
+  connect: "127.0.0.1:3128"
+  transparent_port: 1015
+netsetup:
+  receipt: "/run/egress/netsetup.json"
+policy:
+  # The platform deny list covers the lab's private addresses. The config
+  # names these ranges as exceptions. Each run gets a subnet from these
+  # ranges, so runs on one host do not collide.
+  deny_list_exceptions: ["192.168.0.0/16", "fd00:e9::/32"]
+endpoints:
+  - host: upstream.test
+    path_prefix: /allowed/
+  # This endpoint on port 80 lets the connection decision allow cleartext.
+  # The cleartext rule then refuses it instead of the endpoint match.
+  - host: upstream.test
+    port: 80
+    path_prefix: /allowed/
+
+-- probes/bindport.py --
+# Bind the redirect port as the workload uid. The port is below 1024, so the
+# kernel refuses a process without CAP_NET_BIND_SERVICE.
+import socket
+
+sock = socket.socket()
+try:
+    sock.bind(("0.0.0.0", 1015))
+    print("bind OK")
+except PermissionError:
+    print("bind EACCES")
+except OSError as err:
+    print("bind", type(err).__name__)
+
+-- probes/setuid.py --
+# Call setuid to the proxy uid. A process that can do this puts its traffic in
+# the exclusion the nat and filter chains give the proxy.
+import os
+
+try:
+    os.setuid(1337)
+    print("setuid OK")
+except PermissionError:
+    print("setuid EPERM")
+
+-- probes/udp.py --
+# Send one UDP datagram to the upstream on port 443. The filter chain has no
+# accept for it, so the OUTPUT DROP makes the send fail.
+import socket
+import sys
+
+address = sys.argv[1]
+family = socket.AF_INET6 if ":" in address else socket.AF_INET
+sock = socket.socket(family, socket.SOCK_DGRAM)
+sock.settimeout(5)
+sock.connect((address, 443))
+try:
+    sock.send(b"probe")
+    print("udp SENT")
+except PermissionError:
+    print("udp EPERM")
+except OSError as err:
+    print("udp", type(err).__name__)
+
+-- probes/tcp.py --
+# Open a TCP connection to a port the capture and redirect do not cover. The
+# SYN reaches the terminal DROP, so the connection never establishes.
+import socket
+import sys
+
+address, port = sys.argv[1], int(sys.argv[2])
+family = socket.AF_INET6 if ":" in address else socket.AF_INET
+sock = socket.socket(family, socket.SOCK_STREAM)
+sock.settimeout(5)
+try:
+    sock.connect((address, port))
+    print("tcp CONNECTED")
+except socket.timeout:
+    print("tcp TIMEOUT")
+except PermissionError:
+    print("tcp EPERM")
+except OSError as err:
+    print("tcp", type(err).__name__)
+
+-- probes/get.py --
+# Make one request with python-requests and no proxy configured.
+import sys
+
+import requests
+
+response = requests.get(sys.argv[1], timeout=30)
+print(response.status_code, response.text, end="")
+
+-- probes/get.js --
+// Make one request with Node's built-in fetch and no proxy configured.
+const url = process.argv[2];
+fetch(url)
+  .then((response) => response.text().then((body) => {
+    process.stdout.write(`${response.status} ${body}`);
+  }))
+  .catch((err) => {
+    process.stdout.write(`fetch failed: ${err.cause ? err.cause.code : err.message}\n`);
+    process.exitCode = 1;
+  });

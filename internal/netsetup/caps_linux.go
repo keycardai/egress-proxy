@@ -125,6 +125,17 @@ func confirmDropped() error {
 	return nil
 }
 
+// HasNetAdmin reports whether this thread has CAP_NET_ADMIN in its effective
+// or permitted set. capset can raise a permitted capability into the
+// effective set, so either set means the thread holds it.
+func HasNetAdmin() (bool, error) {
+	caps, err := threadCapabilities()
+	if err != nil {
+		return false, err
+	}
+	return caps.Get(capability.EFFECTIVE, capNetAdmin) || caps.Get(capability.PERMITTED, capNetAdmin), nil
+}
+
 // ambientNetAdmin reports whether CAP_NET_ADMIN is in this thread's ambient
 // set, which an execve carries into the new program. PR_CAP_AMBIENT arrived
 // in Linux 4.3 and an older kernel answers EINVAL, where nothing is ambient.

@@ -79,11 +79,13 @@ func TestAcceptance(t *testing.T) {
 			"freeport":  cmdFreePort,
 			"shortdir":  cmdShortDir,
 			"waitfile":  cmdWaitFile,
+			"waitgrep":  cmdWaitGrep,
 			"waitport":  cmdWaitPort,
 			"sigterm":   cmdSigterm,
 			"audit":     cmdAudit,
 			"dockerlab": cmdDockerLab,
 			"linuxbin":  cmdLinuxBin,
+			"tlscert":   cmdTLSCert,
 		},
 	})
 }
@@ -354,6 +356,26 @@ func cmdWaitFile(ts *testscript.TestScript, neg bool, args []string) {
 	wait(ts, "file "+args[0], func() bool {
 		info, err := os.Stat(path)
 		return err == nil && info.Size() > 0
+	})
+}
+
+// cmdWaitGrep waits for a file to contain a line that matches a regular
+// expression.
+//
+//	waitgrep FILE PATTERN
+//
+// A container writes its log to a mounted directory. The script waits for
+// the process to announce that it reached a state.
+func cmdWaitGrep(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 2 {
+		ts.Fatalf("usage: waitgrep FILE PATTERN")
+	}
+	pattern, err := regexp.Compile(args[1])
+	ts.Check(err)
+	path := ts.MkAbs(args[0])
+	wait(ts, args[1]+" in "+args[0], func() bool {
+		body, readErr := os.ReadFile(path)
+		return readErr == nil && pattern.Match(body)
 	})
 }
 
