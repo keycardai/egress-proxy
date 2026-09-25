@@ -348,8 +348,10 @@ func TestAnIdleListenerHoldsNoSlot(t *testing.T) {
 				Handler: func(conn net.Conn, _ proxy.Redirected) { handed <- conn },
 			})
 			require.NoError(t, err, "build the frontend")
-			idle := listenOrSkip(t, tc.idle)
-			dialed := listenOrSkip(t, tc.dialed)
+			idle, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", tc.idle)
+			require.NoError(t, err, "listen on %s", tc.idle)
+			dialed, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", tc.dialed)
+			require.NoError(t, err, "listen on %s", tc.dialed)
 			waiting := &signalListener{Listener: idle, accepting: make(chan struct{}, 1)}
 			ctx, cancel := context.WithCancel(t.Context())
 			var group errgroup.Group
@@ -374,17 +376,6 @@ func TestAnIdleListenerHoldsNoSlot(t *testing.T) {
 				"the connection handled is the one made to the second listener")
 		})
 	}
-}
-
-// listenOrSkip binds a loopback address, and skips the test on a host that
-// lacks the address family.
-func listenOrSkip(t *testing.T, address string) net.Listener {
-	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", address)
-	if err != nil {
-		t.Skipf("cannot listen on %s: %v", address, err)
-	}
-	return listener
 }
 
 // signalListener reports each time Serve waits in Accept.

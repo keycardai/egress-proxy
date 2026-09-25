@@ -117,9 +117,7 @@ func networkOf(t *testing.T, listener net.Listener) string {
 func TestListenFailsWhenTheIPv6PortIsTaken(t *testing.T) {
 	t.Parallel()
 	holder, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp6", "[::]:0")
-	if err != nil {
-		t.Skipf("no IPv6 on this host: %v", err)
-	}
+	require.NoError(t, err, "hold the IPv6 wildcard port")
 	t.Cleanup(func() { _ = holder.Close() })
 	_, port, err := net.SplitHostPort(holder.Addr().String())
 	require.NoError(t, err)
