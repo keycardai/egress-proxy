@@ -100,7 +100,7 @@ type Document struct {
 	Credentials Credentials `json:"credentials"`
 	// Netsetup describes what the init container programmed into network
 	// firewall rules. The proxy reads it before serving a transparent frontend.
-	Netsetup Netsetup `json:"netsetup"`
+	Netsetup  Netsetup   `json:"netsetup"`
 	Policy    Policy     `json:"policy"`
 	Endpoints []Endpoint `json:"endpoints"`
 }
@@ -173,13 +173,14 @@ type Impersonate struct {
 type Listen struct {
 	// Connect is the CONNECT frontend, host:port.
 	Connect string `json:"connect"`
-	// Transparent is the host:port redirect target for captured TCP. An empty
-	// value disables the transparent frontend.
+	// TransparentPort is the redirect target for captured TCP. The frontend
+	// binds it on 127.0.0.1 and ::1 and no other address. Zero disables the
+	// transparent frontend.
 	//
 	// The port is below 1024, so an unprivileged workload cannot bind it during
 	// a sidecar restart and stand in for the proxy. The proxy holds
 	// NET_BIND_SERVICE and no other capability.
-	Transparent string `json:"transparent"`
+	TransparentPort int `json:"transparent_port"`
 	// CleartextPorts lists captured destination ports to read as cleartext
 	// HTTP. The destination comes from the Host header. Empty means port 80.
 	// Every other captured port is read as TLS.
@@ -328,7 +329,7 @@ type Overrides struct {
 	WorkloadTokenFile     string
 	ImpersonateUser       string
 	Connect               string
-	Transparent           string
+	TransparentPort       int
 	Admin                 string
 	NetsetupReceipt       string
 	CAOutDir              string
@@ -518,24 +519,6 @@ func (c *Config) UpstreamRoots() (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// TransparentPort is the port the transparent frontend binds. It is zero
-// when the configuration has no transparent frontend. The containment check
-// compares it with the receipt's redirect port.
-func (c *Config) TransparentPort() int {
-	if c.Listen.Transparent == "" {
-		return 0
-	}
-	_, portText, err := net.SplitHostPort(c.Listen.Transparent)
-	if err != nil {
-		return 0
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		return 0
-	}
-	return port
-}
-
 // digestDecisionInputs canonicalizes the decision inputs and hashes them.
 //
 // The digest is one way and this package exposes no reader for the input, so
@@ -551,7 +534,7 @@ func (c *Config) digestDecisionInputs() (string, error) {
 		CredentialSource:   credentialSource{Kind: c.CredentialSource(), StaticFile: c.Credentials.StaticFile},
 		DenyList:           policy.CompiledDigest(),
 	}
-	if c.Listen.Transparent != "" {
+	if c.Listen.TransparentPort != 0 {
 		inputs.CleartextPorts = sortedPorts(c.Listen.CleartextPorts)
 	}
 	encoded, err := json.Marshal(inputs)
@@ -642,7 +625,8 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("identity.impersonate.user", overrides.ImpersonateUser != "",
 		func() { c.Identity.Impersonate.User = overrides.ImpersonateUser })
 	override("listen.connect", overrides.Connect != "", func() { c.Listen.Connect = overrides.Connect })
-	override("listen.transparent", overrides.Transparent != "", func() { c.Listen.Transparent = overrides.Transparent })
+	override("listen.transparent_port", overrides.TransparentPort != 0,
+		func() { c.Listen.TransparentPort = overrides.TransparentPort })
 	override("listen.admin", overrides.Admin != "", func() { c.Listen.Admin = overrides.Admin })
 	override("netsetup.receipt", overrides.NetsetupReceipt != "",
 		func() { c.Netsetup.Receipt = overrides.NetsetupReceipt })
@@ -983,30 +967,15 @@ func (c *Config) validateTransparent(found *problems) {
 			found.addf("listen.cleartext_ports[%d] is %d, outside 1-%d", i, port, maxPort)
 		}
 	}
-	if c.Listen.Transparent == "" {
+	if c.Listen.TransparentPort == 0 {
 		return
 	}
-	validateTransparentAddress(c.Listen.Transparent, found)
+	if c.Listen.TransparentPort < 0 || c.Listen.TransparentPort > maxPort {
+		found.addf("listen.transparent_port is %d, outside 1-%d", c.Listen.TransparentPort, maxPort)
+	}
 	if !filepath.IsAbs(c.Netsetup.Receipt) {
 		found.addf("netsetup.receipt %q must be an absolute path. The transparent frontend starts only after "+
 			"the receipt shows the rules redirect to it", c.Netsetup.Receipt)
-	}
-}
-
-// validateTransparentAddress checks that listen.transparent is host:port with
-// an empty or IP host. Host names are not allowed here.
-func validateTransparentAddress(address string, found *problems) {
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		found.addf("listen.transparent %q is not host:port: %v", address, err)
-		return
-	}
-	if _, parseErr := netip.ParseAddr(host); host != "" && parseErr != nil {
-		found.addf("listen.transparent %q: the host must be empty or an IP address, not a name", address)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > maxPort {
-		found.addf("listen.transparent %q does not name a port in 1-%d", address, maxPort)
 	}
 }
 

@@ -6,7 +6,7 @@
 // line says:
 //
 //	netfixture serve tcp:PORT|udp:PORT...  answer "upstream PORT" on each port
-//	netfixture capture ADDRESS             answer "captured ORIGINAL" for each redirected connection
+//	netfixture capture PORT                answer "captured ORIGINAL" for each redirected connection
 //	netfixture dial HOST:PORT              print the first line a TCP peer sends
 //	netfixture udp HOST:PORT               send one datagram and print the reply
 //	netfixture ping HOST                   send one ICMP echo request and print the result
@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -64,7 +65,7 @@ const (
 	readHeaderTimeout = 10 * time.Second
 )
 
-var errUsage = errors.New("usage: netfixture serve SPEC... | capture ADDRESS | dial ADDRESS | " +
+var errUsage = errors.New("usage: netfixture serve SPEC... | capture PORT | dial ADDRESS | " +
 	"udp ADDRESS | ping HOST | ndp HOST | https ADDRESS CERT KEY | get URL")
 
 func main() {
@@ -140,9 +141,14 @@ func serve(specs []string) error {
 }
 
 // capture answers each connection a REDIRECT sent it with the destination
-// the connection was opened to.
-func capture(address string) error {
-	listeners, err := transparent.Listen(context.Background(), address)
+// the connection was opened to. It binds the port on loopback, as the proxy
+// does.
+func capture(portText string) error {
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return errUsage
+	}
+	listeners, err := transparent.Listen(context.Background(), port)
 	if err != nil {
 		return err //nolint:wrapcheck // the command prints it as it is
 	}

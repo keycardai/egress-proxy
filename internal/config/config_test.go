@@ -28,8 +28,8 @@ func TestParseAppliesDefaults(t *testing.T) {
 	}{
 		{"listen.connect", cfg.Listen.Connect, "127.0.0.1:3128"},
 		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin.sock"},
-		// An empty value disables the transparent frontend.
-		{"listen.transparent", cfg.Listen.Transparent, ""},
+		// Zero disables the transparent frontend.
+		{"listen.transparent_port", cfg.Listen.TransparentPort, 0},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
 		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup.json"},
 		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca"},
@@ -124,7 +124,7 @@ const identityDoc = "identity:\n  zone_url: https://z\n  client_id: c\n  workloa
 
 // transparentDoc returns a listen section with a transparent frontend. A
 // case appends its own cleartext_ports field.
-const transparentDoc = "listen:\n  transparent: \"0.0.0.0:1015\"\n"
+const transparentDoc = "listen:\n  transparent_port: 1015\n"
 
 // twoEndpointsReversed lists the endpoints of minimal plus
 // files.pythonhosted.org in the opposite document order.
@@ -219,9 +219,9 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			wantSame: true,
 		},
 		{
-			name:     "the transparent frontend on another address",
+			name:     "the transparent frontend on another port",
 			doc:      minimal + identityDoc + transparentDoc,
-			against:  minimal + identityDoc + "listen:\n  transparent: \"127.0.0.1:1015\"\n",
+			against:  minimal + identityDoc + "listen:\n  transparent_port: 1016\n",
 			wantSame: true,
 		},
 		{
@@ -427,18 +427,21 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		},
 		{name: "relative admin socket", doc: minimal + "listen:\n  admin: admin.sock\n", wantErr: "listen.admin"},
 		{
-			name: "transparent without a port",
-			doc:  minimal + "listen:\n  transparent: \"0.0.0.0\"\n", wantErr: "listen.transparent",
+			name:    "a transparent port above 65535",
+			doc:     minimal + "listen:\n  transparent_port: 99999\n",
+			wantErr: "listen.transparent_port is 99999, outside 1-65535",
 		},
 		{
-			name:    "transparent naming a host rather than an address",
-			doc:     minimal + "listen:\n  transparent: \"localhost:1015\"\n",
-			wantErr: "the host must be empty or an IP address, not a name",
+			name:    "a negative transparent port",
+			doc:     minimal + "listen:\n  transparent_port: -1\n",
+			wantErr: "listen.transparent_port is -1, outside 1-65535",
 		},
 		{
-			name:    "transparent naming a port outside 1-65535",
-			doc:     minimal + "listen:\n  transparent: \"0.0.0.0:0\"\n",
-			wantErr: "does not name a port in 1-65535",
+			// The frontend binds loopback alone, so the document names no
+			// address for it.
+			name:    "a transparent address",
+			doc:     minimal + "listen:\n  transparent: \"0.0.0.0:1015\"\n",
+			wantErr: `unknown field "transparent"`,
 		},
 		{
 			name: "a cleartext port outside 1-65535",
@@ -446,7 +449,7 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		},
 		{
 			name:    "a transparent frontend with a relative receipt path",
-			doc:     minimal + "listen:\n  transparent: \"0.0.0.0:1015\"\nnetsetup:\n  receipt: netsetup.json\n",
+			doc:     minimal + "listen:\n  transparent_port: 1015\nnetsetup:\n  receipt: netsetup.json\n",
 			wantErr: "netsetup.receipt",
 		},
 		{name: "connect without a port", doc: minimal + "listen:\n  connect: 127.0.0.1\n", wantErr: "listen.connect"},

@@ -45,7 +45,7 @@ type Receipt struct {
 	// redirected into its own listener.
 	ProxyUID int `json:"proxy_uid"`
 	// RedirectPort is where the nat REDIRECT sends captured traffic. It must
-	// be the port listen.transparent binds.
+	// be listen.transparent_port.
 	RedirectPort int `json:"redirect_port"`
 	// RedirectPortProtection is the --redirect-port-protection mode the run
 	// used. A receipt without it says nothing about whether the port was

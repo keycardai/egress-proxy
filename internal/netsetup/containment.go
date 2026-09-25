@@ -153,8 +153,8 @@ func Containment(request ContainmentRequest) (Receipt, error) {
 			receipt.ProxyUID, request.UID, receipt.ProxyUID, request.UID)
 	}
 	if receipt.RedirectPort != request.TransparentPort {
-		found.addf("the redirect sends captured traffic to port %d and listen.transparent binds port %d, so "+
-			"nothing would arrive on this listener. Set listen.transparent to :%d, or program the rules with "+
+		found.addf("the redirect sends captured traffic to port %d and listen.transparent_port is %d, so "+
+			"nothing would arrive on this listener. Set listen.transparent_port to %d, or program the rules with "+
 			"--redirect-port %d",
 			receipt.RedirectPort, request.TransparentPort, receipt.RedirectPort, request.TransparentPort)
 	}

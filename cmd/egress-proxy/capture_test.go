@@ -51,12 +51,12 @@ func TestCapture(t *testing.T) {
 		},
 		{
 			name:    "a transparent frontend with no receipt",
-			listen:  "listen:\n  transparent: \"0.0.0.0:1015\"\n",
+			listen:  "listen:\n  transparent_port: 1015\n",
 			wantErr: netsetup.ErrNoReceipt,
 		},
 		{
 			name:    "a transparent frontend under a receipt that matches it",
-			listen:  "listen:\n  transparent: \"0.0.0.0:1015\"\n",
+			listen:  "listen:\n  transparent_port: 1015\n",
 			receipt: func(*netsetup.Receipt) {},
 			wantLog: []string{
 				`"msg":"transparent network capture enabled"`, `"redirect_port":1015`, `"capture_ports":[80,443]`,
@@ -65,19 +65,19 @@ func TestCapture(t *testing.T) {
 		},
 		{
 			name:    "a cleartext port outside of the network capture and transparent redirect",
-			listen:  "listen:\n  transparent: \"0.0.0.0:1015\"\n  cleartext_ports: [80, 8080]\n",
+			listen:  "listen:\n  transparent_port: 1015\n  cleartext_ports: [80, 8080]\n",
 			receipt: func(*netsetup.Receipt) {},
 			wantLog: []string{`names a port outside of the network capture and transparent redirect`, `"port":8080`},
 		},
 		{
 			name:    "a receipt whose rules exclude the wrong uid",
-			listen:  "listen:\n  transparent: \"0.0.0.0:1015\"\n",
+			listen:  "listen:\n  transparent_port: 1015\n",
 			receipt: func(r *netsetup.Receipt) { r.ProxyUID = uid + 1 },
 			wantErr: netsetup.ErrNotContained,
 		},
 		{
 			name:    "a receipt written in another network namespace",
-			listen:  "listen:\n  transparent: \"0.0.0.0:1015\"\n",
+			listen:  "listen:\n  transparent_port: 1015\n",
 			receipt: func(r *netsetup.Receipt) { r.NetNamespace = &netsetup.NetNamespace{Device: 1, Inode: 1} },
 			wantErr: netsetup.ErrNotContained,
 		},
@@ -110,7 +110,7 @@ func TestCapture(t *testing.T) {
 				PortStart: func() (int, error) { return 1024, nil },
 			})
 			wantErr := tc.wantErr
-			if !transparent.Supported && cfg.Listen.Transparent != "" {
+			if !transparent.Supported && cfg.Listen.TransparentPort != 0 {
 				wantErr = transparent.ErrNotSupported
 			}
 			if wantErr != nil {
@@ -119,7 +119,7 @@ func TestCapture(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "the check passes")
-			assert.Equal(t, cfg.Listen.Transparent != "", frontend != nil, "a frontend exactly when one is configured")
+			assert.Equal(t, cfg.Listen.TransparentPort != 0, frontend != nil, "a frontend exactly when one is configured")
 			for _, want := range tc.wantLog {
 				assert.Contains(t, logs.String(), want, "the start-up log")
 			}

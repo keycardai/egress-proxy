@@ -72,12 +72,12 @@ func TestContainment(t *testing.T) {
 		{
 			name: "a transparent listener on a port the redirect does not target",
 			ask:  func(q *netsetup.ContainmentRequest) { q.TransparentPort = 15001 },
-			want: []string{"sends captured traffic to port 1015 and listen.transparent binds port 15001"},
+			want: []string{"sends captured traffic to port 1015 and listen.transparent_port is 15001"},
 		},
 		{
 			name: "a sidecar with no transparent listener under a redirect that targets one",
 			ask:  func(q *netsetup.ContainmentRequest) { q.TransparentPort = 0 },
-			want: []string{"listen.transparent binds port 0"},
+			want: []string{"listen.transparent_port is 0"},
 		},
 		{
 			name: "a receipt naming no address family",

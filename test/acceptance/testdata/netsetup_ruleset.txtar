@@ -76,7 +76,7 @@ stdout '"families": \[\s*"ipv4",\s*"ipv6"\s*\]'
 exec docker exec $LAB-workload sh -c 'grep -q "\"device\": $(stat -L -c %d /proc/self/ns/net),$" /run/egress/netsetup.json && grep -q "\"inode\": $(stat -L -c %i /proc/self/ns/net)$" /run/egress/netsetup.json && echo same namespace'
 stdout '^same namespace$'
 
-exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture :1015
+exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture 1015
 exec docker exec -u 1337 $LAB-workload netfixture dial 127.0.0.1:1015
 stdout '^captured 127.0.0.1:1015$'
 

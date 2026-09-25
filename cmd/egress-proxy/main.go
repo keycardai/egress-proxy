@@ -63,7 +63,7 @@ type flags struct {
 	workloadTokenFile     string
 	impersonateUser       string
 	connect               string
-	transparent           string
+	transparentPort       int
 	admin                 string
 	netsetupReceipt       string
 	caOutDir              string
@@ -88,7 +88,7 @@ func (f flags) overrides() config.Overrides {
 		WorkloadTokenFile:     f.workloadTokenFile,
 		ImpersonateUser:       f.impersonateUser,
 		Connect:               f.connect,
-		Transparent:           f.transparent,
+		TransparentPort:       f.transparentPort,
 		Admin:                 f.admin,
 		NetsetupReceipt:       f.netsetupReceipt,
 		CAOutDir:              f.caOutDir,
@@ -170,9 +170,11 @@ func listenFlags(opts *flags) []cli.Flag {
 			"address of the CONNECT frontend, host:port (listen.connect)",
 			false,
 		),
-		stringFlag("transparent", "TRANSPARENT", &opts.transparent,
-			"address of the transparent frontend the netsetup rules redirect to, host:port "+
-				"(listen.transparent); empty runs none", false),
+		&cli.IntFlag{
+			Name: "transparent-port", Destination: &opts.transparentPort, Sources: env("TRANSPARENT_PORT"),
+			Usage: "port the netsetup rules redirect to, bound on 127.0.0.1 and ::1 " +
+				"(listen.transparent_port); 0 runs no transparent frontend",
+		},
 		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)", false),
 		stringFlag("netsetup-receipt", "NETSETUP_RECEIPT", &opts.netsetupReceipt,
 			"file the init container recorded what it programmed in (netsetup.receipt)", false),
@@ -416,7 +418,7 @@ func (p *process) info() any {
 
 // capture builds the transparent frontend after the receipt shows that the
 // rules redirect to it and that this process cannot change them. A
-// configuration without listen.transparent does not run capture frontends.
+// configuration without listen.transparent_port does not run capture frontends.
 //
 // The check runs before any listener is bound, so a sidecar that fails the
 // check never services any request. The probes supply capability, sysctl,
@@ -425,16 +427,16 @@ func (p *process) info() any {
 func capture(
 	cfg *config.Config, server *proxy.Server, logger *slog.Logger, probes netsetup.ContainmentRequest,
 ) (*transparent.Frontend, error) {
-	if cfg.Listen.Transparent == "" {
+	if cfg.Listen.TransparentPort == 0 {
 		return nil, nil //nolint:nilnil // no transparent frontend is valid, not an error
 	}
 	if !transparent.Supported {
-		return nil, fmt.Errorf("%w: listen.transparent is set and this platform has no SO_ORIGINAL_DST",
+		return nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
 			transparent.ErrNotSupported)
 	}
 	request := probes
 	request.Path = cfg.Netsetup.Receipt
-	request.TransparentPort = cfg.TransparentPort()
+	request.TransparentPort = cfg.Listen.TransparentPort
 	request.UID = os.Getuid()
 	receipt, err := netsetup.Containment(request)
 	if err != nil {
@@ -531,19 +533,20 @@ func version() string {
 	return info.Main.Version
 }
 
-// captureListeners binds one transparent frontend socket per address family.
-// It returns no listeners when no transparent frontend is configured.
+// captureListeners binds one transparent frontend socket per address family,
+// on loopback. It returns no listeners when no transparent frontend is
+// configured.
 func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
 	if p.transparent == nil {
 		return nil, nil
 	}
-	listeners, err := transparent.Listen(ctx, p.cfg.Listen.Transparent)
+	listeners, err := transparent.Listen(ctx, p.cfg.Listen.TransparentPort)
 	if errors.Is(err, syscall.EACCES) {
 		return nil, fmt.Errorf("transparent frontend: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
 			"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
 			"grants only from the bounding set and, under no_new_privs, only when the process that ran this binary "+
 			"held it. Give the sidecar capabilities.add NET_BIND_SERVICE and make this binary the container "+
-			"entrypoint", err, p.cfg.TransparentPort())
+			"entrypoint", err, p.cfg.Listen.TransparentPort)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("transparent frontend: %w", err)

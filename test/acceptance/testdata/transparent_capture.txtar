@@ -9,8 +9,8 @@
 # These attempts must fail: a direct UDP datagram on port 443, a TCP
 # connection on an uncovered port in either address family, a setuid to the
 # proxy uid, a bind of the redirect port, a cleartext request to an endpoint
-# on port 80, and a connection from another container to the transparent
-# listener.
+# on port 80, a connection from another container to the redirect port, and
+# outside traffic a DNAT in the pod sends to the listener.
 #
 # The container sets net.ipv4.ip_unprivileged_port_start to 1024, as the pod
 # does in securityContext.sysctls. Docker and containerd 2.0 set it to 0 by
@@ -87,13 +87,13 @@ stderr 'the init container and the sidecar are not in the same pod network'
 # holds none, so the file capability grants nothing and the bind fails. The
 # refusal names the capability the sidecar needs.
 ! exec docker exec -u 1337 $LAB-workload setpriv --no-new-privs egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca-nnp --admin /tmp/admin-nnp/admin.sock
-stderr 'listen tcp4 0.0.0.0:1015: bind: permission denied'
+stderr 'listen tcp4 127.0.0.1:1015: bind: permission denied'
 stderr 'capabilities.add NET_BIND_SERVICE and make this binary the container entrypoint'
 
 exec docker exec -d -u 1337 $LAB-workload sh -c '/usr/local/bin/egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /shared-ca >/out/audit.jsonl 2>/out/proxy.log'
 waitgrep out/proxy.log 'capturing redirected connections'
 grep '"msg":"transparent network capture enabled".*"proxy_uid":1337.*"redirect_port":1015' out/proxy.log
-grep '"transparent":"0.0.0.0:1015,\[::\]:1015"' out/proxy.log
+grep '"transparent":"127.0.0.1:1015,\[::1\]:1015"' out/proxy.log
 
 # Five clients reach the upstream without a proxy variable.
 exec docker exec -u 1000 $LAB-workload curl -sS https://upstream.test/allowed/curl
@@ -146,10 +146,25 @@ stdout '^tcp TIMEOUT$'
 # literal in server_name, so the client offers no server name and is refused.
 ! exec docker exec -u 1000 $LAB-workload curl -sS -6 --max-time 20 https://[$LAB_UPSTREAM6]/allowed/x
 
-# Must fail: another container connects straight to the transparent listener.
-# Nothing redirected it, so the recovered destination is the listener itself.
-# The proxy refuses it before reading from the connection.
+# Must fail: another container connects to the redirect port on the pod's
+# address. The listener binds loopback alone, so the kernel refuses it.
 exec docker exec $LAB-upstream netfixture dial $LAB_WORKLOAD4:1015
+stdout '^tcp REFUSED$'
+
+# Must fail: a DNAT in the pod sends outside traffic to the listener. The
+# kernel drops a packet to 127.0.0.0/8 that arrives on another interface
+# while route_localnet is 0, so the connection never establishes.
+exec docker exec $LAB-workload cat /proc/sys/net/ipv4/conf/all/route_localnet
+stdout '^0$'
+exec docker exec $LAB-workload iptables-legacy -t nat -I PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 127.0.0.1:1015
+exec docker exec $LAB-upstream netfixture dial $LAB_WORKLOAD4:8080
+stdout '^tcp TIMEOUT$'
+exec docker exec $LAB-workload iptables-legacy -t nat -D PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 127.0.0.1:1015
+
+# Must fail: the workload connects straight to the listener. Nothing
+# redirected it, so the recovered destination is the listener itself. The
+# proxy refuses it before reading from the connection.
+exec docker exec -u 1000 $LAB-workload netfixture dial 127.0.0.1:1015
 stdout '^tcp read EOF$'
 
 # Every decision has an audit record with the pre-redirect destination. That
@@ -163,12 +178,13 @@ audit out/audit.jsonl scope=request request.path=/allowed/git.git/info/refs deci
 audit out/audit.jsonl scope=request request.path=/denied/x decision.verdict=deny decision.reason=no_matching_endpoint
 audit out/audit.jsonl scope=connection destination.original_address=[$LAB_UPSTREAM6]:443 decision.verdict=deny decision.reason=no_sni
 audit out/audit.jsonl scope=connection destination.host=upstream.test destination.port=80 destination.original_address=$LAB_UPSTREAM4:80 decision.verdict=deny decision.reason=cleartext_not_forwarded
-audit out/audit.jsonl scope=connection destination.original_address=$LAB_WORKLOAD4:1015 decision.verdict=deny decision.reason=not_redirected
+audit out/audit.jsonl scope=connection destination.original_address=127.0.0.1:1015 decision.verdict=deny decision.reason=not_redirected
 audit -all out/audit.jsonl sandbox_id=transparent-capture
 
 # Dropped traffic never reached the proxy, so no record names an uncovered
-# port.
+# port. The DNAT sent nothing to the proxy either.
 ! audit out/audit.jsonl destination.port=8443
+! audit out/audit.jsonl destination.port=8080
 
 # The check reads the tables back instead of trusting that nothing changed.
 # A rule inserted into an owned chain is a rule this ruleset did not install.
@@ -213,7 +229,7 @@ sandbox:
   id: transparent-capture
 listen:
   connect: "127.0.0.1:3128"
-  transparent: "0.0.0.0:1015"
+  transparent_port: 1015
   admin: "/run/egress-admin/admin.sock"
 netsetup:
   receipt: "/run/egress/netsetup.json"

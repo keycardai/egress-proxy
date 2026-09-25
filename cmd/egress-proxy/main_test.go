@@ -25,7 +25,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		"WORKLOAD_TOKEN_FILE":     "/env/token",
 		"IMPERSONATE_USER":        "env-user",
 		"CONNECT":                 "127.0.0.1:1",
-		"TRANSPARENT":             "0.0.0.0:1015",
+		"TRANSPARENT_PORT":        "1015",
 		"ADMIN":                   "/env/admin.sock",
 		"NETSETUP_RECEIPT":        "/env/netsetup.json",
 		"CA_OUT_DIR":              "/env/ca",
@@ -54,7 +54,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		SandboxID: "sbx-env", ZoneURL: "https://env.example", ClientID: "env-client",
 		WorkloadTokenFile: "/env/token", ImpersonateUser: "env-user",
 		// The flag wins over EGRESS_PROXY_CONNECT.
-		Connect: "127.0.0.1:2", Transparent: "0.0.0.0:1015", Admin: "/env/admin.sock",
+		Connect: "127.0.0.1:2", TransparentPort: 1015, Admin: "/env/admin.sock",
 		NetsetupReceipt: "/env/netsetup.json", CAOutDir: "/env/ca", CAStateDir: "/env/state",
 		ClientSecretFile:     "/env/client-secret",
 		CredentialStaticFile: "/env/credentials.yaml",

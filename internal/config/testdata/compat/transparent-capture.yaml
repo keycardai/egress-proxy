@@ -6,7 +6,7 @@ sandbox:
   id: sbx-transparent
 listen:
   connect: "127.0.0.1:3128"
-  transparent: "0.0.0.0:1015"
+  transparent_port: 1015
   cleartext_ports: [80, 8080]
   admin: "/run/egress/admin.sock"
 netsetup:
