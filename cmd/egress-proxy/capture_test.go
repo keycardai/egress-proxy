@@ -26,9 +26,8 @@ import (
 func TestCapture(t *testing.T) {
 	t.Parallel()
 	uid := os.Getuid()
-	if uid == 0 {
-		t.Skip("the check refuses a ruleset that exempts uid 0, and this test runs as root")
-	}
+	require.NotZero(t, uid, "do not run the tests as root. The check refuses a ruleset that exempts uid 0, "+
+		"so this test cannot pass as root")
 	tests := []struct {
 		name string
 		// listen is the listen section of the document.
