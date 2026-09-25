@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -15,6 +16,31 @@ import (
 // ever shortens a deadline, so a shorter one from a layer above survives.
 func limitListener(listener net.Listener, maxConnections int, timeout time.Duration) net.Listener {
 	return netutil.LimitListener(&idleListener{Listener: listener, timeout: timeout}, maxConnections)
+}
+
+// CloseWriter is a connection that can shut down its writing side on its
+// own, telling the peer this side has finished. Half-closing before a close
+// keeps a final write from being lost to the RST that a close with unread
+// data in the receive buffer sends.
+//
+// *net.TCPConn is one. net.Conn is not, so a wrapper that embeds net.Conn
+// hides the half-close underneath it. EVERY wrapper in the chain forwards
+// CloseWrite explicitly, and asserts at compile time that it does. A
+// wrapper that forgets fails the type assertion at run time and silently
+// skips the half-close.
+type CloseWriter interface {
+	CloseWrite() error
+}
+
+var _ CloseWriter = (*idleConn)(nil)
+
+// IdleConn gives a connection the same idle bound the CONNECT frontend
+// applies to its own. The transparent frontend wraps each connection with
+// it after it has read the original destination off the socket, because a
+// wrapper with no way back to the TCP connection hides the getsockopt that
+// reads it.
+func IdleConn(conn net.Conn, timeout time.Duration) net.Conn {
+	return &idleConn{Conn: conn, timeout: timeout}
 }
 
 type idleListener struct {
@@ -60,6 +86,17 @@ func (c *idleConn) Write(p []byte) (int, error) {
 
 func (c *idleConn) SetDeadline(t time.Time) error {
 	return errors.Join(c.SetReadDeadline(t), c.SetWriteDeadline(t))
+}
+
+// CloseWrite half-closes the connection, telling the peer this side has
+// finished writing. A connection with no half-close, such as a pipe,
+// reports errors.ErrUnsupported.
+func (c *idleConn) CloseWrite() error {
+	closer, ok := c.Conn.(CloseWriter)
+	if !ok {
+		return fmt.Errorf("%w: %T has no CloseWrite", errors.ErrUnsupported, c.Conn)
+	}
+	return closer.CloseWrite() //nolint:wrapcheck // net.Conn errors are read by type
 }
 
 func (c *idleConn) SetReadDeadline(t time.Time) error {

@@ -69,6 +69,12 @@ type Destination struct {
 	Host string `json:"host"`
 	Port int    `json:"port,omitempty"`
 	SNI  string `json:"sni,omitempty"`
+	// OriginalAddress is the address the client opened the connection to,
+	// before the redirect rewrote it, as "address:port". The transparent
+	// frontend recovers it and the proxy records it without dialling it. It
+	// is absent on a CONNECT tunnel, so its presence says the connection was
+	// captured rather than proxied by configuration.
+	OriginalAddress string `json:"original_address,omitempty"`
 }
 
 // RequestInfo is the request line, without the query.

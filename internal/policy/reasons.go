@@ -37,8 +37,21 @@ const (
 	// authority.
 	ReasonHostMismatch Reason = "host_mismatch"
 	// ReasonNoSNI means the TLS handshake named no server. The proxy cannot
-	// evaluate a host-scoped policy without a host.
+	// evaluate a host-scoped policy without a host. A redirected connection
+	// opened straight to an address carries no server name either, because
+	// RFC 6066 section 3 forbids an IP literal there.
 	ReasonNoSNI Reason = "no_sni"
+	// ReasonCleartextNotForwarded means the connection carries cleartext
+	// HTTP. The proxy forwards nothing cleartext, whatever the endpoint
+	// list says, so the destination is unreachable until the client speaks
+	// HTTPS. A deny-list hit keeps its own reason, because that answer is
+	// more specific.
+	ReasonCleartextNotForwarded Reason = "cleartext_not_forwarded"
+	// ReasonNotRedirected means the destination recovered from a connection
+	// on the transparent listener is that listener's own address. The
+	// connection was opened to the proxy rather than redirected into it, so
+	// there is no destination to decide.
+	ReasonNotRedirected Reason = "not_redirected"
 	// ReasonMalformedRequest means the proxy cannot reduce the request to a
 	// host and an absolute, normalized path.
 	ReasonMalformedRequest Reason = "malformed_request"
