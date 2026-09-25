@@ -1,0 +1,221 @@
+# The netsetup ruleset in a real kernel. Two containers share a Docker
+# network: the upstream answers on TCP 53, 80, 443 and 8443 and on UDP 53
+# and 443, and the other is the pod. In the pod, egress-netsetup programs
+# both address families as root. netfixture stands in for the sidecar: it
+# runs as the proxy uid 1337 on the redirect port and answers each
+# connection with the destination the redirect preserved. The workload runs
+# as uid 1000.
+#
+# The host kernel must have the legacy filter and nat tables of both
+# families loaded. A container cannot load them.
+#
+# Each packet class the ruleset names is probed, and each probe the ruleset
+# must refuse is paired with the same probe from a uid it allows. The pair
+# shows the refusal comes from the rules and not from the network.
+
+[!docker] skip 'the Docker daemon is not available'
+
+dockerlab
+linuxbin bin
+exec docker build -q -t $LAB_IMAGE -f Dockerfile $WORK
+
+exec docker run -d --name $LAB-upstream --network $LAB --ip $LAB_UPSTREAM4 --ip6 $LAB_UPSTREAM6 $LAB_IMAGE netfixture serve tcp:53 tcp:80 tcp:443 tcp:8443 udp:53 udp:443
+exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6 $LAB_WORKLOAD6 --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=0 $LAB_IMAGE sleep 600
+! exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4
+stderr 'redirect port 1015 must be below net.ipv4.ip_unprivileged_port_start=0'
+! exec docker exec $LAB-workload test -e /run/egress/netsetup.json
+! exec docker exec $LAB-workload iptables-legacy -S EGRESS_PROXY_FILTER_OUTPUT
+exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4 --redirect-port-protection allow-unprotected
+stdout 'WARNING: redirect-port protection is waived'
+exec docker exec $LAB-workload cat /run/egress/netsetup.json
+stdout '"redirect_port_protection": "allow-unprotected"'
+stdout '"verified": true'
+exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4 --redirect-port-protection allow-unprotected --verify
+stdout 'WARNING: redirect-port protection is waived'
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:8443
+stdout '^tcp TIMEOUT$'
+exec docker rm -f $LAB-workload
+
+exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6 $LAB_WORKLOAD6 --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=1024 --sysctl 'net.ipv4.ping_group_range=0 2147483647' $LAB_IMAGE sleep 600
+! exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4 --redirect-port 1024
+stderr 'redirect port 1024 must be below net.ipv4.ip_unprivileged_port_start=1024'
+! exec docker exec $LAB-workload test -e /run/egress/netsetup.json
+! exec docker exec -u 1000 $LAB-workload timeout 5 netfixture serve tcp:1015
+stderr 'bind: permission denied'
+
+# Before the rules, the workload reaches the upstream on every protocol the
+# ruleset later drops. No IPv6 packet goes to the upstream here, so the
+# first one after the rules needs neighbour discovery.
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:8443
+stdout '^upstream 8443$'
+exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_UPSTREAM4:443
+stdout '^udp REPLY upstream 443$'
+exec docker exec -u 1000 $LAB-workload netfixture ping $LAB_UPSTREAM4
+stdout '^ping REPLY$'
+
+# A workload listener, which the upstream connects to once the rules are in.
+exec docker exec -d -u 1000 $LAB-workload netfixture serve tcp:9000
+
+# The init container loads each family with one iptables-restore run, reads
+# every rule back, drops NET_ADMIN and writes the receipt.
+exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4
+stdout '^# ipv4: /usr/sbin/iptables-legacy \(iptables v[0-9.]+ \(legacy\)\), /usr/sbin/iptables-legacy-restore$'
+stdout '^# ipv6: /usr/sbin/ip6tables-legacy \(ip6tables v[0-9.]+ \(legacy\)\), /usr/sbin/ip6tables-legacy-restore$'
+stdout -count=2 '^-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT$'
+stdout '^# ipv4 verified: '
+stdout '^# ipv6 verified: '
+stdout '^# CAP_NET_ADMIN dropped from every capability set on this thread, no_new_privs set$'
+exec docker exec $LAB-workload cat /run/egress/netsetup.json
+stdout '"verified": true'
+stdout '"capabilities_dropped": true'
+stdout '"redirect_port_protection": "required"'
+stdout '"families": \[\s*"ipv4",\s*"ipv6"\s*\]'
+
+exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture :1015
+exec docker exec -u 1337 $LAB-workload netfixture dial 127.0.0.1:1015
+stdout '^captured 127.0.0.1:1015$'
+
+# The proxy uid is exempt from both chains. Its first IPv6 connection
+# needs the upstream's link-layer address, which the kernel asks for with
+# neighbour discovery, so the connection also proves the ICMPv6 accepts.
+exec docker exec -u 1337 $LAB-workload netfixture dial [$LAB_UPSTREAM6]:8443
+stdout '^upstream 8443$'
+
+# Must fail: a neighbour solicitation from a raw socket. The container runs
+# it as root with Docker's default CAP_NET_RAW. The ICMPv6 accepts take only
+# what the kernel sends.
+exec docker exec $LAB-workload netfixture ndp $LAB_UPSTREAM6
+stdout '^ndp EPERM$'
+exec docker exec -u 1337 $LAB-workload netfixture dial $LAB_UPSTREAM4:8443
+stdout '^upstream 8443$'
+exec docker exec -u 1337 $LAB-workload netfixture dial $LAB_UPSTREAM4:443
+stdout '^upstream 443$'
+exec docker exec -u 1337 $LAB-workload netfixture udp $LAB_UPSTREAM4:443
+stdout '^udp REPLY upstream 443$'
+exec docker exec -u 1337 $LAB-workload netfixture ping $LAB_UPSTREAM4
+stdout '^ping REPLY$'
+
+# TCP on a capture port reaches the stand-in proxy, which reads the
+# destination the workload asked for.
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:443
+stdout '^captured '$LAB_UPSTREAM4':443$'
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:80
+stdout '^captured '$LAB_UPSTREAM4':80$'
+exec docker exec -u 1000 $LAB-workload netfixture dial [$LAB_UPSTREAM6]:443
+stdout '^captured \['$LAB_UPSTREAM6'\]:443$'
+
+# Must fail: TCP on a port the redirect does not cover. The SYN is dropped.
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:8443
+stdout '^tcp TIMEOUT$'
+exec docker exec -u 1000 $LAB-workload netfixture dial [$LAB_UPSTREAM6]:8443
+stdout '^tcp TIMEOUT$'
+
+# Must fail: UDP, which includes QUIC on 443. A DROP in OUTPUT fails the
+# send.
+exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_UPSTREAM4:443
+stdout '^udp EPERM$'
+exec docker exec -u 1000 $LAB-workload netfixture udp [$LAB_UPSTREAM6]:443
+stdout '^udp EPERM$'
+
+# Must fail: ICMP.
+exec docker exec -u 1000 $LAB-workload netfixture ping $LAB_UPSTREAM4
+stdout '^ping EPERM$'
+
+# DNS reaches the named resolver over both protocols, and no other address.
+exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_UPSTREAM4:53
+stdout '^udp REPLY upstream 53$'
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:53
+stdout '^upstream 53$'
+exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_GATEWAY4:53
+stdout '^udp EPERM$'
+exec docker exec -u 1000 $LAB-workload netfixture udp [$LAB_UPSTREAM6]:53
+stdout '^udp EPERM$'
+
+# Loopback is not captured and not dropped.
+exec docker exec -u 1000 $LAB-workload netfixture dial 127.0.0.1:9000
+stdout '^upstream 9000$'
+
+# A connection opened into the pod gets its replies. They leave through
+# OUTPUT from a uid 1000 socket, and the ESTABLISHED accept passes them.
+exec docker exec $LAB-upstream netfixture dial $LAB_WORKLOAD4:9000
+stdout '^upstream 9000$'
+exec docker exec $LAB-upstream netfixture dial [$LAB_WORKLOAD6]:9000
+stdout '^upstream 9000$'
+
+# A re-run over the live ruleset installs no second jump and leaves the
+# ruleset in force.
+exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4
+! stdout '^-I OUTPUT'
+stdout '^# ipv4 verified: '
+exec docker exec $LAB-workload iptables-legacy -S OUTPUT
+stdout -count=1 '^-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT$'
+exec docker exec $LAB-workload iptables-legacy -t nat -S OUTPUT
+stdout -count=1 '^-A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT$'
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:443
+stdout '^captured '$LAB_UPSTREAM4':443$'
+
+# A re-run whose filter table fails to load after the line that flushes the
+# chain. The wrapper breaks the DROP rule, so iptables-legacy-restore refuses
+# the table. The earlier filter chain stays whole under its live jump, and
+# the run unlinks the receipt.
+! exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4 --iptables /opt/broken/iptables
+stderr 'load the ipv4 ruleset'
+stderr 'nosuchmatch'
+! exec docker exec $LAB-workload test -e /run/egress/netsetup.json
+exec docker exec $LAB-workload egress-netsetup --verify --dns-servers $LAB_UPSTREAM4
+stdout '^# ipv4 verified: '
+exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_UPSTREAM4:443
+stdout '^udp EPERM$'
+
+# --verify reads the tables back. A rule inserted into an owned chain is a
+# rule this ruleset did not install.
+exec docker exec $LAB-workload iptables-legacy -I EGRESS_PROXY_FILTER_OUTPUT 1 -j ACCEPT
+! exec docker exec $LAB-workload egress-netsetup --verify --dns-servers $LAB_UPSTREAM4
+stderr 'holds a rule this ruleset did not put there'
+exec docker exec $LAB-workload iptables-legacy -D EGRESS_PROXY_FILTER_OUTPUT -j ACCEPT
+
+# A jump to the owned chain for one interface, then an ACCEPT, ahead of the
+# real jump. -C finds the real jump, and the ACCEPT decides every packet the
+# narrower jump does not take.
+exec docker exec $LAB-workload iptables-legacy -I OUTPUT 1 -j ACCEPT
+exec docker exec $LAB-workload iptables-legacy -I OUTPUT 1 -o eth9 -j EGRESS_PROXY_FILTER_OUTPUT
+! exec docker exec $LAB-workload egress-netsetup --verify --dns-servers $LAB_UPSTREAM4
+stderr 'the first rule in the OUTPUT chain in the filter table is not "-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT"'
+exec docker exec $LAB-workload iptables-legacy -D OUTPUT -o eth9 -j EGRESS_PROXY_FILTER_OUTPUT
+exec docker exec $LAB-workload iptables-legacy -D OUTPUT -j ACCEPT
+
+# With both rules gone the check passes again, so each refusal above came
+# from the rule that case inserted.
+exec docker exec $LAB-workload egress-netsetup --verify --dns-servers $LAB_UPSTREAM4
+stdout '^# ipv4 verified: '
+stdout '^# ipv6 verified: '
+
+exec docker exec $LAB-workload iptables-legacy -t nat -D EGRESS_PROXY_NAT_OUTPUT -j RETURN
+exec docker exec $LAB-workload iptables-legacy -t nat -I EGRESS_PROXY_NAT_OUTPUT 1 -j RETURN
+! exec docker exec $LAB-workload egress-netsetup --verify --dns-servers $LAB_UPSTREAM4
+stderr 'NAT rule order'
+exec docker exec $LAB-workload iptables-legacy -t nat -D EGRESS_PROXY_NAT_OUTPUT -j RETURN
+exec docker exec $LAB-workload iptables-legacy -t nat -A EGRESS_PROXY_NAT_OUTPUT -j RETURN
+exec docker exec $LAB-workload egress-netsetup --verify --dns-servers $LAB_UPSTREAM4
+stdout '^# ipv4 verified: '
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:443
+stdout '^captured '$LAB_UPSTREAM4':443$'
+
+-- Dockerfile --
+FROM debian:bookworm-slim
+RUN apt-get -qq update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -qq install --no-install-recommends -y iptables \
+ && rm -rf /var/lib/apt/lists/*
+COPY bin/ /usr/local/bin/
+COPY broken/ /opt/broken/
+RUN chmod 0755 /opt/broken/*
+
+-- broken/iptables --
+#!/bin/sh
+exec iptables-legacy "$@"
+
+-- broken/iptables-restore --
+#!/bin/sh
+# Passes --version through, and breaks the filter chain's DROP in the input.
+if [ "$1" = --version ]; then exec iptables-legacy-restore --version; fi
+sed 's/^-A EGRESS_PROXY_FILTER_OUTPUT -j DROP$/-A EGRESS_PROXY_FILTER_OUTPUT -m nosuchmatch -j DROP/' | exec iptables-legacy-restore "$@"

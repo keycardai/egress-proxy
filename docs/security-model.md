@@ -84,6 +84,52 @@ The workload reaches this frontend through `HTTPS_PROXY`.
 | An origin-form request reaches the listener and probes for a service that the proxy does not provide. | The listener provides no service of its own. It rejects the request with `not_a_proxy_request` and writes an audit record. The admin socket provides health and information endpoints. | `TestCleartextAndNonProxyRequests` |
 | A cleartext `http://` request carries a placeholder to a destination in cleartext. | The proxy forwards nothing cleartext. A cleartext request is rejected with `cleartext_not_forwarded`, and an endpoint that covers the host on that port does not make it reachable. | `TestCleartextAndNonProxyRequests`, `TestRedirectedConnectionsAreRefused` |
 
+### Netsetup ruleset
+
+The `egress-netsetup` init container programs an iptables ruleset in the
+pod's network namespace. The nat chain redirects the workload's outbound TCP
+on the capture ports to the sidecar's transparent listener. The filter
+chain's terminal DROP refuses everything the redirect does not cover.
+`internal/netsetup` builds and applies the rules. `cmd/egress-netsetup`
+verifies them, drops CAP_NET_ADMIN and writes the receipt.
+
+The pod contract this surface assumes: the init container holds NET_ADMIN
+and SETPCAP and runs before every other container. The sidecar runs as the
+proxy uid with NET_BIND_SERVICE. The pod sets
+`net.ipv4.ip_unprivileged_port_start` above the redirect port, normally 1024.
+The workload holds no capability and runs as a uid that is not
+the proxy's. The receipt is on an emptyDir with medium Memory that the
+workload does not mount.
+
+`--redirect-port-protection` defaults to `required`. Program and verify runs
+then read `net.ipv4.ip_unprivileged_port_start` from `--port-start-file` and
+refuse a redirect port at or above it. A file that is missing or does not
+hold a port number fails the run. gVisor netstack release `20260921.0` does
+not enforce privileged ports and does not expose this sysctl
+([google/gvisor#14972](https://github.com/google/gvisor/pull/14972)).
+
+`allow-unprotected` skips the check. The run prints a warning and the
+receipt records the mode in `redirect_port_protection`. The rules, their
+verification and the capability drop are unchanged. A workload can then bind
+the redirect port while the sidecar starts or restarts, and receive captured
+traffic that the proxy never sees. The workload's own traffic still goes
+through the ruleset. A receipt without `redirect_port_protection` says
+nothing about whether the port was checked.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| A workload calls `setuid` to the proxy uid. The nat chain returns early for that uid and the filter chain accepts it, so the workload's own traffic would be neither redirected nor dropped. This bypass is published against Istio (https://pulsesecurity.co.nz/advisories/istio-egress-bypass), and Istio states the same limit (https://istio.io/latest/docs/ops/best-practices/security/#understand-traffic-capture-limitations). | Traffic capture is not a boundary on its own. The workload securityContext is: run as a uid that is not the proxy's, `allowPrivilegeEscalation` false, `capabilities.drop` ALL. Without CAP_SETUID the call fails, and `no_new_privs` keeps an execve from granting it. The ruleset excludes the proxy uid and no other. The proxy uid may not be 0, which would exempt every root process in the pod. | `TestProgramRules`, `TestValidate` |
+| A workload binds the redirect port before the sidecar starts or while it restarts. | The workload holds no NET_BIND_SERVICE. Before it programs or verifies the rules, netsetup refuses a redirect port at or above `net.ipv4.ip_unprivileged_port_start`, and fails when it cannot read that value. `allow-unprotected` skips this check and the receipt records it. | `TestCheckRedirectPort`, `TestPortCheckPrecedesTableAccess`, `netsetup_ruleset.txtar` |
+| A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, DNS to the named resolvers, and the ICMPv6 Neighbour Discovery the kernel sends. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
+| A process with CAP_NET_RAW sends ICMPv6 of a neighbour discovery type, with any payload, to any IPv6 address. The ip6tables filter chain must accept neighbour discovery, because the kernel needs it to reach any IPv6 neighbour. | The ICMPv6 accepts match only packets from the kernel's own sockets: `-m owner ! --uid-owner 0-4294967294`. xt_owner matches a process's socket by its uid, and a kernel socket only when every uid condition is negated (linux `net/netfilter/xt_owner.c`, `owner_mt`). No process can send ICMPv6 past the DROP, whatever its uid. | `TestProgramRules`, `netsetup_ruleset.txtar` |
+| A workload leaves over IPv6, on a kernel whose ip6tables rules were never programmed. | Both address families are programmed. `--ipv6 auto` follows the kernel, `--ipv6 on` requires IPv6, and `--ipv6 off` programs an ip6tables ruleset that drops every IPv6 packet the pod sends. A probe that cannot tell whether the kernel has IPv6 fails the run. | `TestProgramRules`, `TestIPv6Modes`, `TestKernelHasIPv6`, `netsetup_ruleset.txtar` |
+| A rule another component put in OUTPUT decides the packet ahead of the ruleset, or a rule is added to a chain this package owns. | Each OUTPUT jump is inserted at position 1. After applying, the init container reads every rule back with `-C`, counts each chain it owns and checks that the first rule in each OUTPUT chain is exactly the jump. The nat chain must end with the REDIRECT and then an unconditional RETURN, so every exemption comes before the REDIRECT. The IPv6 deny nat chain holds only the RETURN. An extra rule, a misplaced jump or a reordered nat rule fails verification. | `TestApply`, `TestVerifyProblems`, `netsetup_ruleset.txtar` |
+| The process that programmed the rules changes them after it verified them. | The init container drops CAP_NET_ADMIN from the permitted, effective and inheritable sets and the bounding set of the thread that programmed the rules, sets `no_new_privs`, reads all of them back, and exits once it has written the receipt. The receipt records whether the drop happened. See the known limit on the drop's scope. | `TestKeepNetAdminIsRecorded`, `netsetup_ruleset.txtar` |
+| A rule the init container could not apply leaves the pod half governed, and an earlier run's receipt says it is contained. | Each family's ruleset goes in with one `iptables-restore --noflush` run. The kernel replaces each table in one operation at its `COMMIT` line, so a table that fails to load keeps the rules it held. The filter table commits before the nat table, so a nat table that fails leaves captured TCP dropped. A run that programs the rules unlinks the receipt before it reads its configuration, so any failure leaves none. | `TestApply`, `TestRestoreInsertsOnlyTheJumpsItIsGiven`, `TestAFailedRunLeavesNoReceipt`, `TestRemoveReceiptLeavesNothingBehind`, `netsetup_ruleset.txtar` |
+| A `--verify` run writes a receipt for rules it did not program, or replaces a receipt that says CAP_NET_ADMIN was kept. | `--verify` reads the tables back and writes nothing. It never writes or removes the receipt and never drops a capability. | `TestVerifyWritesNothing` |
+| Re-running the init container replaces the filter chain while the OUTPUT jump an earlier run installed still points at it. An empty chain under that jump lets the OUTPUT policy, ACCEPT in a pod, allow every protocol and port. | The flush and the refill are one table replacement in one `iptables-restore` run. Apply makes no other write. The chain holds its old rules or its new ones and is never empty under a live jump. | `TestApply`, `netsetup_ruleset.txtar` |
+| The init container talks to the nft backend, whose rules the sandbox runtimes this proxy targets never apply. | The backend of the iptables binary and of the restore binary beside it is read from each version string, not from the name, and a version that names no backend is refused. With no override the legacy-specific name is tried before the generic one. | `TestOpenAssertsTheLegacyBackend`, `TestOpenSearchesPathForTheLegacyName` |
+
 ### Decision process
 
 | Threat | Mitigation | Test |
@@ -170,6 +216,30 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
 
 ## Known limits
 
+- Traffic capture is not a security boundary. A workload that can reach the
+  proxy uid escapes the redirect and the filter exclusion together. The
+  workload securityContext closes that. See the netsetup ruleset surface.
+- DNS is an open channel out. The filter chain accepts UDP and TCP port 53 to
+  every resolver in `/etc/resolv.conf`, unconditionally and unread. A workload
+  can encode data in query names and read data back out of the answers. That
+  traffic reaches no endpoint rule and no audit record.
+- `ESTABLISHED` in OUTPUT is an open channel to any peer that opens a
+  connection into the pod. It is the first accept in the filter chain of both
+  families. An outbound flow reaches ESTABLISHED only after its own first
+  packet was accepted, so it widens nothing the workload initiates. INPUT is
+  untouched and its policy is ACCEPT, so a peer that connects into the pod
+  creates a conntrack entry. The workload then has an unrestricted two-way
+  channel to that peer on that tuple, over TCP or UDP. A NetworkPolicy on
+  ingress closes it.
+- The pod sends no ICMP error about inbound traffic. The filter chain accepts
+  `ESTABLISHED` and not `RELATED`, and an ICMP error is `RELATED`. A peer
+  sending UDP to a closed port in the pod gets no port unreachable and waits
+  for its own timeout.
+- The init container drops CAP_NET_ADMIN on one thread. `capset`,
+  `PR_CAPBSET_DROP` and `PR_SET_NO_NEW_PRIVS` each act on the calling thread
+  (capabilities(7), prctl(2)). The other threads the Go runtime started keep
+  the capability in their permitted and bounding sets. The process runs no
+  code of its own on them and exits once it has written the receipt.
 - The proxy mints a credential for each request which is not cached. A busy
   resource receives one exchange per request.
 - A rotated client secret takes effect on the next start because the proxy

@@ -13,11 +13,13 @@ tool (
 )
 
 require (
+	github.com/coreos/go-iptables v0.8.0
 	github.com/elazarl/goproxy v1.9.1
 	github.com/gowebpki/jcs v1.0.2
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/keycardai/go-sdk v0.23.2
 	github.com/mccutchen/go-httpbin/v2 v2.25.0
+	github.com/moby/sys/capability v0.4.0
 	github.com/rogpeppe/go-internal v1.16.0
 	github.com/stretchr/testify v1.12.1
 	github.com/urfave/cli/v3 v3.13.0

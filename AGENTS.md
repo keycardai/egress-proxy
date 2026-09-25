@@ -147,6 +147,9 @@ than a refactor, and it changes `docs/security-model.md` with it.
   `acceptance_test.go` registers `upstream`, `freeport`, `shortdir`,
   `waitfile`, `waitport`, `sigterm`, and `audit`, which matches dotted fields
   in the JSON audit stream and takes `-all` to require every record to match.
+  `dockerlab` and `linuxbin` build a Docker network and cross-compiled
+  binaries for a scenario that needs a Linux kernel, and `[docker]` skips it
+  where no Docker daemon answers.
 
 ## Comments
 
