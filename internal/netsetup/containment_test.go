@@ -32,17 +32,21 @@ func request(path string) netsetup.ContainmentRequest {
 	}
 }
 
+// containmentCase edits a matching receipt and request, and names the
+// refusals Containment must report. An empty want expects the check to pass.
+type containmentCase struct {
+	name string
+	edit func(*netsetup.Receipt)
+	ask  func(*netsetup.ContainmentRequest)
+	// chmod and chmodDir loosen the receipt and its directory.
+	chmod    fs.FileMode
+	chmodDir fs.FileMode
+	want     []string
+}
+
 func TestContainment(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		edit func(*netsetup.Receipt)
-		ask  func(*netsetup.ContainmentRequest)
-		// chmod and chmodDir loosen the receipt and its directory.
-		chmod    fs.FileMode
-		chmodDir fs.FileMode
-		want     []string
-	}{
+	runContainment(t, []containmentCase{
 		{name: "a receipt that matches the sidecar"},
 		{
 			name: "a receipt that says the tables were never read back",
@@ -136,32 +140,6 @@ func TestContainment(t *testing.T) {
 			want: []string{"the filesystem does not report who owns"},
 		},
 		{
-			name: "a kernel that lets an unprivileged process bind the redirect port",
-			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 0, nil } },
-			want: []string{
-				"net.ipv4.ip_unprivileged_port_start is 0",
-				"can bind the redirect port 1015 and stand in for the proxy",
-			},
-		},
-		{
-			name: "an unprivileged port start equal to the redirect port, which the workload can still bind",
-			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 1015, nil } },
-			want: []string{"net.ipv4.ip_unprivileged_port_start is 1015"},
-		},
-		{
-			name: "a platform that does not report the unprivileged port start, which is not a failure to read it",
-			ask: func(q *netsetup.ContainmentRequest) {
-				q.PortStart = func() (int, error) { return 0, netsetup.ErrPortStartNotSupported }
-			},
-		},
-		{
-			name: "an unprivileged port start that could not be read at all",
-			ask: func(q *netsetup.ContainmentRequest) {
-				q.PortStart = func() (int, error) { return 0, assert.AnError }
-			},
-			want: []string{"the lowest port an unprivileged process may bind could not be read"},
-		},
-		{
 			name: "a platform with no capability sets, which is not a failure to read them",
 			ask: func(q *netsetup.ContainmentRequest) {
 				q.NetAdmin = func() (bool, error) { return false, netsetup.ErrCapabilitiesNotSupported }
@@ -224,7 +202,63 @@ func TestContainment(t *testing.T) {
 			},
 			want: []string{"this process's network namespace could not be read"},
 		},
-	}
+	})
+}
+
+// TestContainmentPortStart covers the sysctl check and the receipt's
+// redirect_port_protection, which decides whether the check runs.
+func TestContainmentPortStart(t *testing.T) {
+	t.Parallel()
+	runContainment(t, []containmentCase{
+		{
+			name: "a kernel that lets an unprivileged process bind the redirect port",
+			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 0, nil } },
+			want: []string{
+				"net.ipv4.ip_unprivileged_port_start is 0",
+				"can bind the redirect port 1015 and stand in for the proxy",
+			},
+		},
+		{
+			name: "an unprivileged port start equal to the redirect port, which the workload can still bind",
+			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 1015, nil } },
+			want: []string{"net.ipv4.ip_unprivileged_port_start is 1015"},
+		},
+		{
+			name: "a platform that does not report the unprivileged port start, which is not a failure to read it",
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.PortStart = func() (int, error) { return 0, netsetup.ErrPortStartNotSupported }
+			},
+		},
+		{
+			name: "an unprivileged port start that could not be read at all",
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.PortStart = func() (int, error) { return 0, assert.AnError }
+			},
+			want: []string{"the lowest port an unprivileged process may bind could not be read"},
+		},
+		{
+			name: "a receipt that allows an unprotected redirect port, on a kernel that lets the workload bind it",
+			edit: func(r *netsetup.Receipt) { r.RedirectPortProtection = netsetup.PortProtectionAllowUnprotected },
+			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 0, nil } },
+		},
+		{
+			name: "a receipt that allows an unprotected redirect port, on a kernel that does not expose the sysctl",
+			edit: func(r *netsetup.Receipt) { r.RedirectPortProtection = netsetup.PortProtectionAllowUnprotected },
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.PortStart = func() (int, error) { return 0, assert.AnError }
+			},
+		},
+		{
+			name: "a receipt that requires a protected redirect port, on a kernel that lets the workload bind it",
+			edit: func(r *netsetup.Receipt) { r.RedirectPortProtection = netsetup.PortProtectionRequired },
+			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 0, nil } },
+			want: []string{"net.ipv4.ip_unprivileged_port_start is 0"},
+		},
+	})
+}
+
+func runContainment(t *testing.T, tests []containmentCase) {
+	t.Helper()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

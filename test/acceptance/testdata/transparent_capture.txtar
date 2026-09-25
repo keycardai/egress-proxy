@@ -47,8 +47,8 @@ stdout '^# ipv4: /usr/sbin/iptables-legacy \(iptables v[0-9.]+ \(legacy\)\), /us
 stdout '^# ipv6: /usr/sbin/ip6tables-legacy \(ip6tables v[0-9.]+ \(legacy\)\), /usr/sbin/ip6tables-legacy-restore$'
 stdout -count=2 '^-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015$'
 stdout -count=2 '^-A EGRESS_PROXY_FILTER_OUTPUT -j DROP$'
-stdout '^# ipv4 verified: \d+ rules present, no rule this ruleset did not install, the terminal DROP is last'
-stdout '^# ipv6 verified: \d+ rules present, no rule this ruleset did not install, the terminal DROP is last'
+stdout '^# ipv4 verified: \d+ rules present, no rule this ruleset did not install, NAT rule order checked, the terminal DROP is last'
+stdout '^# ipv6 verified: \d+ rules present, no rule this ruleset did not install, NAT rule order checked, the terminal DROP is last'
 stdout '^# CAP_NET_ADMIN dropped from every capability set on this thread, no_new_privs set$'
 stdout '^# receipt /run/egress/netsetup.json: sha256:'
 exec docker exec $LAB-workload stat -c '%a %u' /run/egress
@@ -82,6 +82,15 @@ stdin netsetup.json
 stderr 'the receipt was written in network namespace device \d+ inode \d+ and this process is in network namespace device \d+ inode \d+'
 stderr 'the init container and the sidecar are not in the same pod network'
 ! stderr 'is owned by|runs as uid|ip_unprivileged_port_start is|CAP_NET_ADMIN'
+
+# A pod that sets no sysctl gets 0 from Docker, as on a kernel that does not
+# enforce privileged ports. netsetup runs with allow-unprotected and the
+# receipt records it, so the proxy starts without checking the sysctl.
+# timeout stops the proxy once it serves.
+! exec docker run --rm --network $LAB --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=0 --mount type=tmpfs,destination=/run/egress,tmpfs-mode=0777 -v $WORK:/work:ro $LAB_IMAGE sh -c 'egress-netsetup --receipt /run/egress/netsetup.json --redirect-port-protection allow-unprotected && exec timeout 10 setpriv --reuid 1337 --regid 1337 --clear-groups egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca'
+stdout '^# WARNING: redirect-port protection is waived'
+stderr 'capturing redirected connections'
+! stderr 'ip_unprivileged_port_start is'
 
 # Under no_new_privs, execve keeps only the caller's capabilities. setpriv
 # holds none, so the file capability grants nothing and the bind fails. The

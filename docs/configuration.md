@@ -154,9 +154,10 @@ the proxy uid is 0, the receipt names no address family, the receipt names
 another network namespace or none, this process holds
 `CAP_NET_ADMIN`, group or other can write the receipt, the receipt or its
 directory belongs to a uid other than root or the proxy, or
-`net.ipv4.ip_unprivileged_port_start` is at or below the redirect port. The
-directory itself can be writable by every uid because an `emptyDir` mount point
-is writable that way. Each refusal names both values and the setting to change.
+`net.ipv4.ip_unprivileged_port_start` is at or below the redirect port. It
+skips the last check when the receipt records `allow-unprotected` in
+`redirect_port_protection`. The directory itself can be writable by every uid
+because an `emptyDir` mount point is writable that way. Each refusal names both values and the setting to change.
 
 The init container is `egress-netsetup`. Its settings are arguments, not
 environment variables, so the pod spec shows the whole ruleset.

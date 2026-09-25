@@ -217,7 +217,12 @@ func netAdminProblems(request ContainmentRequest) []string {
 // portStartProblems refuses a redirect port an unprivileged process can
 // bind. A workload that can bind it can stand in for the proxy during a
 // sidecar restart. Read the kernel value instead of trusting the manifest.
+// A receipt that records allow-unprotected is not checked, because the init
+// container was told to accept that exposure.
 func portStartProblems(receipt Receipt, request ContainmentRequest) []string {
+	if receipt.RedirectPortProtection == PortProtectionAllowUnprotected {
+		return nil
+	}
 	read := request.PortStart
 	if read == nil {
 		read = UnprivilegedPortStart
