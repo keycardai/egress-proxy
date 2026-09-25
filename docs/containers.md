@@ -28,7 +28,14 @@ release step.
 ## The proxy container
 
 Runs `egress-proxy` with no subcommand, which reads the configuration
-document and serves.
+document and serves. The binary is the container's entrypoint.
+
+The proxy is a sidecar: an entry in `initContainers` with
+`restartPolicy: Always`, listed after the netsetup init container. The
+kubelet starts the next container only once a sidecar's startup probe
+passes (https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/),
+so the workload waits for the proxy. A proxy under `containers` starts
+beside the workload, and its probes hold nothing back.
 
 **uid.** The proxy runs as a uid of its own, the same one
 `egress-netsetup --proxy-uid` is given. `egress-proxy settings` publishes
@@ -64,9 +71,15 @@ Neither half works alone. Without the file capability a non-root container
 holds an added capability in its bounding set and nothing else
 (kubernetes/kubernetes#56374), so the bind is refused. Without the pod
 grant, the capability is outside the bounding set and the kernel refuses
-the exec itself with `operation not permitted`. The file capability still
-applies under `allowPrivilegeEscalation: false`, which is what sets
-`no_new_privs`, and `test/images` proves that.
+the exec itself with `operation not permitted`.
+
+The file capability also holds under `allowPrivilegeEscalation: false`. The
+runtime puts the added capability in the permitted set of the process that
+execs the entrypoint, and `no_new_privs` keeps what that process held.
+`docs/security-model.md` gives the sources, and `test/images` runs the image
+under `no_new_privs`. **NEVER start the binary from a shell under
+`allowPrivilegeEscalation: false`.** The shell holds no capability to pass
+on, and the bind is refused.
 
 **NEVER give the proxy container `drop: ["ALL"]` without
 `add: ["NET_BIND_SERVICE"]`**, whatever `listen.transparent` is set to. The
@@ -106,19 +119,21 @@ names.
 
 | Probe | Command | What it says |
 |---|---|---|
-| startup | `/ko-app/egress-proxy probe readyz` | Every frontend is bound and `ca.crt` is written. The kubelet holds the workload until this passes. |
+| startup | `/ko-app/egress-proxy probe readyz` | Every frontend is bound and `ca.crt` is written. The workload starts once this passes. |
 | readiness | `/ko-app/egress-proxy probe readyz` | The same answer while the process runs. |
 | liveness | `/ko-app/egress-proxy probe healthz` | The process is alive. Liveness NEVER reads `readyz`: a proxy that is still starting would be restarted for it. |
 
 `egress-proxy probe <healthz|readyz|info>` dials the socket named by
 `--admin` or `EGRESS_PROXY_ADMIN`, prints the answer and exits non-zero on
-anything but a 200.
+anything but a 200. It reads no document, so a pod that moves the socket
+sets `EGRESS_PROXY_ADMIN`.
 
 ## The netsetup init container
 
 Runs `egress-netsetup`, which programs the capture rules, reads them back,
 gives up `CAP_NET_ADMIN` and writes the receipt. It exits. It is an
-ordinary init container that runs to completion, not a sidecar.
+ordinary init container that runs to completion, not a sidecar, and it is
+listed before the proxy.
 
 **uid and capabilities.** Root, with `NET_ADMIN`, `NET_RAW` and `SETPCAP`.
 `NET_ADMIN` programs the rules, `NET_RAW` is what the `iptables` binaries
@@ -126,8 +141,8 @@ open their raw socket with, and `SETPCAP` is what lets the process drop
 `NET_ADMIN` from its own bounding set before it writes the receipt.
 
 **Volumes.** The receipt directory, shared with the proxy container and
-memory-backed. The proxy refuses a receipt any other uid can write, and
-refuses one whose directory any other uid can write.
+memory-backed. The proxy refuses a receipt that group or other can write,
+and a receipt or directory owned by a uid other than root and its own.
 
 **Settings.** `egress-netsetup` reads flags only and no environment
 variable. The defaults a pod has to agree with are in
@@ -151,7 +166,9 @@ that:
    `update-ca-certificates`. It refuses to start the agent without it. The
    wait covers a restart that outlives the sidecar's startup probe.
 3. The agent uid owns `/usr/local/share/ca-certificates` and
-   `/etc/ssl/certs`, so `update-ca-certificates` runs unprivileged.
+   `/etc/ssl/certs`, so `update-ca-certificates` runs unprivileged. A pod
+   with `readOnlyRootFilesystem: true` mounts a writable volume owned by
+   the agent uid at each of the two directories.
 
 A variable is set only for a client the image installs. The image installs
 no AWS client, so it sets no `AWS_CA_BUNDLE`. An image built on this one

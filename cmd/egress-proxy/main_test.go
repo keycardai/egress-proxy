@@ -186,6 +186,7 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 			listener, captured, err := proc.bind(t.Context())
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr, "bind")
+				require.ErrorIs(t, err, errCapture, "every refusal here is the transparent frontend's")
 				require.ErrorIs(t, proc.ready(), errNotReady,
 					"readiness answered after a listener that never bound")
 				require.ErrorContains(t, proc.ready(), "the frontend listeners are not bound",
@@ -369,11 +370,11 @@ func boundListeners(t *testing.T, addresses []string) []net.Listener {
 	return listeners
 }
 
-// TestServeStopsReportingReadyWhileItDrains covers the other end of the
-// readiness contract. Each server drains for its grace period after the
-// signal, and /readyz answering 200 through that window would have the
-// kubelet keep sending the workload at listeners that are closing.
-func TestServeStopsReportingReadyWhileItDrains(t *testing.T) {
+// TestServeIsNotReadyOnceItStops covers the other end of the readiness
+// contract. The admin socket stops accepting as the drain starts, and
+// observing that mid-drain would race it. The test asserts the flag the
+// shutdown path clears, which a /readyz request already in flight reads.
+func TestServeIsNotReadyOnceItStops(t *testing.T) {
 	t.Parallel()
 	cfg, err := config.Parse([]byte(bindDocument), config.Overrides{})
 	require.NoError(t, err, "config.Parse")

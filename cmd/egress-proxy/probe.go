@@ -64,7 +64,8 @@ func probeCommand(opts *flags, stdout io.Writer) *cli.Command {
 
 // adminSocket is the socket the serving process in this container listens
 // on. The probe runs in that container, so the same flag and the same
-// variable name it.
+// variable name it. The probe reads no document. NEVER move the socket in
+// the document alone: set EGRESS_PROXY_ADMIN, or the probe dials the default.
 func adminSocket(opts *flags) string {
 	if opts.admin != "" {
 		return opts.admin

@@ -140,11 +140,12 @@ than a refactor, and it changes `docs/security-model.md` with it.
   chart lint reads it out of the image.
 - **Readiness covers every listener.** `/readyz` answers 200 only after the
   CONNECT listener and the transparent sockets are bound and `ca.crt` is
-  written. The kubelet releases the workload on that answer, so a frontend
+  written. The kubelet releases the workload on that answer when the proxy
+  is a sidecar, an init container with `restartPolicy: Always`, so a frontend
   bound later would leave the workload's first captured connection refused.
   The netsetup receipt says which address families the redirect covers, and
-  a family it names with no bound socket stops the start. The shutdown path
-  clears the flag first, so `/readyz` answers 503 for the whole drain. The
+  a family it names with no bound socket stops the start. The admin socket
+  stops accepting when the drain starts, so the probe fails from then on. The
   probe is the binary itself, because the admin surface is a socket and the
   proxy image has no shell.
 

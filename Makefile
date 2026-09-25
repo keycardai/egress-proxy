@@ -99,8 +99,8 @@ PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
 
 # Two steps. ko compiles the binary and builds the distroless image, then
 # images/proxy/Dockerfile puts cap_net_bind_service=+ep on the binary,
-# which ko has no step for. test/images and test/e2e run this target, so
-# every lane drives the image the release builds.
+# which ko has no step for. test/images runs this target, so the lane
+# drives the image the release builds.
 #
 # SOURCE_DATE_EPOCH keeps the created timestamp of the final image at the
 # epoch, which is the timestamp ko gives the image it loads. BuildKit

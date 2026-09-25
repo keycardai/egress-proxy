@@ -360,6 +360,28 @@ func TestNetsetupImage(t *testing.T) {
 		image, "-c", "iptables-legacy --version && ip6tables-legacy --version")
 	assert.Contains(t, version, "(legacy)", "the image resolves the legacy backend, not nf_tables")
 	assert.NotContains(t, version, "nf_tables", "no binary the lane resolves uses the nf_tables backend")
+
+	// A run with the init container's capabilities, in the container's own
+	// network namespace, loads both families through the image's restore
+	// binaries and reads every rule back. --ipv6=off still programs the
+	// ip6tables ruleset that denies IPv6, so both families are applied
+	// whatever the namespace has. The host must have the legacy tables
+	// loaded, because a container cannot load a kernel module. The sysctl
+	// is the pod contract: netsetup refuses a redirect port at or above
+	// net.ipv4.ip_unprivileged_port_start, and Docker sets that to 0.
+	applied := docker(t, runTimeout, "run", "--rm",
+		"--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--cap-add", "SETPCAP",
+		"--sysctl", "net.ipv4.ip_unprivileged_port_start=1024",
+		"--tmpfs", "/run/egress", image, "--dns-servers=10.96.0.10", "--ipv6=off")
+	for _, want := range []string{
+		`(?m)^# ipv4: \S+/iptables-legacy \(iptables v[0-9.]+ \(legacy\)\), \S+/iptables-legacy-restore$`,
+		`(?m)^# ipv6: \S+/ip6tables-legacy \(ip6tables v[0-9.]+ \(legacy\)\), \S+/ip6tables-legacy-restore$`,
+		`(?m)^# ipv4 verified: `,
+		`(?m)^# ipv6 verified: `,
+		`(?m)^# CAP_NET_ADMIN dropped from every capability set on this thread, no_new_privs set$`,
+	} {
+		assert.Regexp(t, want, applied, "the init container run said:\n%s", applied)
+	}
 }
 
 // sharedCAMount is where the lane mounts the certificate the sidecar
@@ -379,20 +401,36 @@ func TestSandboxBaseImage(t *testing.T) {
 	removeImage(t, image)
 	docker(t, buildTimeout, "build", "-t", image, "images/sandbox-base")
 
+	// The agent runs as the uid the contract names, with no capability.
+	// openssl verify against the rebuilt bundle is what proves the
+	// entrypoint installed the certificate. The rows differ only in where
+	// the trust store directories come from: the image, whose ownership the
+	// Dockerfile sets, or writable mounts under a read-only root.
 	t.Run("the agent starts with the proxy CA in its trust store", func(t *testing.T) {
-		shared, _ := sharedCA(t)
-		// The agent runs as the uid the contract names, with no capability
-		// and a read-only root, the way the pod runs it. openssl verify
-		// against the rebuilt bundle is what proves the entrypoint installed
-		// the certificate.
-		out := docker(t, runTimeout, "run", "--rm",
-			"--user", "1000:1000", "--cap-drop", "ALL", "--read-only",
-			"--tmpfs", "/tmp", "--tmpfs", "/etc/ssl/certs:uid=1000,gid=1000",
-			"--tmpfs", "/usr/local/share/ca-certificates:uid=1000,gid=1000",
-			"-v", shared+":"+sharedCAMount+":ro", image,
-			"/bin/sh", "-c", "openssl verify -CAfile \"$SSL_CERT_FILE\" "+sharedCAMount+"/ca.crt")
-		assert.Contains(t, out, "the proxy CA is trusted", "the entrypoint says what it did")
-		assert.Contains(t, out, sharedCAMount+"/ca.crt: OK", "the rebuilt bundle verifies the proxy CA")
+		tests := []struct {
+			name string
+			root []string
+		}{
+			{name: "the image's own trust store directories"},
+			{
+				name: "writable mounts under a read-only root",
+				root: []string{
+					"--read-only", "--tmpfs", "/tmp", "--tmpfs", "/etc/ssl/certs:uid=1000,gid=1000",
+					"--tmpfs", "/usr/local/share/ca-certificates:uid=1000,gid=1000",
+				},
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				shared, _ := sharedCA(t)
+				args := append([]string{"run", "--rm", "--user", "1000:1000", "--cap-drop", "ALL"}, tc.root...)
+				args = append(args, "-v", shared+":"+sharedCAMount+":ro", image,
+					"/bin/sh", "-c", "openssl verify -CAfile \"$SSL_CERT_FILE\" "+sharedCAMount+"/ca.crt")
+				out := docker(t, runTimeout, args...)
+				assert.Contains(t, out, "the proxy CA is trusted", "the entrypoint says what it did")
+				assert.Contains(t, out, sharedCAMount+"/ca.crt: OK", "the rebuilt bundle verifies the proxy CA")
+			})
+		}
 	})
 
 	// GIT_SSL_CAINFO names the bundle the entrypoint rebuilt, so git trusts

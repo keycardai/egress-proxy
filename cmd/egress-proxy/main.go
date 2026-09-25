@@ -242,8 +242,7 @@ type process struct {
 	certPath string
 	// listening turns true once every frontend this process runs is bound:
 	// the CONNECT listener, and the capture sockets when listen.transparent
-	// is set. The shutdown path clears it, so /readyz answers 503 for the
-	// whole drain.
+	// is set. The shutdown path clears it when the drain starts.
 	listening atomic.Bool
 }
 
@@ -555,9 +554,8 @@ func (p *process) serve(ctx context.Context) error {
 	group.Go(func() error { return p.admin.Run(ctx) })
 	group.Go(func() error {
 		<-ctx.Done()
-		// Readiness goes false before the drain starts. A kubelet that
-		// reads 200 while the listeners are closing sends the workload at
-		// a process that is going away.
+		// The admin socket stops accepting as the drain starts. Clearing
+		// the flag covers a /readyz request that is already in flight.
 		p.listening.Store(false)
 		p.logger.Info("stopping", slog.String("cause", context.Cause(ctx).Error()))
 		return nil

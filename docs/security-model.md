@@ -99,9 +99,10 @@ SETPCAP and to run before every other container. The sidecar runs as the
 proxy uid with NET_BIND_SERVICE. The pod sets
 `net.ipv4.ip_unprivileged_port_start` above the redirect port, normally 1024.
 The workload holds no capability and runs as another uid. The receipt is on
-an emptyDir with medium Memory that the workload does not mount. `docs/containers.md` states what the
-containers this repository ships need. The sandbox chart composes the pod,
-and its lint refuses a manifest that departs from this contract.
+an emptyDir with medium Memory that the workload does not mount.
+`docs/containers.md` states what the containers this repository ships need.
+The sandbox chart composes the pod, and its lint refuses a manifest that
+departs from this contract.
 The pod sets `hostNetwork: false`, so every container is in the pod's own
 network namespace. The sidecar's namespace check does not detect
 `hostNetwork: true`. Both containers are then in the node's network
@@ -253,12 +254,21 @@ is on `ca.out_dir`. `egress-proxy probe <healthz|readyz|info>` dials the
 socket, prints the answer and exits non-zero on anything but a 200. Which
 probe runs which route is set in the manifest, which the sandbox chart owns.
 
+The pod contract this surface assumes: the proxy is a sidecar, an entry in
+`initContainers` with `restartPolicy: Always`, listed after netsetup. The
+kubelet starts the next container only once a sidecar's startup probe
+passes (https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/).
+A proxy under `containers` starts beside the workload, and its probes hold
+nothing back. The probe reads the socket path from `--admin` or
+`EGRESS_PROXY_ADMIN`, not from the document, so a pod that moves the socket
+sets the variable.
+
 | Threat | Mitigation | Test |
 |---|---|---|
-| The workload starts before the proxy has written `ca.crt`, so every TLS handshake fails on certificate verification and an operator reads a misconfiguration as a policy denial. | The startup probe reads `/readyz`, which answers only once the listeners are bound and the certificate is on disk, and the kubelet holds the workload until it passes. The base image entrypoint waits for the certificate as well, which covers a restart that outlives the probe. | `TestReadyz`, `TestProbeReadsTheAdminSocket`, `TestSandboxBaseImage` |
+| The workload starts before the proxy has written `ca.crt`, so every TLS handshake fails on certificate verification and an operator reads a misconfiguration as a policy denial. | The startup probe reads `/readyz`, which answers only once the listeners are bound and the certificate is on disk. The kubelet starts the workload only once it passes, under the pod contract above. The base image entrypoint waits for the certificate as well, which covers a restart that outlives the probe. | `TestReadyz`, `TestProbeReadsTheAdminSocket`, `TestSandboxBaseImage` |
 | The kubelet releases the workload while the port the capture redirects to is unbound, so the workload's first captured connection is refused. Readiness that answered on the CONNECT listener alone would do this. | Readiness turns true only after every listener is bound, the transparent sockets included. A transparent socket that fails to bind leaves the process not ready and stops it. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` |
-| The netns has IPv6 and another process holds the IPv6 capture socket. The proxy binds IPv4 alone, reports ready, and every IPv6 egress is refused for the life of the pod. A missing IPv6 socket is a valid start on a kernel with no IPv6, so the bind alone does not tell the two apart. | The receipt names the address families the init container programmed. The bind compares them against the sockets it opened and stops the process when the receipt names a family no socket covers. The start-up log names the families bound. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` (the two receipt rows) |
-| The kubelet reads a 200 from `/readyz` during the SIGTERM drain and keeps sending the workload at a proxy whose listeners are closing. | The shutdown path clears the readiness flag before any server drains, so `/readyz` answers 503 from the moment the signal arrives until the socket goes away. | `TestServeStopsReportingReadyWhileItDrains` |
+| The capture sockets cover fewer address families than the receipt names. `listen.transparent` names an address of one family, or the kernel refuses the IPv6 socket with EAFNOSUPPORT, which the bind reads as a kernel with no IPv6. The proxy would report ready while every captured connection of the missing family is refused for the life of the pod. | The receipt names the address families the init container programmed. The bind compares them against the sockets it opened and stops the process when the receipt names a family no socket covers. The start-up log names the families bound. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` (the two receipt rows) |
+| The kubelet reads a 200 from `/readyz` during the SIGTERM drain and keeps sending the workload at a proxy whose listeners are closing. | The admin socket stops accepting when the drain starts, so the probe fails from the signal on. The shutdown path also clears the readiness flag, so a `/readyz` request already in flight answers 503. | `TestServeIsNotReadyOnceItStops` |
 | An admin server is built with no readiness gate, and `/readyz` answers 200 for a process that has decided nothing. | A nil `Options.Ready` answers 503 naming that no gate is configured. | `TestServerAnswersHealthAndInfo` |
 | A probe reaches the admin surface over a port the workload can also reach. | There is no port. The probe runs this binary against the Unix socket in the proxy's mount namespace, and the socket path must be absolute. | `TestProbeReadsTheAdminSocket`, `TestProbeWithNoSocket`, `TestNewRefusals` |
 | The kubelet restarts a proxy that has not finished starting, because liveness reads readiness. | The two routes are separate. `/healthz` answers while the process is alive and `/readyz` answers when it serves, so a liveness probe on `/healthz` does not restart a starting proxy. | `TestReadyz`, `TestProbeReadsTheAdminSocket` |
@@ -274,7 +284,7 @@ The three images are defined under `images/` and built locally by
 |---|---|---|
 | Code running in the proxy container finds a shell, a package manager or curl and uses the sidecar's uid, which the capture exempts, to leave the pod. | The proxy image is distroless static: the binary, the public roots, and nothing else. The probe is the binary itself rather than a shell command. | `TestProxyImage` |
 | The agent starts with a trust store the proxy's authority is not in, so every allowed request fails on certificate verification. | The base image entrypoint installs the certificate and runs `update-ca-certificates` before it execs the agent, and refuses to start the agent without it. Every bundle variable the image sets names the rebuilt bundle, and a client the image does not install gets no variable. | `TestSandboxBaseImage` (the trust store, the git handshake, the missing certificate) |
-| The netsetup image resolves an iptables binary on the nf_tables backend, whose rules the sandbox runtimes this proxy targets never apply, so the init container programs rules that never take effect. | The image installs the legacy binaries and the xtables extension libraries they load for `-m owner`, `-m conntrack`, `-m multiport` and `-m icmp6`. The lane resolves them through PATH, the way `egress-netsetup` does, and checks the backend each one reports. | `TestNetsetupImage` |
+| The netsetup image resolves an iptables binary on the nf_tables backend, whose rules the sandbox runtimes this proxy targets never apply, so the init container programs rules that never take effect. | The image installs the legacy binaries and the xtables extension libraries they load for `-m owner`, `-m conntrack`, `-m multiport` and `-m icmp6`. The lane runs the image's `egress-netsetup` with the init container's capabilities in a network namespace of its own. It loads both families through the legacy restore binaries, reads every rule back and drops CAP_NET_ADMIN. | `TestNetsetupImage` |
 
 ### Configuration document
 
