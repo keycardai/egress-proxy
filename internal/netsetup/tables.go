@@ -269,23 +269,7 @@ func missingJumps(handle Tables, program Program) ([]Rule, error) {
 
 // Verify reports whether the tables hold this ruleset and nothing else.
 //
-// It answers the question the sidecar cannot answer for itself: are the
-// rules that make this pod's egress unavoidable in the kernel, and is
-// anything else in the way. Three checks together pin the ruleset.
-//
-// Every rule the program installs is present. The kernel answers this with
-// -C, because iptables prints a rule back in its own normalised form and
-// that text does not match this package's spelling.
-//
-// Each owned chain holds exactly as many rules as the program puts in it.
-// With every expected rule present, a matching count means the chain holds
-// no other rule, such as an ACCEPT above the terminal DROP. The filter
-// chain's terminal DROP is checked by position as well, because a DROP that
-// is not last leaves the rules after it accepting.
-//
-// Each OUTPUT jump is the first rule in its OUTPUT chain. A rule ahead of
-// the filter jump accepts what the terminal DROP would drop, and one ahead
-// of the nat jump rewrites the destination before the REDIRECT sees it.
+// iptables normalizes rule text, so -C checks membership.
 func Verify(handle Tables, program Program, progress io.Writer) error {
 	var found problems
 	rules := program.Rules()
@@ -309,7 +293,8 @@ func Verify(handle Tables, program Program, progress io.Writer) error {
 	}
 	if progress != nil {
 		fmt.Fprintf(progress, "# %s verified: %d rules present, no rule this ruleset did not install, "+
-			"the terminal DROP is last, each OUTPUT jump is first\n", program.Family, len(rules)+len(program.Jumps))
+			"NAT rule order checked, the terminal DROP is last, each OUTPUT jump is first\n",
+			program.Family, len(rules)+len(program.Jumps))
 	}
 	return nil
 }
@@ -350,8 +335,6 @@ func jumpTarget(spec []string) string {
 	return ""
 }
 
-// chainProblems reports a chain that holds a rule this ruleset did not
-// install, and a filter chain whose terminal DROP is not last.
 func chainProblems(handle Tables, chain Chain) []string {
 	var found problems
 	rules, err := chainRules(handle, chain.Table, chain.Name)
@@ -367,7 +350,18 @@ func chainProblems(handle Tables, chain Chain) []string {
 	if chain.Name == filterChain {
 		found.add(terminalDropProblems(rules)...)
 	}
+	if chain.Name == natChain {
+		found.add(natOrderProblems(rules)...)
+	}
 	return found
+}
+
+func natOrderProblems(rules []string) []string {
+	if len(rules) == 0 || rules[len(rules)-1] != "-A "+natChain+" -j RETURN" ||
+		(len(rules) > 1 && jumpTarget(strings.Fields(rules[len(rules)-2])) != "REDIRECT") {
+		return []string{"NAT rule order must place exemptions before REDIRECT and the unconditional RETURN last"}
+	}
+	return nil
 }
 
 // chainRules returns the rules a chain holds, in order, as iptables -S
