@@ -91,6 +91,18 @@ func TestGates(t *testing.T) {
 			wantOutput: []string{"0 issues.", "lint: OK"},
 		},
 		{
+			name:     "import gate lints the files behind the acceptance and images tags",
+			script:   lintScript,
+			fixture:  "tagged-import",
+			wantExit: 1,
+			wantOutput: []string{
+				"images.go:5:8: import 'github.com/keycardlabs/gatefixture' is not allowed from list " +
+					"'no-internal-keycard-modules'",
+				"acceptance.go:5:8: import 'github.com/keycardlabs/gatefixture' is not allowed from list " +
+					"'no-internal-keycard-modules'",
+			},
+		},
+		{
 			name:     "vulnerability gate rejects a reachable published vulnerability",
 			script:   vulnScript,
 			fixture:  "vulnerable-module",
