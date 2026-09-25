@@ -125,20 +125,21 @@ func (f *Frontend) Serve(ctx context.Context, listener net.Listener) error {
 	var reading sync.WaitGroup
 	defer reading.Wait()
 	for {
-		// A slot is taken before the accept, so the listener stops accepting
-		// at the cap instead of holding connections it will not read.
-		select {
-		case f.slots <- struct{}{}:
-		case <-ctx.Done():
-			return nil
-		}
 		conn, err := listener.Accept()
 		if err != nil {
-			<-f.slots
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			return fmt.Errorf("transparent: accept on %s: %w", listener.Addr(), err)
+		}
+		// A slot is taken after the accept, so a listener waiting for a
+		// connection holds none. At the cap, each listener holds one accepted
+		// connection unread until a slot frees.
+		select {
+		case f.slots <- struct{}{}:
+		case <-ctx.Done():
+			_ = conn.Close()
+			return nil
 		}
 		reading.Go(func() { f.handle(ctx, conn) })
 	}

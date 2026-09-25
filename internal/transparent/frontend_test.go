@@ -320,6 +320,64 @@ func TestTheConnectionCapHoldsUntilAConnectionCloses(t *testing.T) {
 	waitConn(t, handed)
 }
 
+// TestAnIdleListenerHoldsNoSlot serves two listeners against a cap of one.
+// The first listener signals once it waits in Accept, and only then does the
+// second start. A connection to the second must be handled while the first
+// sits idle.
+func TestAnIdleListenerHoldsNoSlot(t *testing.T) {
+	t.Parallel()
+	handed := make(chan net.Conn, 1)
+	front, err := transparent.New(transparent.Options{
+		MaxConnections: 1,
+		IdleTimeout:    30 * time.Second,
+		PeekTimeout:    time.Second,
+		OriginalDst: func(net.Conn) (netip.AddrPort, error) {
+			return netip.MustParseAddrPort("192.0.2.77:443"), nil
+		},
+		Handler: func(conn net.Conn, _ proxy.Redirected) { handed <- conn },
+	})
+	require.NoError(t, err, "build the frontend")
+	idle, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	busy, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	waiting := &signalListener{Listener: idle, accepting: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(t.Context())
+	var group errgroup.Group
+	t.Cleanup(func() {
+		cancel()
+		assert.NoError(t, group.Wait(), "Serve after cancellation")
+	})
+	group.Go(func() error { return front.Serve(ctx, waiting) })
+	select {
+	case <-waiting.accepting:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the idle listener never waited in Accept")
+	}
+	group.Go(func() error { return front.Serve(ctx, busy) })
+
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", busy.Addr().String())
+	require.NoError(t, err, "dial the second listener")
+	t.Cleanup(func() { _ = conn.Close() })
+	held := waitConn(t, handed)
+	_ = held.Close()
+}
+
+// signalListener reports each time Serve waits in Accept.
+type signalListener struct {
+	net.Listener
+
+	accepting chan struct{}
+}
+
+func (l *signalListener) Accept() (net.Conn, error) {
+	select {
+	case l.accepting <- struct{}{}:
+	default:
+	}
+	return l.Listener.Accept() //nolint:wrapcheck // the wrapper passes the listener's error through unchanged
+}
+
 func waitConn(t *testing.T, handed <-chan net.Conn) net.Conn {
 	t.Helper()
 	select {
