@@ -274,6 +274,15 @@ func TestProxyImageBindsAPrivilegedPort(t *testing.T) {
 			serving, logs := waitForServing(t, container)
 			assert.Equal(t, tc.wantServing, serving, "the proxy bound every listener and stayed up:\n%s", logs)
 			assert.Contains(t, logs, tc.wantLog, "the container said:\n%s", logs)
+			if !tc.wantServing {
+				return
+			}
+			// The kubelet runs the startup probe inside the running
+			// container, so the probe inherits its uid, its bounding set
+			// and no_new_privs, and execs the binary that holds the file
+			// capability.
+			probe := docker(t, runTimeout, "exec", container, "/ko-app/egress-proxy", "probe", "readyz")
+			assert.Equal(t, "ok\n", probe, "probe readyz inside the running container")
 		})
 	}
 }
@@ -476,16 +485,34 @@ func TestSandboxBaseImage(t *testing.T) {
 		}
 	})
 
+	// No row mounts a certificate, so every row must refuse to start the
+	// agent. The rows differ in the timeout the entrypoint is given, which
+	// decides whether it waits and how it exits.
 	t.Run("the agent does not start without the certificate", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), runTimeout)
-		defer cancel()
-		wait := exec.CommandContext(ctx, "docker", "run", "--rm",
-			"--user", "1000:1000", "-e", "KEYCARD_CA_TIMEOUT=2",
-			"-v", t.TempDir()+":"+sharedCAMount+":ro", image, "/bin/sh", "-c", "echo the agent started")
-		out, err := wait.CombinedOutput()
-		require.Error(t, err, "the entrypoint started the agent with no certificate:\n%s", out)
-		assert.Contains(t, string(out), "did not appear within 2s", "the refusal says what it waited for")
-		assert.NotContains(t, string(out), "the agent started", "the agent must not run")
+		tests := []struct {
+			timeout  string
+			wantCode int
+			wantOut  string
+		}{
+			{timeout: "2", wantCode: 69, wantOut: "did not appear within 2s"},
+			{timeout: "2m", wantCode: 64, wantOut: "KEYCARD_CA_TIMEOUT is 2m. Set it to a whole number of seconds"},
+			{timeout: "-1", wantCode: 64, wantOut: "KEYCARD_CA_TIMEOUT is -1. Set it to a whole number of seconds"},
+		}
+		for _, tc := range tests {
+			t.Run("KEYCARD_CA_TIMEOUT="+tc.timeout, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), runTimeout)
+				defer cancel()
+				wait := exec.CommandContext(ctx, "docker", "run", "--rm",
+					"--user", "1000:1000", "-e", "KEYCARD_CA_TIMEOUT="+tc.timeout,
+					"-v", t.TempDir()+":"+sharedCAMount+":ro", image, "/bin/sh", "-c", "echo the agent started")
+				out, err := wait.CombinedOutput()
+				var exit *exec.ExitError
+				require.ErrorAs(t, err, &exit, "the entrypoint started the agent with no certificate:\n%s", out)
+				assert.Equal(t, tc.wantCode, exit.ExitCode(), "exit code; the entrypoint said:\n%s", out)
+				assert.Contains(t, string(out), tc.wantOut, "the refusal says why")
+				assert.NotContains(t, string(out), "the agent started", "the agent must not run")
+			})
+		}
 	})
 }
 

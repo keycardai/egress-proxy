@@ -23,6 +23,15 @@ if [ "$#" -eq 0 ]; then
 	exit 64
 fi
 
+# The wait below needs a whole number of seconds. test -ge on any other
+# value fails inside the loop condition, and the loop then never times out.
+case $timeout in
+'' | *[!0-9]*)
+	log "KEYCARD_CA_TIMEOUT is ${timeout}. Set it to a whole number of seconds"
+	exit 64
+	;;
+esac
+
 # The sidecar writes the certificate to a temporary file and renames it, so
 # a path that exists holds a whole file. Parsing it anyway keeps a
 # half-written file from another writer out of the trust store.
