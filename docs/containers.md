@@ -56,7 +56,7 @@ no rule and reads no other process.
         drop: ["ALL"]
         add: ["NET_BIND_SERVICE"]
 
-The capability is what lets the proxy bind `listen.transparent` below 1024.
+The capability is what lets the proxy bind `listen.transparent_port` below 1024.
 The redirect port the init container programs is 1015, and a port below
 1024 is one an unprivileged workload cannot bind during a sidecar restart
 to stand in for the proxy.
@@ -82,9 +82,9 @@ under `no_new_privs`. **NEVER start the binary from a shell under
 on, and the bind is refused.
 
 **NEVER give the proxy container `drop: ["ALL"]` without
-`add: ["NET_BIND_SERVICE"]`**, whatever `listen.transparent` is set to. The
+`add: ["NET_BIND_SERVICE"]`**, whatever `listen.transparent_port` is set to. The
 capability is a property of the binary, so a bounding set without it stops
-the container before `main` runs, with `listen.transparent` unset as much
+the container before `main` runs, with `listen.transparent_port` unset as much
 as with it set.
 
 **Volumes and paths.**
@@ -149,7 +149,7 @@ variable. The defaults a pod has to agree with are in
 `egress-proxy settings` under `netsetup`: the proxy uid, the redirect port,
 the captured ports and the receipt path. `--proxy-uid` and the proxy
 container's `runAsUser` name the same uid, and `--redirect-port` and
-`listen.transparent` name the same port.
+`listen.transparent_port` name the same port.
 
 ## The sandbox-base image
 
@@ -222,7 +222,7 @@ These are the checks that refuse to serve. They are not a substitute for
 the pod being composed correctly, and each says what it can see from inside
 the container.
 
-- **The netsetup receipt.** With `listen.transparent` set, the proxy reads
+- **The netsetup receipt.** With `listen.transparent_port` set, the proxy reads
   the receipt before it serves. It refuses a receipt that says the rules
   were not read back, one whose proxy uid or redirect port disagrees with
   its own, one that names no address family, one that says

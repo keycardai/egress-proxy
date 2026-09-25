@@ -10,8 +10,8 @@
 # and passes it here, so ko still chooses the base image, compiles the
 # binary and places it at /ko-app/egress-proxy.
 #
-# cap_net_bind_service is what lets the proxy bind listen.transparent below
-# 1024. The +ep form puts it in the permitted and effective sets of
+# cap_net_bind_service is what lets the proxy bind listen.transparent_port
+# below 1024. The +ep form puts it in the permitted and effective sets of
 # whatever uid execs the binary, drawn from the bounding set. The pod fills
 # that set with capabilities.add NET_BIND_SERVICE. docs/containers.md
 # states why both halves are needed.
