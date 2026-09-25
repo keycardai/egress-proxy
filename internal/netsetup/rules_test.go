@@ -60,7 +60,7 @@ func TestProgramRules(t *testing.T) {
 				// part way leaves the chain dropping what it was not yet told
 				// to accept.
 				"-t filter -A EGRESS_PROXY_FILTER_OUTPUT -j DROP",
-				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 1 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 2 -o lo -j ACCEPT",
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 3 -d 127.0.0.0/8 -j ACCEPT",
 				"-t filter -I EGRESS_PROXY_FILTER_OUTPUT 4 -m owner --uid-owner 1337 -j ACCEPT",
@@ -69,7 +69,7 @@ func TestProgramRules(t *testing.T) {
 				"-t nat -I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT",
 				"-t filter -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT",
 			},
-			absent: []string{"fd00::a", "::1/128", "ipv6-icmp"},
+			absent: []string{"fd00::a", "::1/128", "ipv6-icmp", "RELATED"},
 		},
 		{
 			name: "the IPv6 ruleset", cfg: cluster, family: netsetup.FamilyIPv6,
@@ -86,7 +86,7 @@ func TestProgramRules(t *testing.T) {
 			},
 			// RFC 4890 section 4.4.4 leaves Redirect to policy, and this
 			// policy drops it.
-			absent: []string{"10.43.0.10", "127.0.0.0/8", "--icmpv6-type 137", "--icmpv6-type 128"},
+			absent: []string{"10.43.0.10", "127.0.0.0/8", "--icmpv6-type 137", "--icmpv6-type 128", "RELATED"},
 		},
 		{
 			name: "the IPv6 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv6,

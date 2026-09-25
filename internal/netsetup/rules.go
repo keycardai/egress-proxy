@@ -230,13 +230,7 @@ func (p *Program) filter(cfg Config, family Family) {
 	p.Steps = append(p.Steps, Step{
 		Table: filterTable, Chain: filterChain, Spec: []string{"-j", "DROP"}, Seal: true,
 	})
-	// Replies to connections opened into the pod leave through OUTPUT, and
-	// nothing else in the chain matches them: the owner match matches the
-	// socket owner, and a reply from a socket owned by any uid but the
-	// proxy's reaches the terminal DROP. This does not widen what the
-	// workload may initiate: an outbound flow becomes ESTABLISHED only after
-	// its own first packet was accepted.
-	p.accept("-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+	p.acceptReplies()
 	// A REDIRECT rewrites the destination to loopback, and the reroute check
 	// after the nat table sends the packet out through lo. Both the
 	// interface and the destination are matched, so the accept does not
@@ -266,22 +260,34 @@ func (p *Program) denyNat() {
 }
 
 // denyFilter drops the IPv6 traffic the pod originates, and leaves the pod
-// reachable over IPv6. A reply to a connection opened into the pod is
-// ESTABLISHED, so it is accepted. A flow the pod starts never becomes
-// ESTABLISHED, because its first packet meets the DROP.
-//
-// NEVER add RELATED here. A conntrack helper can use it to admit a new
-// outbound flow to any address and port.
+// reachable over IPv6. A flow the pod starts never becomes ESTABLISHED,
+// because its first packet meets the DROP.
 func (p *Program) denyFilter() {
 	p.Steps = append(p.Steps, Step{
 		Table: filterTable, Chain: filterChain, Spec: []string{"-j", "DROP"}, Seal: true,
 	})
-	p.accept("-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")
+	p.acceptReplies()
 	p.accept("-o", "lo", "-j", "ACCEPT")
 	p.accept("-d", loopbackFor(FamilyIPv6), "-j", "ACCEPT")
 	for _, icmpType := range ndpTypes() {
 		p.accept("-p", "ipv6-icmp", "-m", "icmp6", "--icmpv6-type", strconv.Itoa(icmpType), "-j", "ACCEPT")
 	}
+}
+
+// acceptReplies accepts the packets of a connection conntrack has already
+// seen in both directions. Replies to connections opened into the pod leave
+// through OUTPUT, and nothing else in the chain matches them: the owner
+// match matches the socket owner, and a reply from a socket owned by any
+// uid but the proxy's reaches the terminal DROP. This does not widen what
+// the workload may initiate: an outbound flow becomes ESTABLISHED only after
+// its own first packet was accepted.
+//
+// NEVER add RELATED. It matches a new flow that a conntrack helper expects,
+// so the ruleset would hold only while no helper is assigned. Without it the
+// pod sends no ICMP error about inbound traffic, such as port unreachable
+// for a closed UDP port.
+func (p *Program) acceptReplies() {
+	p.accept("-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")
 }
 
 // add appends a rule to the nat chain.

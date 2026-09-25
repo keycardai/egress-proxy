@@ -204,20 +204,18 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
   every resolver in `/etc/resolv.conf`, unconditionally and unread. A workload
   can encode data in query names and read data back out of the answers. That
   traffic reaches no endpoint rule and no audit record.
-- `ESTABLISHED,RELATED` in the IPv4 OUTPUT chain is an open channel to any
-  peer that opens a connection into the pod. It is the first accept in the
-  filter chain. An outbound flow reaches ESTABLISHED only after its own first
+- `ESTABLISHED` in OUTPUT is an open channel to any peer that opens a
+  connection into the pod. It is the first accept in the filter chain of both
+  families. An outbound flow reaches ESTABLISHED only after its own first
   packet was accepted, so it widens nothing the workload initiates. INPUT is
   untouched and its policy is ACCEPT, so a peer that connects into the pod
   creates a conntrack entry. The workload then has an unrestricted two-way
   channel to that peer on that tuple, over TCP or UDP. A NetworkPolicy on
-  ingress closes it. `RELATED` also admits a flow a conntrack helper
-  expects. Attaching a helper needs CAP_NET_ADMIN in the pod's network
-  namespace, which nothing in the pod holds once the init container exits.
-  The exception is a kernel older than 6.0 on a node booted with
-  `nf_conntrack.nf_conntrack_helper=1`: it assigns helpers automatically in
-  every network namespace. Linux 4.7 turned that default off (commit
-  3bb398d925ec) and Linux 6.0 removed the setting (commit b118509076b3).
+  ingress closes it.
+- The pod sends no ICMP error about inbound traffic. The filter chain accepts
+  `ESTABLISHED` and not `RELATED`, and an ICMP error is `RELATED`. A peer
+  sending UDP to a closed port in the pod gets no port unreachable and waits
+  for its own timeout.
 - The init container drops CAP_NET_ADMIN on one thread. `capset`,
   `PR_CAPBSET_DROP` and `PR_SET_NO_NEW_PRIVS` each act on the calling thread
   (capabilities(7), prctl(2)). The other threads the Go runtime started keep
