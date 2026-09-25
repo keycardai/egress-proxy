@@ -38,13 +38,13 @@ import (
 )
 
 func main() {
-	if err := command(os.Stdout, nil).Run(context.Background(), os.Args); err != nil {
+	cmd := command(os.Stdout, nil, "/proc/sys/net/ipv4/ip_unprivileged_port_start")
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "egress-netsetup: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// settings are what the command line supplies.
 type settings struct {
 	proxyUID     int
 	redirectPort int
@@ -60,6 +60,9 @@ type settings struct {
 	dryRun       bool
 	verifyOnly   bool
 	keepNetAdmin bool
+
+	portStartPath  string
+	portProtection string
 }
 
 // opener resolves the handle and the binary for one address family. A nil
@@ -82,8 +85,8 @@ func openTables(ctx context.Context, family netsetup.Family, override string) (n
 // the spec only references, and envFrom imports every key from one without
 // the spec naming any of them. Source:
 // https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
-func command(out io.Writer, open opener) *cli.Command {
-	var opts settings
+func command(out io.Writer, open opener, portStartPath string) *cli.Command {
+	opts := settings{portStartPath: portStartPath}
 	if open == nil {
 		open = openTables
 	}
@@ -140,8 +143,33 @@ func run(ctx context.Context, cmd *cli.Command, opts settings, open opener, out 
 	return nil
 }
 
+const maxPort = 65535
+
+func checkRedirectPort(port int, path string) error {
+	//nolint:gosec // G304: main supplies a fixed procfs path and tests supply a fixture
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read net.ipv4.ip_unprivileged_port_start: %w", err)
+	}
+	start, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil {
+		return fmt.Errorf("parse net.ipv4.ip_unprivileged_port_start: %w", err)
+	}
+	if start < 0 || start > maxPort {
+		return fmt.Errorf("%w: net.ipv4.ip_unprivileged_port_start=%d is outside 0-65535", errUsage, start)
+	}
+	if port >= start {
+		return fmt.Errorf("%w: redirect port %d must be below net.ipv4.ip_unprivileged_port_start=%d",
+			errUsage, port, start)
+	}
+	return nil
+}
+
 // validate rejects a command line that asks for two different runs.
 func (s settings) validate() error {
+	if s.portProtection != "required" && s.portProtection != "allow-unprotected" {
+		return fmt.Errorf("%w: --redirect-port-protection must be required or allow-unprotected", errUsage)
+	}
 	if s.dryRun && s.verifyOnly {
 		return fmt.Errorf("%w: --dry-run prints the ruleset and --verify reads the tables back. Give one",
 			errUsage)
@@ -209,6 +237,12 @@ func eachFamily(
 	out io.Writer,
 	action func(handle netsetup.Tables, built netsetup.Program) error,
 ) ([]netsetup.Program, error) {
+	if opts.portProtection == "allow-unprotected" {
+		fmt.Fprintln(out, "# WARNING: redirect-port protection is waived; a workload may take the proxy port "+
+			"and receive redirected traffic without proxy auditing")
+	} else if err := checkRedirectPort(cfg.RedirectPort, opts.portStartPath); err != nil {
+		return nil, err
+	}
 	programs := make([]netsetup.Program, 0, len(cfg.Families()))
 	for _, family := range cfg.Families() {
 		built, err := cfg.Program(family)
@@ -267,6 +301,7 @@ func program(ctx context.Context, cfg netsetup.Config, opts settings, open opene
 		return err
 	}
 	receipt := netsetup.NewReceipt(cfg, programs, true, time.Now())
+	receipt.RedirectPortProtection = opts.portProtection
 	if err := dropNetAdmin(opts.keepNetAdmin, &receipt, out); err != nil {
 		return err
 	}
@@ -393,6 +428,8 @@ func joinAddrs(addrs []netip.Addr) string {
 }
 
 // flagSet is the command line an init container is given.
+//
+//nolint:funlen // keep the declarative flag list together
 func flagSet(opts *settings) []cli.Flag {
 	defaults := netsetup.DefaultConfig()
 	return []cli.Flag{
@@ -403,6 +440,12 @@ func flagSet(opts *settings) []cli.Flag {
 		&cli.IntFlag{
 			Name: "redirect-port", Value: defaults.RedirectPort, Destination: &opts.redirectPort,
 			Usage: "the sidecar's transparent listener port",
+		},
+		&cli.StringFlag{
+			Name:        "redirect-port-protection",
+			Value:       "required",
+			Destination: &opts.portProtection,
+			Usage:       "required enforces port protection; allow-unprotected accepts proxy-port takeover",
 		},
 		&cli.StringSliceFlag{
 			Name: "capture-ports", Value: portStrings(defaults.CapturePorts), Destination: &opts.capturePorts,

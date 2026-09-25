@@ -95,13 +95,33 @@ verifies them, drops CAP_NET_ADMIN and writes the receipt.
 
 The pod contract this surface assumes: the init container holds NET_ADMIN
 and SETPCAP and runs before every other container. The sidecar runs as the
-proxy uid. The workload holds no capability and runs as a uid that is not
+proxy uid with NET_BIND_SERVICE. The pod sets
+`net.ipv4.ip_unprivileged_port_start` above the redirect port, normally 1024.
+The workload holds no capability and runs as a uid that is not
 the proxy's. The receipt is on an emptyDir with medium Memory that the
 workload does not mount.
+
+`--redirect-port-protection=required` is the default. It requires the runtime
+to enforce privileged-port binding and expose
+`net.ipv4.ip_unprivileged_port_start`. gVisor netstack release `20260921.0`
+does neither. The [upstream bind fix](https://github.com/google/gvisor/pull/14972)
+also needs to expose the threshold before it satisfies this check.
+
+`--redirect-port-protection=allow-unprotected` explicitly waives the port
+check, including missing or invalid sysctl values. Program and verify runs
+warn that a workload may take the proxy port and receive redirected traffic
+without proxy auditing. A program run records the selected policy in
+`redirect_port_protection` in the receipt. An absent field in an older
+receipt provides no evidence of a port check. The exception changes no
+rules, rule verification, or capability handling. It permits listener
+takeover and disruption during proxy startup or restarts; it does not grant
+the workload the proxy uid's direct-egress exemption. This is a degraded
+compatibility mode, not a claim that the complete ruleset works on gVisor.
 
 | Threat | Mitigation | Test |
 |---|---|---|
 | A workload calls `setuid` to the proxy uid. The nat chain returns early for that uid and the filter chain accepts it, so the workload's own traffic would be neither redirected nor dropped. This bypass is published against Istio (https://pulsesecurity.co.nz/advisories/istio-egress-bypass), and Istio states the same limit (https://istio.io/latest/docs/ops/best-practices/security/#understand-traffic-capture-limitations). | Traffic capture is not a boundary on its own. The workload securityContext is: run as a uid that is not the proxy's, `allowPrivilegeEscalation` false, `capabilities.drop` ALL. Without CAP_SETUID the call fails, and `no_new_privs` keeps an execve from granting it. The ruleset excludes the proxy uid and no other. The proxy uid may not be 0, which would exempt every root process in the pod. | `TestProgramRules`, `TestValidate` |
+| A workload binds the redirect port before the sidecar starts or while it restarts. | Before programming or verifying rules, netsetup reads `net.ipv4.ip_unprivileged_port_start` and refuses a redirect port at or above it. An unreadable or invalid value fails the default required mode. The explicit allow-unprotected exception waives this mitigation and records that policy in the receipt. The workload holds no NET_BIND_SERVICE capability. | `TestCheckRedirectPort`, `TestPortCheckPrecedesTableAccess`, `netsetup_ruleset.txtar` |
 | A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, DNS to the named resolvers, and the ICMPv6 Neighbour Discovery the kernel sends. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
 | A process with CAP_NET_RAW sends ICMPv6 of a neighbour discovery type, with any payload, to any IPv6 address. The ip6tables filter chain must accept neighbour discovery, because the kernel needs it to reach any IPv6 neighbour. | The ICMPv6 accepts match only packets from the kernel's own sockets: `-m owner ! --uid-owner 0-4294967294`. xt_owner matches a process's socket by its uid, and a kernel socket only when every uid condition is negated (linux `net/netfilter/xt_owner.c`, `owner_mt`). No process can send ICMPv6 past the DROP, whatever its uid. | `TestProgramRules`, `netsetup_ruleset.txtar` |
 | A workload leaves over IPv6, on a kernel whose ip6tables rules were never programmed. | Both address families are programmed. `--ipv6 auto` follows the kernel, `--ipv6 on` requires IPv6, and `--ipv6 off` programs an ip6tables ruleset that drops every IPv6 packet the pod sends. A probe that cannot tell whether the kernel has IPv6 fails the run. | `TestProgramRules`, `TestIPv6Modes`, `TestKernelHasIPv6`, `netsetup_ruleset.txtar` |

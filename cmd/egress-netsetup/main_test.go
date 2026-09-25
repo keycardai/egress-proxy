@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,6 +17,79 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 )
+
+func portStartFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ip_unprivileged_port_start")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	return path
+}
+
+func TestCheckRedirectPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want error
+	}{
+		{name: "protected", body: "1024\n"},
+		{name: "boundary protected", body: "1016\n"},
+		{name: "unprivileged ports enabled", body: "0\n", want: errUsage},
+		{name: "boundary unprotected", body: "1015\n", want: errUsage},
+		{name: "negative", body: "-1\n", want: errUsage},
+		{name: "out of range", body: "65536\n", want: errUsage},
+		{name: "malformed", body: "1024 garbage\n", want: strconv.ErrSyntax},
+		{name: "empty", want: strconv.ErrSyntax},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkRedirectPort(netsetup.DefaultRedirectPort, portStartFile(t, tc.body))
+			if tc.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.want)
+			assert.Contains(t, err.Error(), "net.ipv4.ip_unprivileged_port_start")
+		})
+	}
+}
+
+func TestPortCheckPrecedesTableAccess(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"program", "verify", "dry-run"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			receipt := filepath.Join(t.TempDir(), "netsetup.json")
+			require.NoError(t, os.WriteFile(receipt, []byte(keptCapabilityReceipt), 0o600))
+			args := []string{"egress-netsetup", "--dns-servers", "10.43.0.10", "--receipt", receipt}
+			if mode != "program" {
+				args = append(args, "--"+mode)
+			}
+			open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
+				t.Error("the run opened a table")
+				return nil, netsetup.Tool{}, errOpen
+			}
+			var out bytes.Buffer
+			err := command(&out, open, filepath.Join(t.TempDir(), "missing")).Run(t.Context(), args)
+			if mode == "dry-run" {
+				require.NoError(t, err)
+				assert.Contains(t, out.String(), "--to-ports 1015")
+			} else {
+				require.ErrorIs(t, err, os.ErrNotExist)
+				assert.Contains(t, err.Error(), "read net.ipv4.ip_unprivileged_port_start")
+			}
+			body, err := os.ReadFile(receipt)
+			if mode == "program" {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			} else {
+				require.NoError(t, err)
+				//nolint:testifylint // the receipt must remain byte-for-byte unchanged
+				assert.Equal(t, []byte(keptCapabilityReceipt), body)
+			}
+		})
+	}
+}
 
 // resolvConf writes a resolv.conf the command reads its resolvers from.
 func resolvConf(t *testing.T, body string) string {
@@ -80,7 +154,7 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 			var out bytes.Buffer
 			receipt := filepath.Join(t.TempDir(), "netsetup.json")
 			args := append(dryRunArgs(resolv), append(tc.args, "--receipt", receipt)...)
-			require.NoError(t, command(&out, nil).Run(context.Background(), args), "the dry run")
+			require.NoError(t, command(&out, nil, "").Run(context.Background(), args), "the dry run")
 			for _, want := range tc.want {
 				assert.Contains(t, out.String(), want, "the printed ruleset")
 			}
@@ -206,7 +280,7 @@ func TestCommandRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := command(&out, nil).Run(context.Background(), append(dryRunArgs(resolv), tc.args...))
+			err := command(&out, nil, "").Run(context.Background(), append(dryRunArgs(resolv), tc.args...))
 			require.Error(t, err, "the command refuses")
 			assert.Contains(t, err.Error(), tc.want, "the refusal says why")
 			assert.NotContains(t, out.String(), "-A EGRESS_PROXY_", "nothing is printed for a refused run")
@@ -362,7 +436,8 @@ func TestVerifyWritesNothing(t *testing.T) {
 			}
 			args, tables := verifyFixture(t, receipt)
 			var out bytes.Buffer
-			require.NoError(t, command(&out, tables.open).Run(context.Background(), args), "the verify run")
+			cmd := command(&out, tables.open, portStartFile(t, "1024\n"))
+			require.NoError(t, cmd.Run(context.Background(), args), "the verify run")
 
 			assert.Empty(t, tables.writes(), "--verify changes no rule")
 			assert.Contains(t, out.String(), "Nothing was written", "the run says it wrote nothing")
@@ -389,13 +464,14 @@ func TestKeepNetAdminIsRecorded(t *testing.T) {
 		"--dns-servers", "10.43.0.10", "--ipv6", "off", "--receipt", receipt,
 	}
 	var out bytes.Buffer
-	require.NoError(t, command(&out, tables.open).Run(context.Background(), args), "the run")
+	require.NoError(t, command(&out, tables.open, portStartFile(t, "1024\n")).Run(context.Background(), args), "the run")
 
 	body, err := os.ReadFile(receipt)
 	require.NoError(t, err, "the run writes a receipt")
 	var got netsetup.Receipt
 	require.NoError(t, json.Unmarshal(body, &got), "the receipt parses")
 	assert.True(t, got.Verified, "the rules read back")
+	assert.Equal(t, "required", got.RedirectPortProtection)
 	assert.False(t, got.CapabilitiesDropped, "the receipt says CAP_NET_ADMIN was kept")
 	assert.Contains(t, out.String(), "CAP_NET_ADMIN is still held", "the run says it kept the capability")
 }
@@ -475,7 +551,7 @@ func TestAFailedRunLeavesNoReceipt(t *testing.T) {
 			args := append([]string{"egress-netsetup", "--keep-net-admin", "--ipv6", "off", "--receipt", receipt},
 				resolvers...)
 			var out bytes.Buffer
-			err := command(&out, open).Run(context.Background(), args)
+			err := command(&out, open, portStartFile(t, "1024\n")).Run(context.Background(), args)
 
 			require.Error(t, err, "the run fails")
 			for _, want := range tc.want {
@@ -527,9 +603,80 @@ func TestVerifyRefusesFlagsItWouldIgnore(t *testing.T) {
 				t.Error("a refused command line opens no iptables handle")
 				return nil, netsetup.Tool{}, nil
 			}
-			err := command(&out, open).Run(context.Background(), args)
+			err := command(&out, open, portStartFile(t, "1024\n")).Run(context.Background(), args)
 			require.Error(t, err, "the command refuses")
 			assert.Contains(t, err.Error(), tc.want, "the refusal says why")
 		})
 	}
+}
+
+func TestAllowUnprotectedPort(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"program", "verify"} {
+		for _, state := range []string{"missing", "0", "invalid", "1024"} {
+			t.Run(mode+"/"+state, func(t *testing.T) {
+				t.Parallel()
+				receipt := filepath.Join(t.TempDir(), "receipt.json")
+				require.NoError(t, os.WriteFile(receipt, []byte(keptCapabilityReceipt), 0o600))
+				args, tables := verifyFixture(t, receipt)
+				if mode == "program" {
+					args[1] = "--keep-net-admin"
+				}
+				args = append(args, "--redirect-port-protection", "allow-unprotected")
+				path := filepath.Join(t.TempDir(), "missing")
+				if state != "missing" {
+					path = portStartFile(t, state)
+				}
+				var out bytes.Buffer
+				require.NoError(t, command(&out, tables.open, path).Run(t.Context(), args))
+				assert.Contains(t, out.String(), "WARNING: redirect-port protection is waived")
+				body, err := os.ReadFile(receipt)
+				require.NoError(t, err)
+				if mode == "verify" {
+					assert.Empty(t, tables.writes())
+					//nolint:testifylint // verify must preserve the receipt byte for byte
+					assert.Equal(t, keptCapabilityReceipt, string(body))
+				} else {
+					var got netsetup.Receipt
+					require.NoError(t, json.Unmarshal(body, &got))
+					assert.True(t, got.Verified)
+					assert.Equal(t, "allow-unprotected", got.RedirectPortProtection)
+					assert.NotEmpty(t, tables.writes())
+				}
+			})
+		}
+	}
+}
+
+func TestAllowUnprotectedStillRefusesBadRules(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"program", "verify"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			receipt := filepath.Join(t.TempDir(), "receipt.json")
+			args, tables := verifyFixture(t, receipt)
+			if mode == "program" {
+				args[1] = "--keep-net-admin"
+			}
+			args = append(args, "--redirect-port-protection", "allow-unprotected")
+			for _, table := range tables {
+				clear(table.rules)
+			}
+			var out bytes.Buffer
+			err := command(&out, tables.open, "missing").Run(t.Context(), args)
+			require.ErrorIs(t, err, netsetup.ErrRulesMissing)
+			_, err = os.Stat(receipt)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestPortProtectionRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	args := []string{"egress-netsetup", "--dry-run", "--redirect-port-protection", "auto"}
+	err := command(&out, nil, "").Run(t.Context(), args)
+	require.ErrorIs(t, err, errUsage)
+	assert.Contains(t, err.Error(), "--redirect-port-protection must be required or allow-unprotected")
+	assert.Empty(t, out.String())
 }

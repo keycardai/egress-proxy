@@ -25,6 +25,15 @@ exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6
 stderr 'redirect port 1015 must be below net.ipv4.ip_unprivileged_port_start=0'
 ! exec docker exec $LAB-workload test -e /run/egress/netsetup.json
 ! exec docker exec $LAB-workload iptables-legacy -S EGRESS_PROXY_FILTER_OUTPUT
+exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4 --redirect-port-protection allow-unprotected
+stdout 'WARNING: redirect-port protection is waived'
+exec docker exec $LAB-workload cat /run/egress/netsetup.json
+stdout '"redirect_port_protection": "allow-unprotected"'
+stdout '"verified": true'
+exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4 --redirect-port-protection allow-unprotected --verify
+stdout 'WARNING: redirect-port protection is waived'
+exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:8443
+stdout '^tcp TIMEOUT$'
 exec docker rm -f $LAB-workload
 
 exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6 $LAB_WORKLOAD6 --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=1024 --sysctl 'net.ipv4.ping_group_range=0 2147483647' $LAB_IMAGE sleep 600
@@ -59,6 +68,7 @@ stdout '^# CAP_NET_ADMIN dropped from every capability set on this thread, no_ne
 exec docker exec $LAB-workload cat /run/egress/netsetup.json
 stdout '"verified": true'
 stdout '"capabilities_dropped": true'
+stdout '"redirect_port_protection": "required"'
 stdout '"families": \[\s*"ipv4",\s*"ipv6"\s*\]'
 
 exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture :1015

@@ -47,6 +47,9 @@ type Receipt struct {
 	// RedirectPort is where the nat REDIRECT sends captured traffic. It must
 	// be the port listen.transparent binds.
 	RedirectPort int `json:"redirect_port"`
+	// RedirectPortProtection records the required or allow-unprotected policy.
+	// An absent value provides no evidence of a port-protection check.
+	RedirectPortProtection string `json:"redirect_port_protection,omitempty"`
 	// CapturePorts are the destination ports the redirect covers.
 	CapturePorts []int `json:"capture_ports"`
 	// Families are the address families programmed.
