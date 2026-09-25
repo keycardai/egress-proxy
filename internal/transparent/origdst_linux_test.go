@@ -37,9 +37,7 @@ func TestOriginalDestinationNeverInventsADestination(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			listener, err := (&net.ListenConfig{}).Listen(t.Context(), tc.network, tc.address)
-			if err != nil {
-				t.Skipf("this kernel has no %s loopback: %v", tc.network, err)
-			}
+			require.NoError(t, err, "listen on %s", tc.address)
 			t.Cleanup(func() { _ = listener.Close() })
 			accepted := make(chan net.Conn, 1)
 			go func() {
