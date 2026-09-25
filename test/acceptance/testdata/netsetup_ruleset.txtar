@@ -6,6 +6,9 @@
 # connection with the destination the redirect preserved. The workload runs
 # as uid 1000.
 #
+# The host kernel must have the legacy filter and nat tables of both
+# families loaded. A container cannot load them.
+#
 # Each packet class the ruleset names is probed, and each probe the ruleset
 # must refuse is paired with the same probe from a uid it allows. The pair
 # shows the refusal comes from the rules and not from the network.
