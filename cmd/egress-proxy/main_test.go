@@ -70,3 +70,44 @@ func TestCommandRequiresTheConfigPath(t *testing.T) { //nolint:paralleltest // t
 	cmd := command(io.Discard, func(context.Context, flags) error { return nil })
 	require.Error(t, cmd.Run(t.Context(), []string{"egress-proxy"}), "Run without --config")
 }
+
+func TestTransparentPortOverrides(t *testing.T) { //nolint:paralleltest // t.Setenv
+	tests := []struct {
+		name string
+		env  string
+		args []string
+		want int
+	}{
+		{name: "document without an override", want: 1015},
+		{name: "flag disables capture", args: []string{"--transparent-port", "0"}, want: 0},
+		{name: "environment disables capture", env: "0", want: 0},
+		{name: "flag disables capture over environment", env: "1016", args: []string{"--transparent-port", "0"}, want: 0},
+		{name: "flag enables capture over environment", env: "0", args: []string{"--transparent-port", "1016"}, want: 1016},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envPrefix+"TRANSPARENT_PORT", tc.env)
+			var cfg *config.Config
+			cmd := command(io.Discard, func(_ context.Context, opts flags) error {
+				var err error
+				cfg, err = config.Parse([]byte("version: 1\nsandbox:\n  id: test\nlisten:\n  transparent_port: 1015\n"+
+					"endpoints:\n  - host: example.com\n"), opts.overrides())
+				return err
+			})
+			args := append([]string{"egress-proxy", "--config", "/unused.yaml"}, tc.args...)
+			require.NoError(t, cmd.Run(t.Context(), args), "parse the command and document")
+			require.NotNil(t, cfg, "the command loaded the document")
+			assert.Equal(t, tc.want, cfg.Listen.TransparentPort, "the effective transparent port")
+			if tc.env != "" || len(tc.args) != 0 {
+				assert.Contains(t, cfg.Overridden, "listen.transparent_port", "record the supplied override")
+			} else {
+				assert.NotContains(
+					t,
+					cfg.Overridden,
+					"listen.transparent_port",
+					"an omitted override leaves the document alone",
+				)
+			}
+		})
+	}
+}
