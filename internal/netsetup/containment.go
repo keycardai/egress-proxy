@@ -16,8 +16,7 @@ import (
 // maxReceiptSize bounds the read. The receipt is a dozen scalar fields.
 const maxReceiptSize = 64 << 10
 
-// groupAndOtherWrite is the permission bits neither the receipt nor its
-// directory may carry.
+// groupAndOtherWrite is the permission bits the receipt may not have.
 const groupAndOtherWrite = 0o022
 
 // The errors the containment check returns.
@@ -32,8 +31,8 @@ var (
 	// report the lowest port an unprivileged process may bind.
 	ErrPortStartNotSupported = errors.New("the unprivileged port start is reported only on Linux")
 	// ErrUnreadableReceipt is returned for a receipt that is there and
-	// cannot be used: not a regular file, or from a schema version this
-	// build does not read.
+	// cannot be used: not a regular file, not JSON, or from a schema version
+	// this build does not read.
 	ErrUnreadableReceipt = errors.New("the netsetup receipt cannot be read")
 )
 
@@ -50,10 +49,11 @@ func ReadReceipt(path string) (Receipt, error) {
 // The contents and the metadata come from one open file descriptor, so the
 // mode and the owner Containment checks belong to the bytes it parsed. The
 // open does not follow a symlink: a link at the receipt's path points the
-// check at one file and the read at another.
+// check at one file and the read at another. The open does not block: a
+// FIFO at the path is refused as not a regular file.
 func readReceipt(path string) (Receipt, fs.FileInfo, error) {
 	//nolint:gosec // G304: the path comes from this process's own configuration
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Receipt{}, nil, fmt.Errorf("%w at %s: the init container writes it after it programs and "+
@@ -77,7 +77,7 @@ func readReceipt(path string) (Receipt, fs.FileInfo, error) {
 	}
 	var receipt Receipt
 	if err := json.Unmarshal(body, &receipt); err != nil {
-		return Receipt{}, nil, fmt.Errorf("the netsetup receipt %s does not parse: %w", path, err)
+		return Receipt{}, nil, fmt.Errorf("%w: %s does not parse: %w", ErrUnreadableReceipt, path, err)
 	}
 	if receipt.Version != receiptVersion {
 		return Receipt{}, nil, fmt.Errorf("%w: %s is version %d and this build reads version %d",
@@ -123,10 +123,13 @@ type ContainmentRequest struct {
 // written and that the process that wrote it then gave up the capability to
 // change them. It does not say the workload cannot get around the ruleset:
 // the securityContext says that.
-func Containment(request ContainmentRequest) error {
+//
+// It returns the receipt it checked. Log from that value and NEVER read the
+// file again: a second read can find a receipt this check never saw.
+func Containment(request ContainmentRequest) (Receipt, error) {
 	receipt, info, err := readReceipt(request.Path)
 	if err != nil {
-		return err
+		return Receipt{}, err
 	}
 	var found problems
 	if !receipt.Verified {
@@ -139,6 +142,10 @@ func Containment(request ContainmentRequest) error {
 			"rules could still change them after it verified them. Drop --keep-net-admin from the init container")
 	}
 	found.add(receiptAgeProblems(receipt, request)...)
+	if receipt.ProxyUID <= 0 {
+		found.addf("the ruleset excludes uid %d. Uid 0 would exempt every root process in the pod from both "+
+			"chains. Program the rules with --proxy-uid set to the sidecar's own non-root uid", receipt.ProxyUID)
+	}
 	if receipt.ProxyUID != request.UID {
 		found.addf("the ruleset excludes uid %d and this process runs as uid %d. Every connection this process "+
 			"opens would be redirected into its own transparent listener. Run the sidecar as uid %d, or program "+
@@ -158,9 +165,9 @@ func Containment(request ContainmentRequest) error {
 	found.add(portStartProblems(receipt, request)...)
 	found.add(receiptFileProblems(request, info)...)
 	if len(found) > 0 {
-		return fmt.Errorf("%w:\n  %s", ErrNotContained, strings.Join(found, "\n  "))
+		return Receipt{}, fmt.Errorf("%w:\n  %s", ErrNotContained, strings.Join(found, "\n  "))
 	}
-	return nil
+	return receipt, nil
 }
 
 // receiptAgeProblems bounds when the receipt was written. A receipt with no
@@ -230,13 +237,19 @@ func portStartProblems(receipt Receipt, request ContainmentRequest) []string {
 	}
 	return []string{fmt.Sprintf("net.ipv4.ip_unprivileged_port_start is %d, so a process holding no "+
 		"CAP_NET_BIND_SERVICE can bind the redirect port %d and stand in for the proxy during a restart. "+
-		"Leave the sysctl at the kernel default of 1024 and keep the redirect port below it",
+		"Set the pod sysctl net.ipv4.ip_unprivileged_port_start to 1024 in securityContext.sysctls and keep the "+
+		"redirect port below it. containerd 2.0 and later sets it to 0 in a pod that does not set it",
 		start, receipt.RedirectPort)}
 }
 
-// receiptFileProblems refuses a receipt another uid can write, and a
-// directory another uid can put a replacement in. Whoever can write either
-// decides what this process believes about its own containment.
+// receiptFileProblems refuses a receipt another uid can write or owns, and a
+// directory another uid owns. Whoever can write the receipt decides what
+// this process believes about its own containment.
+//
+// The directory may be writable by every uid. An emptyDir mount point is
+// 0777 (kubernetes pkg/volume/emptydir/empty_dir.go, perm). A uid that
+// replaces the receipt there owns the replacement, and the owner check
+// refuses it.
 func receiptFileProblems(request ContainmentRequest, info fs.FileInfo) []string {
 	owner := request.Owner
 	if owner == nil {
@@ -254,24 +267,15 @@ func receiptFileProblems(request ContainmentRequest, info fs.FileInfo) []string 
 	return found
 }
 
-// receiptDirProblems refuses a directory another uid can put a replacement
-// receipt in.
+// receiptDirProblems refuses a directory owned by a uid that is neither root
+// nor this process's own. Its owner can change its mode and its entries.
 func receiptDirProblems(owner func(fs.FileInfo) (int, bool), request ContainmentRequest) []string {
 	dir := filepath.Dir(request.Path)
 	info, err := os.Stat(dir)
 	if err != nil {
 		return []string{fmt.Sprintf("%s: %v", dir, err)}
 	}
-	var found problems
-	// A directory another uid can write lets that uid unlink the receipt
-	// and put its own there, unless the sticky bit keeps each entry with
-	// its owner.
-	if info.Mode().Perm()&groupAndOtherWrite != 0 && info.Mode()&fs.ModeSticky == 0 {
-		found.addf("%s is mode %#o, so a uid other than its owner can replace the receipt in it. Set the mode "+
-			"to 0755", dir, info.Mode().Perm())
-	}
-	found.add(ownerProblems(owner, info, dir, request.UID, "so that uid can replace the receipt")...)
-	return found
+	return ownerProblems(owner, info, dir, request.UID, "So that uid can replace the receipt")
 }
 
 // ownerProblems refuses a path owned by a uid that is neither root nor this

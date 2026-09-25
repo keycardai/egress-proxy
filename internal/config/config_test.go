@@ -123,6 +123,10 @@ func TestDigestIsOverTheDocumentAsWritten(t *testing.T) {
 const identityDoc = "identity:\n  zone_url: https://z\n  client_id: c\n  workload_token_file: /t\n" +
 	"  impersonate: {user: u}\n"
 
+// transparentDoc opens a listen section with a transparent frontend. A case
+// appends its own cleartext_ports under it.
+const transparentDoc = "listen:\n  transparent: \"0.0.0.0:1015\"\n"
+
 // twoEndpointsReversed lists the endpoints of minimal plus
 // files.pythonhosted.org in the opposite document order.
 const twoEndpointsReversed = "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n" +
@@ -169,7 +173,7 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			name: "settings that decide nothing",
 			doc:  minimal + identityDoc,
 			overrides: config.Overrides{
-				Connect: "127.0.0.1:9", Transparent: "0.0.0.0:1015", Admin: "/other/admin.sock",
+				Connect: "127.0.0.1:9", Admin: "/other/admin.sock",
 				NetsetupReceipt: "/other/netsetup.json", CAOutDir: "/other/ca",
 				CacheSize: 7, MaxConnections: 3, SandboxID: "another-sandbox",
 			},
@@ -201,14 +205,25 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 		},
 		{
 			name:     "the same cleartext ports in either order",
-			doc:      minimal + identityDoc + "listen:\n  cleartext_ports: [80, 8080]\n",
-			against:  minimal + identityDoc + "listen:\n  cleartext_ports: [8080, 80, 80]\n",
+			doc:      minimal + identityDoc + transparentDoc + "  cleartext_ports: [80, 8080]\n",
+			against:  minimal + identityDoc + transparentDoc + "  cleartext_ports: [8080, 80, 80]\n",
 			wantSame: true,
 		},
 		{
 			name:    "another cleartext port, which decides what a captured connection is read as",
-			doc:     minimal + identityDoc + "listen:\n  cleartext_ports: [8080]\n",
-			against: minimal + identityDoc,
+			doc:     minimal + identityDoc + transparentDoc + "  cleartext_ports: [8080]\n",
+			against: minimal + identityDoc + transparentDoc,
+		},
+		{
+			name:     "cleartext ports with no transparent frontend, where nothing is captured",
+			doc:      minimal + identityDoc + "listen:\n  cleartext_ports: [8080]\n",
+			wantSame: true,
+		},
+		{
+			name:     "the transparent frontend on another address",
+			doc:      minimal + identityDoc + transparentDoc,
+			against:  minimal + identityDoc + "listen:\n  transparent: \"127.0.0.1:1015\"\n",
+			wantSame: true,
 		},
 		{
 			name:    "the same two upstream roots in either order",
@@ -415,6 +430,11 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		{
 			name: "transparent without a port",
 			doc:  minimal + "listen:\n  transparent: \"0.0.0.0\"\n", wantErr: "listen.transparent",
+		},
+		{
+			name:    "transparent naming a host rather than an address",
+			doc:     minimal + "listen:\n  transparent: \"localhost:1015\"\n",
+			wantErr: "the host must be empty or an IP address, not a name",
 		},
 		{
 			name:    "transparent naming a port outside 1-65535",

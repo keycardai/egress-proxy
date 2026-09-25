@@ -94,14 +94,40 @@ func TestContainment(t *testing.T) {
 			want:  []string{"so a uid other than its owner can write it", "Set the mode to 0644"},
 		},
 		{
-			name:     "a directory any uid can put a replacement receipt in",
+			// An emptyDir mount point is 0777. A replacement another uid
+			// puts there is owned by that uid, which the owner check refuses.
+			name:     "a directory every uid can write, which is what an emptyDir mount point is",
 			chmodDir: 0o777,
-			want:     []string{"so a uid other than its owner can replace the receipt in it", "Set the mode to 0755"},
 		},
 		{
 			name: "a receipt owned by a uid that is neither root nor the sidecar's",
-			ask:  func(q *netsetup.ContainmentRequest) { q.Owner = func(fs.FileInfo) (int, bool) { return 1000, true } },
-			want: []string{"is owned by uid 1000, which is neither root nor this process's own uid 1337"},
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.Owner = func(info fs.FileInfo) (int, bool) {
+					if info.IsDir() {
+						return 0, true
+					}
+					return 1000, true
+				}
+			},
+			want: []string{"netsetup.json is owned by uid 1000, which is neither root nor this process's own uid 1337"},
+		},
+		{
+			name: "a directory owned by a uid that is neither root nor the sidecar's",
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.Owner = func(info fs.FileInfo) (int, bool) {
+					if info.IsDir() {
+						return 1000, true
+					}
+					return 0, true
+				}
+			},
+			want: []string{"egress is owned by uid 1000", "So that uid can replace the receipt"},
+		},
+		{
+			name: "a ruleset that exempts uid 0, with a sidecar running as root to match it",
+			edit: func(r *netsetup.Receipt) { r.ProxyUID = 0 },
+			ask:  func(q *netsetup.ContainmentRequest) { q.UID = 0 },
+			want: []string{"the ruleset excludes uid 0", "Uid 0 would exempt every root process in the pod"},
 		},
 		{
 			name: "a filesystem that does not say who owns the receipt",
@@ -166,12 +192,14 @@ func TestContainment(t *testing.T) {
 			if tc.ask != nil {
 				tc.ask(&ask)
 			}
-			err := netsetup.Containment(ask)
+			got, err := netsetup.Containment(ask)
 			if len(tc.want) == 0 {
 				require.NoError(t, err, "the sidecar can assert its own containment")
+				assert.Equal(t, receipt, got, "the receipt the check passed")
 				return
 			}
 			require.ErrorIs(t, err, netsetup.ErrNotContained, "the error the caller keys on")
+			assert.Zero(t, got, "a refused check returns no receipt to log")
 			for _, want := range tc.want {
 				assert.Contains(t, err.Error(), want, "the refusal names this disagreement")
 			}
@@ -199,10 +227,26 @@ func TestReadReceiptRefusals(t *testing.T) {
 			name:    "no receipt at all, so either the init container did not run or it wrote elsewhere",
 			missing: true, want: "no netsetup receipt", wantErr: netsetup.ErrNoReceipt,
 		},
-		{name: "a receipt that is not JSON", body: "not json", want: "does not parse"},
+		{
+			name: "a receipt that is not JSON",
+			body: "not json", want: "does not parse", wantErr: netsetup.ErrUnreadableReceipt,
+		},
 		{
 			name: "a receipt from a schema version this build does not read",
 			body: `{"version":99}`, want: "is version 99 and this build reads version 1",
+			wantErr: netsetup.ErrUnreadableReceipt,
+		},
+		{
+			// An open that blocks waits for a writer that never comes, so the
+			// sidecar would hang at start-up rather than refuse.
+			name: "a receipt that is a FIFO",
+			put: func(t *testing.T) string {
+				t.Helper()
+				fifo := filepath.Join(t.TempDir(), "netsetup.json")
+				require.NoError(t, syscall.Mkfifo(fifo, 0o644), "make the FIFO")
+				return fifo
+			},
+			want: "not a regular file", wantErr: netsetup.ErrUnreadableReceipt,
 		},
 		{
 			// A link at the receipt's path points the mode and owner checks

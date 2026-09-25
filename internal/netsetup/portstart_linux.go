@@ -21,16 +21,23 @@ var errPortStart = errors.New("the unprivileged port start is not a port number"
 
 // UnprivilegedPortStart reads the lowest port a process with no
 // CAP_NET_BIND_SERVICE may bind. The setting covers both address families,
-// which is why it is read from the IPv4 path alone.
+// which is why it is read from the IPv4 path alone: an IPv6 bind checks it
+// too (linux net/ipv6/af_inet6.c, __inet6_bind, and
+// inet_port_requires_bind_service).
 func UnprivilegedPortStart() (int, error) {
-	body, err := os.ReadFile(unprivilegedPortStartPath)
+	return unprivilegedPortStartAt(unprivilegedPortStartPath)
+}
+
+// unprivilegedPortStartAt reads the sysctl from path.
+func unprivilegedPortStartAt(path string) (int, error) {
+	body, err := os.ReadFile(path) //nolint:gosec // G304: the sysctl path, or a test fixture
 	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", unprivilegedPortStartPath, err)
+		return 0, fmt.Errorf("read %s: %w", path, err)
 	}
 	held := strings.TrimSpace(string(body))
 	start, err := strconv.Atoi(held)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %s holds %q", errPortStart, unprivilegedPortStartPath, held)
+		return 0, fmt.Errorf("%w: %s holds %q", errPortStart, path, held)
 	}
 	return start, nil
 }

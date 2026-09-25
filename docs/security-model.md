@@ -133,20 +133,30 @@ nothing about whether the port was checked.
 ### Transparent frontend
 
 The workload's outbound TCP reaches `listen.transparent` through the
-netsetup ruleset, and carries no proxy variable. `internal/transparent`
+netsetup ruleset, with no proxy variable set. `internal/transparent`
 accepts what the ruleset redirects, and the proxy decides each connection
-through the same pipeline a CONNECT tunnel takes. The sidecar holds
-NET_BIND_SERVICE and nothing else.
+through the same pipeline a CONNECT tunnel takes.
+
+The pod contract this surface assumes, on top of the netsetup one: the pod
+sets the sysctl `net.ipv4.ip_unprivileged_port_start` to `1024` in
+`securityContext.sysctls`. The sidecar drops every capability and adds
+NET_BIND_SERVICE, which keeps it in the bounding set. Its binary holds
+`cap_net_bind_service=+ep` as a file capability, which grants only what the
+bounding set allows, and an execve fails with EPERM when the bounding set
+lacks it (capabilities(7), the transformation of capabilities during
+execve). The sidecar leaves `allowPrivilegeEscalation` unset.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| A workload binds the redirect port during a sidecar restart and stands in for the proxy, deciding its own traffic. | The redirect target is port 1015, below 1024. Only a process holding CAP_NET_BIND_SERVICE can bind it, and the proxy holds that capability as a file capability on its binary. The mitigation rests on `net.ipv4.ip_unprivileged_port_start`, so the sidecar reads the sysctl at start-up rather than trusting the manifest, and refuses to start when it is at or below the redirect port. A Kubernetes pod gets the kernel default of 1024. Docker lowers it to 0, so the scenario sets it back. | `transparent_capture.txtar` (`bind EACCES`), `TestContainment` |
-| The sidecar starts against rules that were never applied, applied for another uid, or applied for another redirect port, or while it could change them itself. | The sidecar reads the netsetup receipt at start-up and refuses to start when the receipt says the rules were not verified, when the capability was kept, when the proxy uid or the redirect port disagree, when the receipt names no family, when this process still holds CAP_NET_ADMIN, or when any other uid can write the receipt or its directory. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the refusal naming uid 1000) |
-| A workload opens a connection straight to the transparent listener rather than being redirected into it, so the destination the proxy recovers is the proxy itself. | The frontend compares the recovered destination with the address it accepted on and denies a match with `not_redirected`. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused` |
+| A workload binds the redirect port during a sidecar restart and stands in for the proxy, deciding its own traffic. | The redirect target is port 1015. A process without CAP_NET_BIND_SERVICE can bind it only when `net.ipv4.ip_unprivileged_port_start` is at or below 1015, in either address family (linux `net/ipv6/af_inet6.c`, `__inet6_bind`). The sidecar reads the sysctl at start-up and refuses to start in that case. containerd 2.0 and later sets it to 0 in every pod that does not set it itself (containerd `docs/cri/config.md`, `enable_unprivileged_ports`), and Docker sets it to 0 too, so the pod sets it to 1024. Kubernetes lists it as a safe sysctl (https://kubernetes.io/docs/tasks/administer-cluster/sysctl-cluster/). | `TestContainment`, `TestContainmentReadsThisProcess`, `TestUnprivilegedPortStart`, `transparent_capture.txtar` (`bind EACCES`) |
+| The proxy cannot bind the redirect port, so no captured connection is served. | The filter chain drops what the listener does not receive, so the workload stays contained. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability on its binary. The kernel ignores file capabilities under `no_new_privs` (prctl(2), PR_SET_NO_NEW_PRIVS), and `allowPrivilegeEscalation: false` sets `no_new_privs` (Kubernetes API, `SecurityContext.allowPrivilegeEscalation`). A bind refused with EACCES names that field. | `transparent_capture.txtar` (the `no_new_privs` refusal) |
+| The sidecar starts against rules that were never applied, applied for another uid, or applied for another redirect port, or while it could change them itself. | The sidecar reads the netsetup receipt at start-up and refuses to start when the receipt says the rules were not verified, when the capability was kept, when the proxy uid or the redirect port disagree, when the proxy uid is 0, when the receipt names no family, or when this process holds CAP_NET_ADMIN in its effective or permitted set. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestCapture`, `transparent_capture.txtar` (the refusal naming uid 1000) |
+| Another container that mounts the receipt volume replaces the receipt, so the sidecar starts on a receipt the init container did not write. | The sidecar refuses a receipt that group or other can write, and a receipt or directory owned by a uid other than root and its own. An emptyDir mount point is 0777 (kubernetes `pkg/volume/emptydir/empty_dir.go`, `perm`), so any uid that mounts it can put a file there. That file is owned by the uid that wrote it and is refused. The receipt is opened once, without following a symlink and without blocking, and its mode, owner and contents come from that one descriptor. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the receipt on a 0777 volume) |
+| A workload or another pod opens a connection straight to the transparent listener rather than being redirected into it, so the destination the proxy recovers is the proxy itself. | The frontend compares the recovered destination with the address it accepted on and denies a match with `not_redirected`, before it reads from the connection. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused`, `transparent_capture.txtar` (the connection from the upstream container) |
 | A redirected TLS connection offers no server name, so there is no host to evaluate a policy against. Every connection opened straight to an address is one, because RFC 6066 section 3 forbids an IP literal in `server_name`. | The connection is denied with `no_sni` and closed. The refusal is recorded with the pre-redirect address, so an audit reader sees where it was going. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo`, `TestRedirectedConnectionsAreRefused`, `transparent_capture.txtar` |
 | A redirected connection names a destination the address contradicts, so the proxy decides one host and reaches another. | The name must carry the port the connection was opened to, and a name that is an address literal must be that address. A mismatch is denied with `host_mismatch`. The proxy re-resolves the name on the dial rather than dialling the recovered address, so a permitted name that resolves into a denied range is still caught by the dial guard. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` |
-| A client sends nothing, or sends a partial ClientHello, and holds a goroutine and a connection slot against nothing. | The peek carries a ten-second read deadline, and the connection then denies with `no_sni`, or with `cleartext_not_forwarded` on a cleartext port. The transparent listener carries a connection cap and an idle bound, both required options rather than defaults. The peek waits for one byte past what it has served and hands over what has arrived, so a client that sent its whole ClientHello waits for nothing. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` (the silent and partial clients), `TestTheConnectionCapHoldsUntilAConnectionCloses`, `TestNewRefusals`, `TestCapturedConnectionsAreServedOneAfterAnother` |
-| A captured cleartext connection carries a credential to a destination in cleartext. | Endpoints name HTTPS destinations. The frontend reads the `Host` header on a cleartext port so the refusal names the destination, and the connection is then denied with `cleartext_not_forwarded`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. Nothing cleartext is forwarded, including to a host and port the endpoint list covers. | `TestRedirectedConnectionsAreRefused` (a cleartext connection to a name and port an endpoint covers), `transparent_capture.txtar` (the `http://` request) |
+| A client sends nothing, or sends a partial ClientHello, and holds a goroutine and a connection slot against nothing. | The peek has a ten-second read deadline, and the connection then denies with `no_sni`, or with `cleartext_not_forwarded` on a cleartext port. The transparent listener has a connection cap and an idle bound, both required options. The peek waits for one byte past what it has served and hands over what has arrived, so a client that sent its whole ClientHello waits for nothing. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` (the silent and partial clients), `TestTheConnectionCapHoldsUntilAConnectionCloses`, `TestNewRefusals`, `TestCapturedConnectionsAreServedOneAfterAnother` |
+| A captured cleartext connection sends a credential to a destination in cleartext. | Endpoints name HTTPS destinations. The frontend reads the `Host` header on a cleartext port so the refusal names the destination, and the connection is then denied with `cleartext_not_forwarded`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. Nothing cleartext is forwarded, including to a host and port the endpoint list covers. | `TestRedirectedConnectionsAreRefused` (a cleartext connection to a name and port an endpoint covers), `transparent_capture.txtar` (the `http://` request) |
 
 ### Decision process
 
@@ -260,7 +270,18 @@ one of `identity.workload_token_file` and `identity.client_secret_file`.
   code of its own on them and exits once it has written the receipt.
 - The connection cap is per frontend. `limits.max_connections` bounds the
   CONNECT frontend and the transparent frontend separately, so a process
-  configured for 1024 can hold 2048.
+  configured for 1024 can hold 2048. The transparent frontend takes a slot
+  after the accept, so at the cap each of its sockets also holds one
+  accepted connection unread.
+- The transparent listener is reachable from other pods. A connection that
+  was not redirected is refused with `not_redirected` before any read, and
+  holds its slot for the 250 ms drain before close. A NetworkPolicy on
+  ingress to the redirect port closes it.
+- The sidecar cannot run under the restricted Pod Security Standard, which
+  requires `allowPrivilegeEscalation: false`
+  (https://kubernetes.io/docs/concepts/security/pod-security-standards/).
+  That sets `no_new_privs`, and the proxy then cannot bind the redirect port.
+  The sidecar needs the baseline level or an exemption.
 - The transparent frontend forwards no cleartext. A captured connection on a
   cleartext port is read for its `Host` and then refused, because every
   endpoint names an HTTPS destination.

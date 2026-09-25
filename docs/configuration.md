@@ -127,8 +127,8 @@ that the endpoint list denies.
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
 | `connect` | `127.0.0.1:3128` | `--connect`, `EGRESS_PROXY_CONNECT` | The CONNECT frontend in `host:port` form. A workload that honors `HTTPS_PROXY` reaches the proxy through this address. |
-| `transparent` | unset | `--transparent`, `EGRESS_PROXY_TRANSPARENT` | The redirect target in `host:port` form. The netsetup init container sends the workload's captured TCP here, so the workload reaches the proxy with no proxy variable set. A wildcard address binds one socket per address family. An unset value runs no transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start`, which is 1024 by default, so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when the port is not below it. The proxy needs `NET_BIND_SERVICE` to bind it. Linux only. |
-| `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP, where the destination comes from the `Host` header. Every other captured port is read as TLS and its destination comes from the ClientHello. Endpoints name HTTPS destinations, so a cleartext connection is read for its host and then refused. |
+| `transparent` | unset | `--transparent`, `EGRESS_PROXY_TRANSPARENT` | The redirect target in `host:port` form. The netsetup init container sends the workload's captured TCP here, so the workload reaches the proxy with no proxy variable set. The host is empty or an IP address. A wildcard address binds one socket per address family. An unset value runs no transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start`, so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when the port is not below it. containerd 2.0 and later sets it to 0, so set it to `1024` in the pod `securityContext.sysctls`. The proxy binds the port with `NET_BIND_SERVICE` from a file capability, so the sidecar adds `NET_BIND_SERVICE` and leaves `allowPrivilegeEscalation` unset. Linux only. |
+| `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP, where the destination comes from the `Host` header. Every other captured port is read as TLS and its destination comes from the ClientHello. Endpoints name HTTPS destinations, so a cleartext connection is read for its host and then refused. `config.digest` covers it only when `transparent` is set. |
 | `admin` | `/run/egress/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
 
 The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
@@ -150,9 +150,12 @@ at mode 0700, so no other uid in the pod can reach the socket. Keep
 The proxy reads the receipt before it serves anything and refuses to start
 when the ruleset in force disagrees with what it is about to do: the rules
 were not verified, the init container kept `CAP_NET_ADMIN`, the proxy uid or
-the redirect port differ, the receipt names no address family, this process
-holds `CAP_NET_ADMIN`, another uid can write the receipt or its directory,
-or `net.ipv4.ip_unprivileged_port_start` is at or below the redirect port.
+the redirect port differ, the proxy uid is 0, the receipt names no address
+family, this process holds `CAP_NET_ADMIN`, group or other can write the
+receipt, a uid other than root and the proxy's owns the receipt or its
+directory, or `net.ipv4.ip_unprivileged_port_start` is at or below the
+redirect port. The directory itself may be writable by every uid, as an
+emptyDir mount point is.
 Each refusal names the two values that disagree and the setting that changes
 each.
 
@@ -218,7 +221,7 @@ control character. A control character would split the request head.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections one listener accepts. Further accepts wait until a connection ends. The limit is per frontend: the CONNECT listener and the transparent listener each count their own, so a process configured for 1024 with both frontends running can hold 2048. |
+| `max_connections` | `1024` | `--max-connections`, `EGRESS_PROXY_MAX_CONNECTIONS` | The maximum number of simultaneous connections one frontend serves. Further accepts wait until a connection ends. The limit is per frontend: the CONNECT frontend and the transparent frontend each count their own, so a process configured for 1024 with both frontends running can hold 2048. The transparent frontend takes a slot after the accept, so at the cap each of its sockets also holds one accepted connection unread. |
 | `idle_timeout` | `5m` | `--idle-timeout`, `EGRESS_PROXY_IDLE_TIMEOUT` | The time before the proxy closes a connection that neither reads nor writes. The proxy applies this limit on the frontend, inside a tunnel, and on the upstream connection. It refuses a request head that has not arrived after 10 seconds. |
 | `response_header_timeout` | `30s` | `--response-header-timeout`, `EGRESS_PROXY_RESPONSE_HEADER_TIMEOUT` | The time an upstream has to send a response head once the proxy writes the request. A slower upstream gets `upstream_failed`. This limit does not bound a body, so a server-sent event stream runs as long as it stays active. |
 | `exchange_timeout` | `10s` | `--exchange-timeout`, `EGRESS_PROXY_EXCHANGE_TIMEOUT` | The upper bound for one token exchange, including discovery. The dial and TLS handshake to the zone each have five seconds inside this budget, and discovery has at most ten seconds whatever the budget, because the SDK caps its own metadata fetch there. A request that spends the budget gets `exchange_failed`. This setting limits a call but does not decide the answer, so `config.digest` excludes it. |

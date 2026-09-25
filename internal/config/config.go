@@ -27,15 +27,15 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/credential"
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/strictdoc"
 )
 
 // Defaults for the process settings.
 const (
-	DefaultConnect         = "127.0.0.1:3128"
-	DefaultAdmin           = "/run/egress/admin.sock"
-	DefaultNetsetupReceipt = "/run/egress/netsetup.json"
+	DefaultConnect = "127.0.0.1:3128"
+	DefaultAdmin   = "/run/egress/admin.sock"
 	// DefaultCleartextPort is the captured port read as cleartext HTTP when
 	// listen.cleartext_ports names none.
 	DefaultCleartextPort  = 80
@@ -400,8 +400,8 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // can make two sidecars answer the same request differently.
 //
 // sandbox.id stays out: it annotates a record but decides nothing, and it
-// already has its own field on every record. So do listen, ca and limits,
-// which bound how the process runs without changing any answer.
+// already has its own field on every record. So do ca, limits and the listen
+// addresses, which bound how the process runs without changing any answer.
 //
 // The compiled deny list goes in because it is platform policy that a build
 // carries rather than a document. Two binaries that deny different
@@ -416,8 +416,9 @@ type decisionInputs struct {
 	DenyList           string           `json:"deny_list"`
 	// CleartextPorts decides what a captured port is read as, and a port
 	// read as cleartext is refused where the same port read as TLS is
-	// decided on its server name.
-	CleartextPorts []int `json:"cleartext_ports"`
+	// decided on its server name. It is empty with no transparent frontend,
+	// where nothing is captured and the setting decides nothing.
+	CleartextPorts []int `json:"cleartext_ports,omitempty"`
 }
 
 // credentialSource names the configured source.
@@ -552,7 +553,9 @@ func (c *Config) digestDecisionInputs() (string, error) {
 		UpstreamCAFiles:    canonicalFiles(c.TLS.UpstreamCAFiles),
 		CredentialSource:   credentialSource{Kind: c.CredentialSource(), StaticFile: c.Credentials.StaticFile},
 		DenyList:           policy.CompiledDigest(),
-		CleartextPorts:     sortedPorts(c.Listen.CleartextPorts),
+	}
+	if c.Listen.Transparent != "" {
+		inputs.CleartextPorts = sortedPorts(c.Listen.CleartextPorts)
 	}
 	encoded, err := json.Marshal(inputs)
 	if err != nil {
@@ -569,7 +572,7 @@ func (c *Config) digestDecisionInputs() (string, error) {
 func (c *Config) applyDefaults() {
 	defaultString(&c.Listen.Connect, DefaultConnect)
 	defaultString(&c.Listen.Admin, DefaultAdmin)
-	defaultString(&c.Netsetup.Receipt, DefaultNetsetupReceipt)
+	defaultString(&c.Netsetup.Receipt, netsetup.DefaultReceiptPath)
 	if len(c.Listen.CleartextPorts) == 0 {
 		c.Listen.CleartextPorts = []int{DefaultCleartextPort}
 	}
@@ -987,18 +990,27 @@ func (c *Config) validateTransparent(found *problems) {
 	if c.Listen.Transparent == "" {
 		return
 	}
-	_, portText, err := net.SplitHostPort(c.Listen.Transparent)
-	if err != nil {
-		found.addf("listen.transparent %q is not host:port: %v", c.Listen.Transparent, err)
-		return
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > maxPort {
-		found.addf("listen.transparent %q does not name a port in 1-%d", c.Listen.Transparent, maxPort)
-	}
+	validateTransparentAddress(c.Listen.Transparent, found)
 	if !filepath.IsAbs(c.Netsetup.Receipt) {
 		found.addf("netsetup.receipt %q must be an absolute path. The transparent frontend starts only after "+
 			"the receipt shows the rules redirect to it", c.Netsetup.Receipt)
+	}
+}
+
+// validateTransparentAddress checks listen.transparent is host:port with an
+// empty or IP host. The frontend binds sockets itself and resolves no name.
+func validateTransparentAddress(address string, found *problems) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		found.addf("listen.transparent %q is not host:port: %v", address, err)
+		return
+	}
+	if _, parseErr := netip.ParseAddr(host); host != "" && parseErr != nil {
+		found.addf("listen.transparent %q: the host must be empty or an IP address, not a name", address)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > maxPort {
+		found.addf("listen.transparent %q does not name a port in 1-%d", address, maxPort)
 	}
 }
 

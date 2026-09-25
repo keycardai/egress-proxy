@@ -278,7 +278,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
 		credentials: credentials, server: server,
 	}
-	if proc.transparent, err = capture(cfg, server, logger); err != nil {
+	if proc.transparent, err = capture(cfg, server, logger, netsetup.ContainmentRequest{}); err != nil {
 		return nil, err
 	}
 	proc.admin, err = admin.New(ctx, cfg.Listen.Admin, proc.info, logger)
@@ -417,11 +417,15 @@ func (p *process) info() any {
 // capture builds the transparent frontend, after the netsetup receipt shows
 // that the rules redirect to it and that this process cannot change them. A
 // configuration with no listen.transparent runs no frontend and checks no
-// receipt: there is nothing captured to contain.
+// receipt.
 //
-// The check runs here rather than at first connection, so a sidecar whose
-// containment does not hold never serves.
-func capture(cfg *config.Config, server *proxy.Server, logger *slog.Logger) (*transparent.Frontend, error) {
+// The check runs before any listener is bound, so a sidecar whose
+// containment does not hold never serves. probes supplies the capability,
+// sysctl and owner reads. Its zero value reads this process and its
+// filesystem.
+func capture(
+	cfg *config.Config, server *proxy.Server, logger *slog.Logger, probes netsetup.ContainmentRequest,
+) (*transparent.Frontend, error) {
 	if cfg.Listen.Transparent == "" {
 		return nil, nil //nolint:nilnil // no transparent frontend is a posture, not a failure
 	}
@@ -429,15 +433,11 @@ func capture(cfg *config.Config, server *proxy.Server, logger *slog.Logger) (*tr
 		return nil, fmt.Errorf("%w: listen.transparent is set and this platform has no SO_ORIGINAL_DST",
 			transparent.ErrNotSupported)
 	}
-	request := netsetup.ContainmentRequest{
-		Path:            cfg.Netsetup.Receipt,
-		TransparentPort: cfg.TransparentPort(),
-		UID:             os.Getuid(),
-	}
-	if err := netsetup.Containment(request); err != nil {
-		return nil, fmt.Errorf("network capture: %w", err)
-	}
-	receipt, err := netsetup.ReadReceipt(cfg.Netsetup.Receipt)
+	request := probes
+	request.Path = cfg.Netsetup.Receipt
+	request.TransparentPort = cfg.TransparentPort()
+	request.UID = os.Getuid()
+	receipt, err := netsetup.Containment(request)
 	if err != nil {
 		return nil, fmt.Errorf("network capture: %w", err)
 	}
@@ -499,6 +499,7 @@ func (p *process) serve(ctx context.Context) error {
 
 	captured, err := p.captureListeners(ctx)
 	if err != nil {
+		_ = listener.Close()
 		return err
 	}
 	group, ctx := errgroup.WithContext(ctx)
@@ -531,14 +532,18 @@ func version() string {
 }
 
 // captureListeners binds the transparent frontend, one socket per address
-// family, each carrying the same connection cap and idle bound as the
-// CONNECT frontend. It returns nothing when no transparent frontend is
-// configured.
+// family. It returns nothing when no transparent frontend is configured.
 func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
 	if p.transparent == nil {
 		return nil, nil
 	}
 	listeners, err := transparent.Listen(ctx, p.cfg.Listen.Transparent)
+	if errors.Is(err, syscall.EACCES) {
+		return nil, fmt.Errorf("transparent frontend: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
+			"so binding it needs CAP_NET_BIND_SERVICE. Grant it as a file capability on this binary, and leave "+
+			"allowPrivilegeEscalation unset or true on the sidecar: it sets no_new_privs, under which the kernel "+
+			"ignores file capabilities", err, p.cfg.TransparentPort())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("transparent frontend: %w", err)
 	}

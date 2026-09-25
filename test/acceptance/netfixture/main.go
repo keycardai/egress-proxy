@@ -83,14 +83,6 @@ func run(args []string, out io.Writer) error {
 		return serve(args[1:])
 	case "capture":
 		return capture(args[1])
-	case "dial":
-		fmt.Fprintln(out, dial(args[1]))
-	case "udp":
-		fmt.Fprintln(out, datagram(args[1]))
-	case "ping":
-		fmt.Fprintln(out, ping(args[1]))
-	case "ndp":
-		fmt.Fprintln(out, solicit(args[1]))
 	case "https":
 		if len(args) != httpsArgs {
 			return errUsage
@@ -98,6 +90,22 @@ func run(args []string, out io.Writer) error {
 		return serveHTTPS(args[1], args[2], args[3])
 	case "get":
 		return get(args[1], out)
+	default:
+		return probe(args[0], args[1], out)
+	}
+}
+
+// probe runs one of the probes that print a line and exit 0.
+func probe(command, target string, out io.Writer) error {
+	switch command {
+	case "dial":
+		fmt.Fprintln(out, dial(target))
+	case "udp":
+		fmt.Fprintln(out, datagram(target))
+	case "ping":
+		fmt.Fprintln(out, ping(target))
+	case "ndp":
+		fmt.Fprintln(out, solicit(target))
 	default:
 		return errUsage
 	}
