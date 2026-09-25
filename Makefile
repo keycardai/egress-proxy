@@ -103,16 +103,22 @@ PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
 # drives the image the release builds.
 #
 # SOURCE_DATE_EPOCH keeps the created timestamp of the final image at the
-# epoch, which is the timestamp ko gives the image it loads. BuildKit
-# refuses rewrite-timestamp with the unpack the docker exporter does, so
-# the file timestamps inside the layers stay as the setcap stage left them.
+# epoch, which is the timestamp ko gives the image it loads. The file
+# timestamps inside the layers keep the values the setcap stage wrote.
+#
+# Both ko references are removed whether or not the setcap build succeeds.
+# The recipe exits with the build's status, then with the removal's.
 .PHONY: image-proxy
 image-proxy:
 	ko_ref=$$(KO_CONFIG_PATH=images/proxy KO_DOCKER_REPO=ko.local $(GO) tool ko build --local --bare \
-		--tags $(IMAGE_TAG)-ko --platform linux/$(shell $(GO) env GOARCH) ./cmd/egress-proxy) && \
-		SOURCE_DATE_EPOCH=0 docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
-			-t $(PROXY_IMAGE) images/proxy && \
-		docker image rm $(PROXY_KO_IMAGE) "$$ko_ref"
+		--tags $(IMAGE_TAG)-ko --platform linux/$(shell $(GO) env GOARCH) ./cmd/egress-proxy) || exit $$?; \
+	build_status=0; \
+	SOURCE_DATE_EPOCH=0 docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
+		-t $(PROXY_IMAGE) images/proxy || build_status=$$?; \
+	rm_status=0; \
+	docker image rm $(PROXY_KO_IMAGE) "$$ko_ref" || rm_status=$$?; \
+	[ $$build_status -eq 0 ] || exit $$build_status; \
+	exit $$rm_status
 
 .PHONY: image-netsetup
 image-netsetup:
