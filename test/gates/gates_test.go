@@ -110,6 +110,12 @@ func TestGates(t *testing.T) {
 			script := filepath.Join(repoRoot, "scripts", tt.script)
 			fixture := filepath.Join("testdata", tt.fixture)
 			args := append([]string{script, fixture}, tt.args...)
+			if tt.script == lintScript {
+				// golangci-lint holds a lock for the whole run and refuses a
+				// second one while it is held. The lint cases start together,
+				// so each waits for the lock instead.
+				args = append(args, "--allow-serial-runners")
+			}
 			cmd := exec.CommandContext(t.Context(), "bash", args...)
 			var out bytes.Buffer
 			cmd.Stdout = &out
