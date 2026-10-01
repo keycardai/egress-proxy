@@ -71,7 +71,7 @@ func TestStaticFileDescribeNamesTheFileAndNoCredential(t *testing.T) {
 	description := source.Describe()
 	assert.Contains(t, description, path, "the description names the file")
 	assert.Contains(t, description, "2 credentials", "the description counts the credentials")
-	assert.NotContains(t, description, secret, "the description carries a credential")
+	assert.NotContains(t, description, secret, "the description holds a credential")
 }
 
 func TestLoadStaticFileRefusals(t *testing.T) {

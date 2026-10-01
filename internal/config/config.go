@@ -33,13 +33,21 @@ import (
 )
 
 // Defaults for the process settings.
+//
+// Every default path names a directory inside a mount rather than the mount
+// point. A mount point belongs to root at mode 0777, and the proxy runs as a
+// uid of its own: it sets the mode on the admin socket directory and on
+// ca.out_dir at every start, which only the owner may do. NEVER default one
+// of these to a mount point. The admin socket directory and the receipt
+// directory are also separate, because the proxy takes the first to 0700 and
+// the init container writes the second as root.
 const (
 	DefaultConnect = "127.0.0.1:3128"
 	DefaultAdmin   = "/run/egress/admin/admin.sock"
 	// DefaultCleartextPort is the captured port read as cleartext HTTP when
 	// listen.cleartext_ports is empty.
 	DefaultCleartextPort  = 80
-	DefaultCAOutDir       = "/shared-ca"
+	DefaultCAOutDir       = "/shared-ca/out"
 	DefaultLeafTTL        = 24 * time.Hour
 	DefaultCacheSize      = 1024
 	DefaultMaxConnections = 1024
@@ -55,6 +63,11 @@ const (
 
 	// Version is the only document version this build reads.
 	Version = 1
+
+	// EnvPrefix is the prefix of every environment variable the proxy
+	// reads. It gives a manifest lint one namespace to inspect: a variable
+	// with this prefix that the flag set does not name is refused.
+	EnvPrefix = "EGRESS_PROXY_"
 )
 
 // PlacementKind defines where the proxy writes a credential into a request.
@@ -405,7 +418,7 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // and listen addresses, which bound the process without changing any answer.
 //
 // The compiled deny list goes in because it is platform policy that a build
-// carries rather than a document. Two binaries that deny different
+// holds rather than a document. Two binaries that deny different
 // destinations must not share a digest.
 type decisionInputs struct {
 	Endpoints          []Endpoint       `json:"endpoints"`
@@ -794,7 +807,7 @@ func (id *Identity) validate(found *problems) {
 	case zone.Scheme != "https" || zone.Host == "":
 		found.addf("identity.zone_url %q must be an absolute https URL", id.ZoneURL)
 	case zone.User != nil:
-		found.addf("identity.zone_url carries userinfo; it is an issuer and never a credential")
+		found.addf("identity.zone_url holds userinfo. It is an issuer and never a credential")
 	}
 	if strings.TrimSpace(id.ClientID) == "" {
 		found.addf("identity.client_id is empty")
@@ -880,8 +893,8 @@ func validDNSName(host string) bool {
 	return strings.TrimLeft(last, "0123456789") != ""
 }
 
-// normalizedPrefix reports whether prefix is absolute, carries no query or
-// fragment, holds only characters a path can carry unescaped, and is in its
+// normalizedPrefix reports whether prefix is absolute, has no query or
+// fragment, holds only characters a path can hold unescaped, and is in its
 // shortest form with at most a trailing slash.
 //
 // The matcher compares a prefix against the escaped path a client sent. A
@@ -912,7 +925,7 @@ func (e Endpoint) validateResource(i int, found *problems) {
 	case resource.Scheme != "https" || resource.Host == "":
 		found.addf("endpoints[%d]: resource %q must be an absolute https URL", i, e.Resource)
 	case resource.User != nil || resource.RawQuery != "" || resource.Fragment != "":
-		found.addf("endpoints[%d]: resource %q must carry no userinfo, query or fragment", i, e.Resource)
+		found.addf("endpoints[%d]: resource %q must not hold userinfo, a query or a fragment", i, e.Resource)
 	}
 }
 

@@ -152,7 +152,7 @@ func fromMaterial(opts Options, der []byte, key *ecdsa.PrivateKey) (*Authority, 
 	}, nil
 }
 
-// Certificate returns the CA certificate. It carries the public key only.
+// Certificate returns the CA certificate. It holds the public key only.
 func (a *Authority) Certificate() *x509.Certificate {
 	return a.cert
 }
@@ -219,7 +219,7 @@ func (a *Authority) WriteCertificate(dir string) (string, error) {
 }
 
 // Leaf mints a server certificate for one host, a DNS name or an IP literal
-// without a port. Every leaf carries exactly one SAN, so a leaf minted for
+// without a port. Every leaf has exactly one SAN, so a leaf minted for
 // one destination cannot authenticate another.
 func (a *Authority) Leaf(host string) (*tls.Certificate, error) {
 	host = policy.NormalizeHost(host)

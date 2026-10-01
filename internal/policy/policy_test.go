@@ -120,25 +120,25 @@ func TestCompileRefusals(t *testing.T) {
 			wantErr:   `path_prefix "repos" must be an absolute path`,
 		},
 		{
-			name:      "a path prefix carrying dot segments",
+			name:      "a path prefix with dot segments",
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos/../admin"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
-		// A request carries neither character: the request target's query
+		// A request has neither character: the request target's query
 		// splits off before the path, and EscapedPath writes "#" as "%23".
 		// A document is the only way either reaches the matcher.
 		{
-			name:      "a path prefix carrying a query",
+			name:      "a path prefix with a query",
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos?all=1"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
 		{
-			name:      "a path prefix carrying a fragment",
+			name:      "a path prefix with a fragment",
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos#top"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
 		// Compile validates the port itself, so a list assembled outside
-		// the document parser cannot carry the zero value and match a
+		// the document parser cannot express the zero value and match a
 		// destination on no port at all.
 		{
 			name:      "no port",
@@ -211,7 +211,7 @@ func TestCompileReportsEveryProblem(t *testing.T) {
 	}
 }
 
-// headerPlacement is a credential an endpoint can name. The matcher carries
+// headerPlacement is a credential an endpoint can name. The matcher passes
 // it to the caller and reads nothing in it.
 var headerPlacement = credential.Placement{ //nolint:gochecknoglobals // a fixture the table shares
 	Kind: credential.KindHeader, Name: "Authorization", Template: "Bearer " + credential.Token,
@@ -329,7 +329,7 @@ func TestMatcherDecisions(t *testing.T) {
 			wantVerdict: "deny", wantReason: "no_matching_endpoint",
 		},
 		{
-			name: "the matched endpoint carries its credential placement", host: "api.github.com", path: "/repos",
+			name: "the matched endpoint names its credential placement", host: "api.github.com", path: "/repos",
 			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "api.github.com:443/",
 			wantCredential: &headerPlacement,
 		},
@@ -354,7 +354,7 @@ func TestMatcherDecisions(t *testing.T) {
 		{
 			// The prefix that covers this path belongs to the endpoint on
 			// port 5000, so the same path on 443 falls to the "/" endpoint.
-			name: "one host's ports carry their own prefixes",
+			name: "one host's ports have their own prefixes",
 			host: "registry.internal", path: "/v2/manifest",
 			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "registry.internal:443/",
 		},

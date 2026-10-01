@@ -618,7 +618,7 @@ func TestVerifyRefusesFlagsItWouldIgnore(t *testing.T) {
 			var out bytes.Buffer
 			args := append([]string{"egress-netsetup", "--ipv6", "off", "--dns-servers", "10.43.0.10"}, tc.args...)
 			open := func(context.Context, netsetup.Family, string) (netsetup.Tables, netsetup.Tool, error) {
-				t.Error("a refused command line opens no iptables handle")
+				t.Error("a refused command line does not open an iptables handle")
 				return nil, netsetup.Tool{}, nil
 			}
 			err := command(&out, open).Run(context.Background(), append(args, protectedPort(t)...))

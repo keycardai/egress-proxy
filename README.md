@@ -24,9 +24,10 @@ document lists and nothing else:
     HTTPS_PROXY=http://127.0.0.1:3128 curl --cacert ./shared-ca/ca.crt https://pypi.org/simple/
 
 Every decision is one JSON line on stdout. Logs are JSON on stderr. The admin
-socket answers `/healthz` and `/info`:
+socket answers `/healthz`, `/readyz` and `/info`, and the binary itself dials
+it, so a pod does not need a shell or curl to probe the proxy:
 
-    curl --unix-socket /tmp/egress-admin.sock http://admin/info
+    ./egress-proxy --admin /tmp/egress-admin.sock probe info
 
 `docs/configuration.md` describes every key of the document and every reason
 code in the audit stream. `docs/security-model.md` states what the proxy

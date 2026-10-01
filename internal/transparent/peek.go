@@ -16,7 +16,7 @@ import (
 
 // PeekBufferSize is how far ahead the frontend looks for a ClientHello or a
 // request head. It leaves room for two whole TLS records, header included:
-// one record carrying its maximum legal payload of 2^14 bytes has to fit,
+// one record with its maximum legal payload of 2^14 bytes has to fit,
 // and a ClientHello may be fragmented across records (RFC 8446 section 5.1).
 //
 // A ClientHello or a request head larger than this is refused rather than
@@ -32,13 +32,13 @@ const (
 )
 
 var (
-	// ErrNoServerName is returned for a connection whose ClientHello carries
+	// ErrNoServerName is returned for a connection whose ClientHello has
 	// no server_name extension. RFC 6066 section 3 forbids an IP literal
 	// there, so a client connecting straight to an address sends none.
-	ErrNoServerName = errors.New("the ClientHello carries no server name")
-	// ErrNoHost is returned for a cleartext request that carries no usable
+	ErrNoServerName = errors.New("the ClientHello has no server name")
+	// ErrNoHost is returned for a cleartext request that has no usable
 	// Host header.
-	ErrNoHost = errors.New("the request carries no Host header")
+	ErrNoHost = errors.New("the request has no Host header")
 )
 
 // errHelloRead ends the sniffing handshake once the ClientHello has been

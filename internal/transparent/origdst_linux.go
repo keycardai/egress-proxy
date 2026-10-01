@@ -13,7 +13,7 @@ import (
 )
 
 // ip6tSoOriginalDst is SO_ORIGINAL_DST's counterpart at SOL_IPV6. Both are
-// 80. golang.org/x/sys/unix carries SO_ORIGINAL_DST and not this one, so the
+// 80. golang.org/x/sys/unix defines SO_ORIGINAL_DST and not this one, so the
 // number is written out, from linux
 // include/uapi/linux/netfilter_ipv6/ip6_tables.h.
 const ip6tSoOriginalDst = 80
@@ -27,7 +27,7 @@ const Supported = true
 // before a REDIRECT rule rewrote it.
 //
 // The level to ask at follows the socket's own address family. A v6 socket
-// carrying a v4-mapped connection answers at SOL_IP, so a failure at one
+// with a v4-mapped connection answers at SOL_IP, so a failure at one
 // level falls back to the other and the caller does not have to know which
 // listener accepted the connection.
 func OriginalDestination(conn net.Conn) (netip.AddrPort, error) {

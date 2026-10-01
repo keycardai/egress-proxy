@@ -77,7 +77,7 @@ func tunnelFrom(ctx context.Context) *tunnel {
 //
 // A refusal is recorded here. An allow is recorded once the handshake
 // establishes the tunnel, so exactly one connection-scoped record describes
-// a connection and an allow means the tunnel carried traffic.
+// a connection and an allow means the tunnel passed traffic.
 func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 	state := &tunnel{connectionID: newID()}
 	var decision policy.Decision
@@ -138,7 +138,7 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 		return
 	}
 	// The tunnel is established, so the allow describes a connection that
-	// carried traffic. Emit it before the tunnel server reads any request.
+	// passed traffic. Emit it before the tunnel server reads any request.
 	s.opts.Audit.Emit(audit.Record{
 		ConnectionID: state.connectionID,
 		Scope:        audit.ScopeConnection,
@@ -155,7 +155,7 @@ func (s *Server) handshake(client net.Conn, state *tunnel) {
 // limits.max_connections for HandshakeTimeout, so enough of them at once
 // reach the cap and the proxy stops accepting tunnels. That case logs at
 // warning level. Every other failure returns the slot as soon as the client
-// errors, so it logs at info level. Neither case carries an audit record,
+// errors, so it logs at info level. Neither case has an audit record,
 // because the connection-scoped allow lands only once the tunnel is up.
 func (s *Server) logHandshakeFailure(state *tunnel, err error) {
 	attrs := []any{
@@ -256,14 +256,14 @@ type forward struct {
 	host string
 	port int
 	// requestID is the id on the record for this request. A refusal the
-	// reverse proxy answers carries it, so every deny names a record.
+	// reverse proxy answers names it, so every deny names a record.
 	requestID string
 	// writer and secret are the endpoint's credential and where it goes.
 	// Both are empty for an endpoint that names none.
 	writer credential.Writer
 	secret string
 	// writeErr is what the credential writer reported. The round trip
-	// refuses a forward that carries one.
+	// refuses a forward that has one.
 	writeErr error
 	denied   bool
 	// denyReason is the reason a refusal on the upstream leg records. It is
@@ -362,7 +362,7 @@ func (s *Server) emitForwarded(
 // panicOutcome names what a panic out of the forward left behind. The abort
 // says the response did not complete, and requestErr tells a client that
 // went away from an upstream body that did not complete. Any other value is
-// a panic in the handler and carries its own text.
+// a panic in the handler and has its own text.
 func panicOutcome(recovered any, requestErr error) string {
 	abort, _ := recovered.(error)
 	switch {
@@ -592,7 +592,7 @@ func auditDecision(decision policy.Decision) audit.Decision {
 	return out
 }
 
-// statusFor maps a reason code to the status a refusal carries.
+// statusFor maps a reason code to the status a refusal returns.
 func statusFor(reason policy.Reason) int {
 	switch reason {
 	case policy.ReasonMalformedRequest, policy.ReasonNotAProxyRequest:

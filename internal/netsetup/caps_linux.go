@@ -112,7 +112,7 @@ func confirmDropped() error {
 	}
 	if ambient {
 		return fmt.Errorf("%w: it is in the ambient set after capset, "+
-			"so an execve would carry it into the new program", errStillHeld)
+			"so an execve would take it into the new program", errStillHeld)
 	}
 	set, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
 	if err != nil {
@@ -137,7 +137,7 @@ func HasNetAdmin() (bool, error) {
 }
 
 // ambientNetAdmin reports whether CAP_NET_ADMIN is in this thread's ambient
-// set, which an execve carries into the new program. PR_CAP_AMBIENT arrived
+// set, which an execve takes into the new program. PR_CAP_AMBIENT arrived
 // in Linux 4.3 and an older kernel answers EINVAL, where nothing is ambient.
 func ambientNetAdmin() (bool, error) {
 	held, err := capability.GetAmbient(capNetAdmin)

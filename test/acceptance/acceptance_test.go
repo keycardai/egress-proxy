@@ -428,8 +428,8 @@ func cmdSigterm(ts *testscript.TestScript, neg bool, args []string) {
 //
 //	[!] audit [-all] FILE key=value... key~regexp...
 //
-// Without -all, at least one record must carry every named field. With !, no
-// record can carry them all. With -all, every record must carry them. Keys
+// Without -all, at least one record must have every named field. With !, no
+// record can have them all. With -all, every record must have them. Keys
 // are dotted paths into the record, such as decision.reason or
 // outcome.status, and values compare as strings. FILE can be stdout, the
 // last command's output.

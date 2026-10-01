@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The license gate: every third-party module in the build list of the module
-# under DIR must carry a license on the allow-list below, identified by SPDX
+# under DIR must have a license on the allow-list below, identified by SPDX
 # id. go-licenses walks the packages' resolved imports, so a transitive
 # dependency is checked like a direct one.
 #

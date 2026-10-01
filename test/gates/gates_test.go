@@ -26,6 +26,7 @@ const repoRoot = "../.."
 const (
 	lintScript     = "lint.sh"
 	licensesScript = "check-licenses.sh"
+	noticeScript   = "notice.sh"
 	vulnScript     = "vuln.sh"
 )
 
@@ -50,6 +51,8 @@ func TestGates(t *testing.T) {
 		// wantOutput are substrings that must all appear in the combined
 		// output, naming the offending module and the gate that caught it.
 		wantOutput []string
+		// wantAbsent are substrings that must not appear in the output.
+		wantAbsent []string
 	}{
 		{
 			name:     "license gate rejects a GPL-3.0 module in the build list",
@@ -59,6 +62,19 @@ func TestGates(t *testing.T) {
 			wantOutput: []string{
 				"Not allowed license 'GPL-3.0' found for library 'github.com/AdguardTeam/gomitmproxy'",
 			},
+		},
+		{
+			name:     "NOTICE gate rejects a NOTICE that leaves out a module a binary imports",
+			script:   noticeScript,
+			fixture:  "stale-notice",
+			args:     []string{"--check"},
+			wantExit: 1,
+			wantOutput: []string{
+				"+golang.org/x/text v0.3.7",
+				"notice: FAIL. NOTICE is stale",
+			},
+			// The module only test/ imports does not ship in a binary.
+			wantAbsent: []string{"github.com/pkg/errors"},
 		},
 		{
 			name:     "import gate rejects an import under github.com/keycardlabs/",
@@ -89,6 +105,18 @@ func TestGates(t *testing.T) {
 			fixture:    "banned-import",
 			wantExit:   0,
 			wantOutput: []string{"0 issues.", "lint: OK"},
+		},
+		{
+			name:     "import gate lints the files behind the acceptance and images tags",
+			script:   lintScript,
+			fixture:  "tagged-import",
+			wantExit: 1,
+			wantOutput: []string{
+				"images.go:5:8: import 'github.com/keycardlabs/gatefixture' is not allowed from list " +
+					"'no-internal-keycard-modules'",
+				"acceptance.go:5:8: import 'github.com/keycardlabs/gatefixture' is not allowed from list " +
+					"'no-internal-keycard-modules'",
+			},
 		},
 		{
 			name:     "vulnerability gate rejects a reachable published vulnerability",
@@ -134,6 +162,9 @@ func TestGates(t *testing.T) {
 			assert.Equal(t, tt.wantExit, exit, "%s exit status\n%s", tt.script, out.String())
 			for _, want := range tt.wantOutput {
 				assert.Contains(t, out.String(), want, "%s output", tt.script)
+			}
+			for _, absent := range tt.wantAbsent {
+				assert.NotContains(t, out.String(), absent, "%s output", tt.script)
 			}
 		})
 	}
