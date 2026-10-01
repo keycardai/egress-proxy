@@ -12,8 +12,7 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-  # The base images in literal FROM lines. images/proxy/.ko.yaml is not
-  # read, so its digest is bumped by hand.
+  # Updates the FROM lines in the Dockerfiles under images/.
   - package-ecosystem: "docker"
     directories:
       - "/images/netsetup"

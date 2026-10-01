@@ -375,10 +375,10 @@ identifies a captured connection in the audit stream.
 
 A refusal names its reason in the `X-Keycard-Deny-Reason` header. It holds
 the connection or request ID in `X-Keycard-Request-Id`. The proxy uses status
-403 for a policy refusal, 400 for a malformed or non-proxy request, and 502
-when a dependency fails. `upstream_failed` and `exchange_failed` both answer
-502 because a retry can succeed. A refused handshake has no response to put a
-header on. The client sees a TLS failure, and the record names the reason.
+403 for a policy refusal, 400 for a malformed or non-proxy request, and 502 when
+a dependency fails. `upstream_failed` and `exchange_failed` both answer 502
+because a retry can succeed. A refused handshake does not have a response to put
+a header on. The client sees a TLS failure, and the record names the reason.
 
 The proxy writes JSON logs to stderr. These logs contain no decision. The
 audit stream on stdout contains the decision record.

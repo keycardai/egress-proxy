@@ -116,8 +116,8 @@ func TestCapture(t *testing.T) {
 			}
 			if wantErr != nil {
 				require.ErrorIs(t, err, wantErr, "the refusal the caller keys on")
-				assert.Nil(t, frontend, "a refused check builds no frontend")
-				assert.Nil(t, families, "a refused check reports no families")
+				assert.Nil(t, frontend, "a refused check does not build a frontend")
+				assert.Nil(t, families, "a refused check does not report families")
 				return
 			}
 			require.NoError(t, err, "the check passes")

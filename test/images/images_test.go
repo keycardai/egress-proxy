@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,13 +46,15 @@ const tag = "egress-proxy-images-test"
 
 func TestMain(m *testing.M) {
 	if !dockerAvailable() {
-		os.Exit(0)
+		log.Fatal("docker is not available")
 	}
 	code := m.Run()
 	// The proxy image is built once for the whole lane, so it is removed
 	// here rather than by one test's cleanup.
 	for _, image := range []string{proxyImageRef, proxyKoImageRef} {
-		_ = exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run()
+		if err := exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run(); err != nil {
+			log.Printf("failed to remove image %q: %v", image, err)
+		}
 	}
 	os.Exit(code)
 }
