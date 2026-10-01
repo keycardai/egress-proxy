@@ -1,0 +1,64 @@
+#!/bin/sh
+# Installs the proxy's certificate authority into every trust store this
+# image's clients read, then execs the agent.
+#
+# The sidecar mints the authority when it starts and writes it to a volume
+# the two containers share, so the certificate does not exist when the image
+# is built. The sidecar's startup probe holds this container until the file
+# is there, and the wait below covers a restart that outlives the probe.
+#
+# NEVER start the agent without the certificate installed. Every request
+# would then fail certificate verification, and an operator could not tell a
+# policy refusal from a misconfiguration.
+set -eu
+
+ca_file=${KEYCARD_CA_FILE:-/shared-ca/out/ca.crt}
+timeout=${KEYCARD_CA_TIMEOUT:-120}
+anchor=${KEYCARD_CA_ANCHOR:-/usr/local/share/ca-certificates/keycard-egress.crt}
+
+log() { printf 'keycard-sandbox-entrypoint: %s\n' "$1" >&2; }
+
+if [ "$#" -eq 0 ]; then
+	log "no command to run. Pass the agent's command as the container's args"
+	exit 64
+fi
+
+# The wait below needs a whole number of seconds. test -ge on any other
+# value fails inside the loop condition, and the loop then never times out.
+case $timeout in
+'' | *[!0-9]*)
+	log "KEYCARD_CA_TIMEOUT is ${timeout}. Set it to a whole number of seconds"
+	exit 64
+	;;
+esac
+
+# The sidecar writes the certificate to a temporary file and renames it, so
+# a path that exists holds a whole file. Parsing it anyway keeps a
+# half-written file from another writer out of the trust store.
+waited=0
+until [ -r "$ca_file" ] && openssl x509 -noout -in "$ca_file" >/dev/null 2>&1; do
+	if [ "$waited" -ge "$timeout" ]; then
+		log "$ca_file did not appear within ${timeout}s. Check that KEYCARD_CA_FILE and the sidecar's ca.out_dir name the same path on the volume both containers mount"
+		exit 69
+	fi
+	sleep 1
+	waited=$((waited + 1))
+done
+if [ "$waited" -gt 0 ]; then
+	log "waited ${waited}s for $ca_file"
+fi
+
+cp "$ca_file" "$anchor"
+chmod 0644 "$anchor"
+# Rebuilds /etc/ssl/certs/ca-certificates.crt and the hash links beside it.
+# SSL_CERT_FILE, SSL_CERT_DIR, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE and
+# GIT_SSL_CAINFO all name these.
+#
+# update-ca-certificates creates its temporary files in TMPDIR. It runs with
+# TMPDIR set to /etc/ssl/certs, which the agent uid can already write, so a pod
+# with a read-only root does not need a writable /tmp. The temporary files are
+# removed unless the process abnormally exits.
+TMPDIR=/etc/ssl/certs update-ca-certificates >&2
+
+log "the proxy CA is trusted. Starting $1"
+exec "$@"

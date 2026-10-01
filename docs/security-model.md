@@ -7,6 +7,7 @@ against the code for every shipped surface. Do not tag a public release until
 this document covers every shipped surface and the code review is complete.
 
 `docs/configuration.md` defines the settings that this document names.
+`docs/containers.md` states what the containers this repository ships need.
 
 ## Security posture
 
@@ -99,6 +100,8 @@ proxy uid with NET_BIND_SERVICE. The pod sets
 `net.ipv4.ip_unprivileged_port_start` above the redirect port, normally 1024.
 The workload holds no capability and runs as another uid. The receipt is on
 an emptyDir with medium Memory that the workload does not mount.
+The sandbox chart composes the pod, and its lint refuses a manifest that
+departs from this contract.
 The pod sets `hostNetwork: false`, so every container is in the pod's own
 network namespace. The sidecar's namespace check does not detect
 `hostNetwork: true`. Both containers are then in the node's network
@@ -157,7 +160,7 @@ capability to pass on.
 | Threat | Mitigation | Test |
 |---|---|---|
 | A workload binds the redirect port during a sidecar restart and decides its own traffic. | The redirect target is port 1015. A process without CAP_NET_BIND_SERVICE can bind it only when `net.ipv4.ip_unprivileged_port_start` is at or below 1015, in either address family (Linux `net/ipv6/af_inet6.c`, `__inet6_bind`). The sidecar reads the sysctl and refuses to start in that case. It skips this check when the receipt records `allow-unprotected`. containerd 2.0 and later, and Docker, set it to 0 unless the pod sets it. The pod sets it to 1024. Kubernetes lists it as a safe sysctl (https://kubernetes.io/docs/tasks/administer-cluster/sysctl-cluster/). | `TestContainmentPortStart`, `TestContainmentReadsThisProcess`, `TestUnprivilegedPortStart`, `transparent_capture.txtar` (`bind EACCES`, the allow-unprotected pod) |
-| The proxy cannot bind the redirect port, so it cannot serve captured connections. | The filter chain drops traffic the listener does not receive. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability. A bind that fails with EACCES names the capability the sidecar needs and requires the binary to be its entrypoint. | `transparent_capture.txtar` (the `no_new_privs` refusal) |
+| The proxy cannot bind the redirect port, so it cannot serve captured connections. | The filter chain drops traffic the listener does not receive. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability. A bind that fails with EACCES names the capability the sidecar needs and requires the binary to be its entrypoint. | `transparent_capture.txtar` (the `no_new_privs` refusal), `TestProxyImageBindsAPrivilegedPort` |
 | The sidecar starts with rules that were not applied, target another uid or port, or remain changeable by this process. | The sidecar reads the netsetup receipt at start-up. It refuses an unverified receipt, a receipt that says the capability was kept, a mismatched proxy uid or redirect port, uid 0, a receipt with no family, or a process that holds CAP_NET_ADMIN in its effective or permitted set. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestCapture`, `transparent_capture.txtar` (the refusal naming uid 1000) |
 | Another container replaces the receipt on the shared volume, so the sidecar starts with data the init container did not write. | The sidecar refuses a receipt that group or other can write, or a receipt or directory owned by a uid other than root or its own. An emptyDir mount point is 0777 (Kubernetes `pkg/volume/emptydir/empty_dir.go`, `perm`), so any uid that mounts it can create a file there. The owner check refuses that file. The sidecar opens the receipt once without following a symlink or blocking, so its mode, owner, and contents come from one descriptor. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the receipt on a 0777 volume) |
 | The sidecar starts on a receipt written in another network namespace. The rules it describes govern that namespace, not the one the sidecar and the workload share. | The init container records the device and inode of `/proc/self/ns/net` in the receipt. Two processes are in the same network namespace when both values are equal (namespaces(7), The /proc/[pid]/ns/ directory). The sidecar reads its own and refuses a receipt that names another namespace or none. The check does not detect `hostNetwork: true`. See the netsetup pod contract. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestNetNamespaceAt`, `TestKeepNetAdminIsRecorded`, `TestCapture`, `transparent_capture.txtar` (the proxy in a second container) |
@@ -261,7 +264,7 @@ sets the variable.
 
 | Threat | Mitigation | Test |
 |---|---|---|
-| The workload starts before the proxy has written `ca.crt`, so every TLS handshake fails on certificate verification and an operator reads a misconfiguration as a policy denial. | The startup probe reads `/readyz`, which answers only once the listeners are bound and the certificate is on disk. The kubelet starts the workload only once it passes, under the pod contract above. | `TestReadinessNeedsTheCertificate`, `TestReadyz`, `TestProbeReadsTheAdminSocket` |
+| The workload starts before the proxy has written `ca.crt`, so every TLS handshake fails on certificate verification and an operator reads a misconfiguration as a policy denial. | The startup probe reads `/readyz`, which answers only once the listeners are bound and the certificate is on disk. The kubelet starts the workload only once it passes, under the pod contract above. The base image entrypoint waits for the certificate as well, which covers a restart that outlives the probe. | `TestReadinessNeedsTheCertificate`, `TestReadyz`, `TestProbeReadsTheAdminSocket`, `TestProxyImageBindsAPrivilegedPort`, `TestSandboxBaseImage` |
 | The kubelet releases the workload while the port the capture redirects to is unbound, so the workload's first captured connection is refused. | Readiness turns true only after every listener is bound, the transparent sockets included. A transparent socket that fails to bind leaves the process not ready and stops it. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` |
 | The capture sockets cover fewer address families than the receipt names. The capture binds `127.0.0.1` and `::1`, and leaves IPv6 out when the kernel refuses the socket with EAFNOSUPPORT. A proxy that reported ready then refuses every captured connection of the missing family for the life of the pod. | The receipt names the address families the init container programmed. The bind compares them against the sockets it opened and stops the process when the receipt names a family no socket covers. The start-up log names the families bound. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound`, `TestCaptureFamiliesFollowTheSocketsThatBound` |
 | The kubelet reads a 200 from `/readyz` during the SIGTERM drain and keeps sending the workload at a proxy whose listeners are closing. | The admin socket stops accepting when the drain starts, so the probe fails from the signal on. The shutdown path also clears the readiness flag, so a `/readyz` request already in flight answers 503. | `TestServeIsNotReadyOnceItStops` |
@@ -271,13 +274,25 @@ sets the variable.
 | The 503 body tells the workload something it does not already have. | The body says either that the listeners are not bound or that `ca.crt` is not readable. The only path in it is `ca.out_dir`, which `/info` already publishes. | `TestReadyz`, `TestProbeReadsTheAdminSocket` |
 | Something on the socket path answers a probe with an endless body, and the probe holds a process slot every period. | The request has a five-second context and the read is capped at one mebibyte, so the probe returns whatever happens on the socket. | `TestProbeBoundsTheAnswer`, `TestProbeWithNoSocket` |
 
+### Images
+
+The three images are defined under `images/`. `make images` builds them
+locally and checks each one in a container. Nothing in this repository
+pushes an image.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| Code running in the proxy container finds a shell, a package manager or curl and uses the sidecar's uid, which the capture exempts, to leave the pod. | The proxy image is distroless static: the binary, the public roots, and nothing else. The probe is the binary itself rather than a shell command. | `TestProxyImage` |
+| The agent starts with a trust store the proxy's authority is not in, so every allowed request fails on certificate verification. | The base image entrypoint installs the certificate and runs `update-ca-certificates` before it execs the agent, and refuses to start the agent without it. Every bundle variable the image sets names the rebuilt bundle, and the image does not set a variable for a client it does not install. | `TestSandboxBaseImage` (the trust store, the git handshake, the missing certificate) |
+| The netsetup image resolves an iptables binary on the nf_tables backend, whose rules the sandbox runtimes this proxy targets never apply, so the init container programs rules that never take effect. | The image installs the legacy binaries and the xtables extension libraries they load for `-m owner`, `-m conntrack`, `-m multiport` and `-m icmp6`. The lane runs the image's `egress-netsetup` with the init container's capabilities in a network namespace of its own. It loads both families through the legacy restore binaries, reads every rule back and drops CAP_NET_ADMIN. | `TestNetsetupImage` |
+
 ### Configuration document
 
 | Threat | Mitigation | Test |
 |---|---|---|
 | A misspelled, repeated, or case-variant key silently changes enforcement. | The parser rejects unknown keys, repeated keys, keys that differ only in case, and a second YAML document. | `TestParseRefusesMalformedDocuments` |
 | An audit record cannot be tied to the document that made the decision. | Every record holds the document canonical digest. | `TestDigestIsOverTheDocumentAsWritten`, `TestJSONSinkWritesOneLinePerRecord`, `TestTruncatedResponseIsAudited` |
-| An environment variable or flag changes enforcement without changing the digest. | Every record also holds `config.digest` over the settings after an override applies, so two sidecars that enforce differently never share it. The endpoints and policy still come from the document alone. The start-up log and `/info` name every overridden key, and the `EGRESS_PROXY_` prefix gives a manifest lint one namespace to inspect. | `TestConfigDigestCoversTheEffectiveSettings`, `TestCommandResolvesFlagsAndEnvironment` |
+| An environment variable or flag changes enforcement without changing the digest. | Every record also holds `config.digest` over the settings after an override applies, so two sidecars that enforce differently never share it. The endpoints and policy still come from the document alone. The start-up log and `/info` name every overridden key, and `egress-proxy settings` publishes the whole `EGRESS_PROXY_` namespace, so a chart lint can refuse any other variable on the proxy container. | `TestConfigDigestCoversTheEffectiveSettings`, `TestCommandResolvesFlagsAndEnvironment`, `TestSettingsCoverEveryFlag` |
 | A build that denies different destinations is indistinguishable in the records. | `config.digest` covers a digest of the ranges, host names and suffixes compiled into the binary, so two builds that deny differently never share it. | `TestConfigDigestCoversTheEffectiveSettings` |
 
 ## Known limits
@@ -359,6 +374,9 @@ sets the variable.
 - The address family check reads the receipt, which the init container
   wrote. It says what was programmed at that moment, so a rule removed
   afterwards is outside what this check sees.
+- This repository does not check pod specs. `egress-proxy settings`
+  publishes the variables and the defaults a manifest has to match. The
+  sandbox chart's lint reads them and refuses a manifest that differs.
 - goproxy discards bytes buffered after the CONNECT head. A client that sends
   its ClientHello before it reads the 200 loses those bytes. The handshake then
   waits for a ClientHello that already went missing and spends the whole

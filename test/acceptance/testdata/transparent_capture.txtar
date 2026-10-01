@@ -31,7 +31,7 @@ tlscert tls upstream.test
 mkdir out
 chmod 0777 out
 
-exec docker build -q -t $LAB_IMAGE -f Dockerfile $WORK
+exec docker build -q -t $LAB_IMAGE --build-arg DEBIAN_IMAGE=$DEBIAN_IMAGE -f Dockerfile $WORK
 
 # The upstream serves HTTPS for upstream.test.
 exec docker run -d --name $LAB-upstream --network $LAB --ip $LAB_UPSTREAM4 --ip6 $LAB_UPSTREAM6 -v $WORK/tls:/tls:ro $LAB_IMAGE netfixture https :443 /tls/leaf.crt /tls/leaf.key
@@ -222,7 +222,8 @@ stdout '# ipv4 verified: '
 stdout '# ipv6 verified: '
 
 -- Dockerfile --
-FROM debian:trixie-slim
+ARG DEBIAN_IMAGE
+FROM ${DEBIAN_IMAGE}
 RUN apt-get -qq update \
  && DEBIAN_FRONTEND=noninteractive apt-get -qq install --no-install-recommends -y \
       iptables ca-certificates curl git python3 python3-requests nodejs libcap2-bin \

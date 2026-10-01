@@ -42,6 +42,9 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // envPrefix is the prefix of every environment variable this command reads.
+// `egress-proxy settings` publishes the names, so a chart lint outside this
+// repository can refuse any other variable with this prefix on the proxy
+// container.
 const envPrefix = config.EnvPrefix
 
 func main() {
@@ -189,7 +192,7 @@ func env(name string) cli.ValueSourceChain {
 
 // command builds the command line. Running it with no subcommand serves
 // the proxy. A subcommand serves nothing: probe reads this process's admin
-// socket.
+// socket, and settings prints what the binary accepts.
 func command(stdout, stderr io.Writer, action func(context.Context, flags) error) *cli.Command {
 	var opts flags
 	return &cli.Command{
@@ -204,7 +207,7 @@ func command(stdout, stderr io.Writer, action func(context.Context, flags) error
 		ErrWriter:       stderr,
 		HideHelpCommand: true,
 		Flags:           flagSet(&opts),
-		Commands:        []*cli.Command{probeCommand(&opts, stdout)},
+		Commands:        []*cli.Command{probeCommand(&opts, stdout), settingsCommand(stdout)},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if opts.configPath == "" {
 				return errNoConfig
@@ -216,7 +219,7 @@ func command(stdout, stderr io.Writer, action func(context.Context, flags) error
 }
 
 // errNoConfig is returned when the proxy is started without a config path.
-// --config is not marked Required, because probe runs without it.
+// --config is not marked Required, because probe and settings run without it.
 var errNoConfig = errors.New("--config or EGRESS_PROXY_CONFIG names the configuration document, and neither is set")
 
 // process represents the configured components which make up the proxy process.

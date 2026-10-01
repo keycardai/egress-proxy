@@ -17,10 +17,15 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   build tag with one testscript per scenario under `testdata/`,
   `test/acceptance/netfixture/` for the probes, listeners, HTTPS upstream,
   and Go client used by the Docker scenarios,
+  `test/baseimage/` for the Debian base image the tests build on, read
+  from the pin in `images/sandbox-base/Dockerfile`,
   `test/e2e/` for the cluster lanes,
   `test/fakeas/` a fake authorization server the unit tests and the
   acceptance lane drive the exchange against,
-  `test/gates/` for the gate self-tests, `scripts/` for the gate scripts,
+  `test/gates/` for the gate self-tests,
+  `test/images/` the image lane, Go behind the `images` build tag, which
+  builds the three images locally and checks each one in a container,
+  `scripts/` for the gate scripts,
   `images/` for image definitions.
 - Build-time tools are `tool` directives in `go.mod`, run as
   `go tool <name>`: golangci-lint, go-licenses, govulncheck and ko. **Every
@@ -128,6 +133,13 @@ than a refactor, and it changes `docs/security-model.md` with it.
   directory is memory-backed with a filesystem-type check rather than
   trusting the manifest, and refuses a path that overlaps the output
   directory. The output directory holds the certificate and nothing else.
+- **The binary publishes what it accepts and does not judge a manifest.**
+  `egress-proxy settings` prints the `EGRESS_PROXY_` names, the flag each
+  one fills and the defaults in force, all read from `flagSet` and the
+  document parser at run time. The pod composition and the lint that
+  enforces it live with the charts, so NEVER judge a manifest here. A
+  setting added to the flag set is published on the next build, and the
+  chart lint reads it out of the image.
 - **Readiness covers every listener.** `/readyz` answers 200 only after the
   CONNECT listener and the transparent sockets are bound and `ca.crt` is
   written. The kubelet releases the workload on that answer when the proxy
@@ -136,7 +148,8 @@ than a refactor, and it changes `docs/security-model.md` with it.
   The netsetup receipt says which address families the redirect covers, and
   a family it names with no bound socket stops the start. The admin socket
   stops accepting when the drain starts, so the probe fails from then on. The
-  probe is the binary itself, because the admin surface is a socket.
+  probe is the binary itself, because the admin surface is a socket and the
+  proxy image has no shell.
 
 ## Tests
 
@@ -194,6 +207,7 @@ job, so the local gate and the CI gate are one gate.
     make checks      license allow-list, NOTICE freshness, govulncheck
     make acceptance  the acceptance tests under test/acceptance, against the built binary
     make e2e         the cluster lanes (skips when there are none)
+    make images      build the three images locally and check each one
 
 `make all` runs build, test, lint, checks and acceptance in that order.
 
@@ -220,6 +234,9 @@ The gates and what each enforces:
 - **Vulnerabilities** (`scripts/vuln.sh`): `govulncheck` over the module. It
   also runs daily on a schedule, because a vulnerability can be published
   against a dependency that has not changed.
+- **Images** (`make images`): the three images under `images/`, built
+  locally with `ko build --local` and `docker build`. The lane skips when no
+  Docker daemon answers. Nothing in this repository pushes an image.
 
 Each gate has a negative fixture under `test/gates/testdata/` that makes it
 fail, and `test/gates` runs the gate scripts against those fixtures as part
@@ -241,5 +258,7 @@ A build-time tool is not a dependency of the product. It goes in `go.mod` as
 a `tool` directive (`go get -tool <package>@<version>`), and its license is
 not constrained by the product allow-list because nothing imports it.
 
-Dependabot opens PRs for module, tool and action updates
-(`.github/dependabot.yml`). Those PRs run the same gates as any other change.
+Dependabot opens PRs for module, tool, action and base image updates
+(`.github/dependabot.yml`). It does not read `images/proxy/.ko.yaml`, so the
+proxy's distroless base digest is bumped by hand. Those PRs run the same
+gates as any other change.

@@ -1,0 +1,30 @@
+# The proxy image. ko builds it straight from the module, so there is no
+# build context to keep in step with the tree. images/proxy/Dockerfile then
+# puts cap_net_bind_service=+ep on the binary, which ko has no step for.
+#
+# Build both steps locally with:
+#   make image-proxy
+#
+# The base is distroless static: the binary, the public root certificates
+# the proxy verifies upstreams and the zone against, and nothing else. There
+# is no shell and no curl, so the probe runs the same binary:
+# `egress-proxy probe readyz` dials the admin socket. The socket is a file
+# in this container, not a port, so an httpGet probe cannot use it.
+#
+# The base is pinned by tag and digest. Dependabot does not read this file,
+# so bump the digest by hand when the base changes:
+#   docker buildx imagetools inspect gcr.io/distroless/static-debian13:nonroot
+defaultBaseImage: gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+builds:
+  - id: egress-proxy
+    main: ./cmd/egress-proxy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w

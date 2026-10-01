@@ -1,0 +1,8 @@
+# The build context is the repository root. The build compiles
+# cmd/egress-netsetup, so the context holds the module files and the Go
+# source under cmd and internal, and nothing else.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
