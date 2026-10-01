@@ -38,10 +38,10 @@ const (
 	ReasonHostMismatch Reason = "host_mismatch"
 	// ReasonNoSNI means the TLS handshake named no server. The proxy cannot
 	// evaluate a host-scoped policy without a host. A redirected connection
-	// opened straight to an address carries no server name either, because
+	// opened straight to an address has no server name either, because
 	// RFC 6066 section 3 forbids an IP literal there.
 	ReasonNoSNI Reason = "no_sni"
-	// ReasonCleartextNotForwarded means the connection carries cleartext
+	// ReasonCleartextNotForwarded means the connection sends cleartext
 	// HTTP. The proxy forwards nothing cleartext, whatever the endpoint
 	// list says, so the destination is unreachable until the client speaks
 	// HTTPS. A deny-list hit keeps its own reason, because that answer is
@@ -76,8 +76,8 @@ const (
 	// from the upstream.
 	ReasonUpstreamFailed Reason = "upstream_failed"
 	// ReasonCertificateUnavailable means the proxy could not mint a leaf for
-	// a server name the policy allowed. The handshake fails and the tunnel
-	// carries no request.
+	// a server name the policy allowed. The handshake fails and no request
+	// crosses the tunnel.
 	ReasonCertificateUnavailable Reason = "certificate_unavailable"
 	// ReasonEndpointAllowed is the reason on every allow, at both scopes.
 	ReasonEndpointAllowed Reason = "endpoint_allowed"

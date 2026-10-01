@@ -146,7 +146,7 @@ func TestTheWireForm(t *testing.T) {
 		wantAbsent []string
 		// wantActor is the ServiceAccount that the zone reads from the assertion.
 		wantActor string
-		// wantBasic reports whether the request must carry basic credentials.
+		// wantBasic reports whether the request must send basic credentials.
 		// The form alone cannot tell the mechanisms apart, because client_id is
 		// the same value in both.
 		wantBasic bool

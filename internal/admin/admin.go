@@ -1,10 +1,11 @@
-// Package admin serves health and process information over a Unix socket.
+// Package admin serves health, readiness and process information over a
+// Unix socket.
 //
 // The admin surface is NEVER a TCP port, loopback included, because the proxy
 // may share the pod's network namespace with the workload it governs. In such a
 // configuration the workload could reach any network port that the proxy binds.
-// That workload cannot reach a socket in a directory which only this proxy's
-// uid can traverse. The socket path could be a volume another container also
+// A directory which only this proxy's uid can traverse keeps that workload
+// out of the socket. The socket path could be a volume another container also
 // mounts, so this process sets the directory mode on every start.
 package admin
 
@@ -13,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -27,7 +29,7 @@ const (
 	// alone.
 	socketMode fs.FileMode = 0o600
 	dirMode    fs.FileMode = 0o700
-	// maxSocketPath is the longest path a Unix socket address carries on
+	// maxSocketPath is the longest path a Unix socket address holds on
 	// every supported platform: sun_path is 104 bytes on macOS and 108 on
 	// Linux.
 	maxSocketPath = 103
@@ -42,7 +44,7 @@ const (
 
 var errSocketPath = errors.New("admin: socket path refused")
 
-// Server answers /healthz and /info on a Unix socket.
+// Server answers /healthz, /readyz and /info on a Unix socket.
 type Server struct {
 	path     string
 	listener net.Listener
@@ -50,9 +52,25 @@ type Server struct {
 	logger   *slog.Logger
 }
 
-// New creates the socket at path. It calls info on every /info request and
-// writes the result as JSON. A nil logger discards.
-func New(ctx context.Context, path string, info func() any, logger *slog.Logger) (*Server, error) {
+// Options are the socket and the answers the server gives on it.
+type Options struct {
+	// Path is the socket's absolute file system path.
+	Path string
+	// Info is called for every /info request and its result is written as
+	// JSON. A nil Info answers 503.
+	Info func() any
+	// Ready decides /readyz. A nil error answers 200 and an error answers
+	// 503 with the error text, so a probe reads why the process is not
+	// serving yet. A nil Ready answers 503, because the kubelet releases a
+	// workload on a 200.
+	Ready func() error
+	// Logger discards when nil.
+	Logger *slog.Logger
+}
+
+// New creates the socket at opts.Path and serves the routes opts describes.
+func New(ctx context.Context, opts Options) (*Server, error) {
+	path, logger := opts.Path, opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -60,7 +78,7 @@ func New(ctx context.Context, path string, info func() any, logger *slog.Logger)
 		return nil, fmt.Errorf("%w: %q is not absolute", errSocketPath, path)
 	}
 	if len(path) > maxSocketPath {
-		return nil, fmt.Errorf("%w: %q is %d bytes and a socket address carries at most %d",
+		return nil, fmt.Errorf("%w: %q is %d bytes and a socket address holds at most %d",
 			errSocketPath, path, len(path), maxSocketPath)
 	}
 	if err := prepareDir(filepath.Dir(path)); err != nil {
@@ -80,28 +98,54 @@ func New(ctx context.Context, path string, info func() any, logger *slog.Logger)
 		return nil, errors.Join(fmt.Errorf("admin: set mode on %s: %w", path, err), listener.Close(), removeSocket(path))
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok\n"))
-	})
-	mux.HandleFunc("GET /info", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		encoder := json.NewEncoder(w)
-		encoder.SetIndent("", "  ")
-		_ = encoder.Encode(info())
-	})
 	return &Server{
 		path:     path,
 		listener: listener,
-		server:   &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTimeout},
+		server:   &http.Server{Handler: routes(opts), ReadHeaderTimeout: readHeaderTimeout},
 		logger:   logger,
 	}, nil
 }
 
+// routes builds the admin surface. /healthz says the process is alive,
+// /readyz says it is serving, and /info reports what it enforces.
+func routes(opts Options) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeText(w, http.StatusOK, "ok\n")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if opts.Ready == nil {
+			writeText(w, http.StatusServiceUnavailable, "no readiness gate is configured\n")
+			return
+		}
+		if err := opts.Ready(); err != nil {
+			writeText(w, http.StatusServiceUnavailable, err.Error()+"\n")
+			return
+		}
+		writeText(w, http.StatusOK, "ok\n")
+	})
+	mux.HandleFunc("GET /info", func(w http.ResponseWriter, _ *http.Request) {
+		if opts.Info == nil {
+			writeText(w, http.StatusServiceUnavailable, "no info is configured\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(opts.Info())
+	})
+	return mux
+}
+
+func writeText(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
+}
+
 // Run answers requests until ctx is cancelled, then shuts down and unlinks
 // the socket. It returns a serve failure, or nil after a shutdown the
-// context asked for. A request carries the run context's values and not its
+// context asked for. A request gets the run context's values and not its
 // cancellation, so cancelling ctx starts the drain rather than ending the
 // requests in flight.
 func (s *Server) Run(ctx context.Context) error {
@@ -152,8 +196,9 @@ func (s *Server) stop(ctx context.Context) {
 
 // prepareDir creates the socket's directory and leaves it traversable by the
 // proxy's uid alone. MkdirAll applies dirMode only to a directory it creates,
-// and a directory the container runtime mounted already exists, often at mode
-// 0777, so the mode is set on every start.
+// and a restart finds the one an earlier start left behind, so the mode is
+// set on every start. Only the owner may set it: listen.admin must name a
+// directory this process creates inside a volume, never the mount point.
 func prepareDir(dir string) error {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("admin: create %s: %w", dir, err)

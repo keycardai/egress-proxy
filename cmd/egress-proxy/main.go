@@ -18,6 +18,8 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,15 +42,13 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // envPrefix is the prefix of every environment variable this command reads.
-// A manifest lint can refuse any other variable with this prefix on the proxy
-// container.
-const envPrefix = "EGRESS_PROXY_"
+const envPrefix = config.EnvPrefix
 
 func main() {
 	action := func(ctx context.Context, opts flags) error {
 		return run(ctx, opts, os.Stdout, os.Stderr)
 	}
-	if err := command(os.Stderr, action).Run(context.Background(), os.Args); err != nil {
+	if err := command(os.Stdout, os.Stderr, action).Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "egress-proxy: %v\n", err)
 		os.Exit(1)
 	}
@@ -111,23 +111,23 @@ func (f flags) overrides() config.Overrides {
 // variables.
 func flagSet(opts *flags) []cli.Flag {
 	return slices.Concat([]cli.Flag{
-		stringFlag("config", "CONFIG", &opts.configPath, "path to the configuration document", true),
-		stringFlag("sandbox-id", "SANDBOX_ID", &opts.sandboxID, "the sandbox on every audit record (sandbox.id)", false),
-		stringFlag("zone-url", "ZONE_URL", &opts.zoneURL, "the Keycard zone (identity.zone_url)", false),
-		stringFlag("client-id", "CLIENT_ID", &opts.clientID, "the application credential id (identity.client_id)", false),
+		stringFlag("config", "CONFIG", &opts.configPath, "path to the configuration document"),
+		stringFlag("sandbox-id", "SANDBOX_ID", &opts.sandboxID, "the sandbox on every audit record (sandbox.id)"),
+		stringFlag("zone-url", "ZONE_URL", &opts.zoneURL, "the Keycard zone (identity.zone_url)"),
+		stringFlag("client-id", "CLIENT_ID", &opts.clientID, "the application credential id (identity.client_id)"),
 		stringFlag("workload-token-file", "WORKLOAD_TOKEN_FILE", &opts.workloadTokenFile,
-			"path of the projected ServiceAccount token (identity.workload_token_file)", false),
+			"path of the projected ServiceAccount token (identity.workload_token_file)"),
 		stringFlag("impersonate-user", "IMPERSONATE_USER", &opts.impersonateUser,
-			"the user every exchange acts for (identity.impersonate.user)", false),
+			"the user every exchange acts for (identity.impersonate.user)"),
 	}, listenFlags(opts), []cli.Flag{
 		stringFlag("ca-out-dir", "CA_OUT_DIR", &opts.caOutDir,
-			"directory the CA certificate is written to (ca.out_dir)", false),
+			"directory the CA certificate is written to (ca.out_dir)"),
 		stringFlag("ca-state-dir", "CA_STATE_DIR", &opts.caStateDir,
-			"memory-backed directory holding the CA across restarts (ca.state_dir)", false),
+			"memory-backed directory holding the CA across restarts (ca.state_dir)"),
 		stringFlag("client-secret-file", "CLIENT_SECRET_FILE", &opts.clientSecretFile,
-			"path of the file holding the application credential secret (identity.client_secret_file)", false),
+			"path of the file holding the application credential secret (identity.client_secret_file)"),
 		stringFlag("credential-static-file", "CREDENTIAL_STATIC_FILE", &opts.credentialStaticFile,
-			"file of credentials by resource, for tests and development (credentials.static_file)", false),
+			"file of credentials by resource, for tests and development (credentials.static_file)"),
 		&cli.DurationFlag{
 			Name: "leaf-ttl", Destination: &opts.leafTTL, Sources: env("LEAF_TTL"),
 			Usage: "lifetime of a minted leaf (ca.leaf_ttl)",
@@ -165,26 +165,21 @@ func flagSet(opts *flags) []cli.Flag {
 // the settings it checks for containment.
 func listenFlags(opts *flags) []cli.Flag {
 	return []cli.Flag{
-		stringFlag(
-			"connect",
-			"CONNECT",
-			&opts.connect,
-			"address of the CONNECT frontend, host:port (listen.connect)",
-			false,
-		),
+		stringFlag("connect", "CONNECT", &opts.connect,
+			"address of the CONNECT frontend, host:port (listen.connect)"),
 		&cli.IntFlag{
 			Name: "transparent-port", Destination: &opts.transparentPort, Sources: env("TRANSPARENT_PORT"),
 			Usage: "port the netsetup rules redirect to, bound on 127.0.0.1 and ::1 " +
 				"(listen.transparent_port); 0 runs no transparent frontend",
 		},
-		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)", false),
+		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)"),
 		stringFlag("netsetup-receipt", "NETSETUP_RECEIPT", &opts.netsetupReceipt,
-			"file the init container recorded what it programmed in (netsetup.receipt)", false),
+			"file the init container recorded what it programmed in (netsetup.receipt)"),
 	}
 }
 
-func stringFlag(name, envName string, dest *string, usage string, required bool) *cli.StringFlag {
-	return &cli.StringFlag{Name: name, Destination: dest, Sources: env(envName), Usage: usage, Required: required}
+func stringFlag(name, envName string, dest *string, usage string) *cli.StringFlag {
+	return &cli.StringFlag{Name: name, Destination: dest, Sources: env(envName), Usage: usage}
 }
 
 // env is the variable a flag reads when the command line omits it.
@@ -192,8 +187,10 @@ func env(name string) cli.ValueSourceChain {
 	return cli.EnvVars(envPrefix + name)
 }
 
-// command builds the command line.
-func command(stderr io.Writer, action func(context.Context, flags) error) *cli.Command {
+// command builds the command line. Running it with no subcommand serves
+// the proxy. A subcommand serves nothing: probe reads this process's admin
+// socket.
+func command(stdout, stderr io.Writer, action func(context.Context, flags) error) *cli.Command {
 	var opts flags
 	return &cli.Command{
 		Name:  "egress-proxy",
@@ -207,12 +204,20 @@ func command(stderr io.Writer, action func(context.Context, flags) error) *cli.C
 		ErrWriter:       stderr,
 		HideHelpCommand: true,
 		Flags:           flagSet(&opts),
+		Commands:        []*cli.Command{probeCommand(&opts, stdout)},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			if opts.configPath == "" {
+				return errNoConfig
+			}
 			opts.transparentPortSet = cmd.Count("transparent-port") > 0
 			return action(ctx, opts)
 		},
 	}
 }
+
+// errNoConfig is returned when the proxy is started without a config path.
+// --config is not marked Required, because probe runs without it.
+var errNoConfig = errors.New("--config or EGRESS_PROXY_CONFIG names the configuration document, and neither is set")
 
 // process represents the configured components which make up the proxy process.
 type process struct {
@@ -224,6 +229,20 @@ type process struct {
 	server      *proxy.Server
 	admin       *admin.Server
 	transparent *transparent.Frontend
+	// listenCapture binds the capture sockets. Nil binds them with
+	// transparent.Listen.
+	listenCapture func(ctx context.Context, port int) ([]net.Listener, error)
+	// captureFamilies are the address families the netsetup receipt says
+	// the redirect covers. Every one of them needs a bound capture socket,
+	// or the redirect sends that family nowhere.
+	captureFamilies []string
+	// certPath is the CA certificate the workload trusts. Readiness checks
+	// that it is on disk.
+	certPath string
+	// listening turns true once every frontend this process runs is bound:
+	// the CONNECT listener, and the capture sockets when listen.transparent_port
+	// is set. The shutdown path clears it when the drain starts.
+	listening atomic.Bool
 }
 
 func run(ctx context.Context, opts flags, stdout, stderr io.Writer) error {
@@ -252,7 +271,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, fmt.Errorf("tls: %w", err)
 	}
-	authority, store, err := certificates(cfg, logger)
+	authority, store, certPath, err := certificates(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -281,12 +300,15 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	}
 	proc := &process{
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
-		credentials: credentials, server: server,
+		credentials: credentials, server: server, certPath: certPath,
 	}
-	if proc.transparent, err = capture(cfg, server, logger, netsetup.ContainmentRequest{}); err != nil {
+	proc.transparent, proc.captureFamilies, err = capture(cfg, server, logger, netsetup.ContainmentRequest{})
+	if err != nil {
 		return nil, err
 	}
-	proc.admin, err = admin.New(ctx, cfg.Listen.Admin, proc.info, logger)
+	proc.admin, err = admin.New(ctx, admin.Options{
+		Path: cfg.Listen.Admin, Info: proc.info, Ready: proc.ready, Logger: logger,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("admin socket: %w", err)
 	}
@@ -296,29 +318,29 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 
 // certificates prepares the authority the proxy terminates tunnels with and
 // writes its certificate where the workload reads it.
-func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.Store, error) {
+func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.Store, string, error) {
 	// A state directory inside the output directory would expose the key to the
 	// workload.
 	if err := ca.PrepareDirectories(cfg.CA.StateDir, cfg.CA.OutDir); err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	authority, loaded, err := ca.LoadOrNew(cfg.CA.StateDir, ca.Options{LeafTTL: cfg.CA.LeafTTL.Duration()})
 	if err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	certPath, err := authority.WriteCertificate(cfg.CA.OutDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	store, err := ca.NewStore(authority, cfg.CA.CacheSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("certificate authority: %w", err)
+		return nil, nil, "", fmt.Errorf("certificate authority: %w", err)
 	}
 	logger.Info("certificate authority ready",
 		slog.String("certificate", certPath),
 		slog.Bool("loaded_from_state_dir", loaded),
 		slog.Time("not_after", authority.NotAfter()))
-	return authority, store, nil
+	return authority, store, certPath, nil
 }
 
 // announce says what the process enforces and where each setting came from,
@@ -419,6 +441,27 @@ func (p *process) info() any {
 	}
 }
 
+// errNotReady is what the admin socket reports at /readyz while the
+// process is not serving, which is before the bind and again from the
+// moment the drain starts.
+var errNotReady = errors.New("egress-proxy is not serving")
+
+// ready decides /readyz. It answers once every frontend is bound and
+// ca.crt is on ca.out_dir, which are the two things the workload needs
+// before it makes its first request. The sidecar's startup probe reads it,
+// so the agent container does not start before the certificate it must
+// trust exists, and never while the port the capture redirects to is
+// unbound.
+func (p *process) ready() error {
+	if !p.listening.Load() {
+		return fmt.Errorf("%w: the frontend listeners are not bound", errNotReady)
+	}
+	if _, err := os.Stat(p.certPath); err != nil {
+		return fmt.Errorf("%w: %s is not readable: %w", errNotReady, p.certPath, err)
+	}
+	return nil
+}
+
 // capture builds the transparent frontend after the receipt shows that the
 // rules redirect to it and that this process cannot change them. A
 // configuration without listen.transparent_port does not run capture frontends.
@@ -427,14 +470,17 @@ func (p *process) info() any {
 // check never services any request. The probes supply capability, sysctl,
 // network namespace, and owner reads. A zero-value request reads this process
 // and its filesystem.
+//
+// It also returns the address families the receipt records, which is what
+// the bind compares the capture sockets against.
 func capture(
 	cfg *config.Config, server *proxy.Server, logger *slog.Logger, probes netsetup.ContainmentRequest,
-) (*transparent.Frontend, error) {
+) (*transparent.Frontend, []string, error) {
 	if cfg.Listen.TransparentPort == 0 {
-		return nil, nil //nolint:nilnil // no transparent frontend is valid, not an error
+		return nil, nil, nil
 	}
 	if !transparent.Supported {
-		return nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
+		return nil, nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
 			transparent.ErrNotSupported)
 	}
 	request := probes
@@ -443,7 +489,7 @@ func capture(
 	request.UID = os.Getuid()
 	receipt, err := netsetup.Containment(request)
 	if err != nil {
-		return nil, fmt.Errorf("network capture: %w", err)
+		return nil, nil, fmt.Errorf("network capture: %w", err)
 	}
 	logger.Info("transparent network capture enabled",
 		slog.String("receipt", cfg.Netsetup.Receipt),
@@ -466,9 +512,9 @@ func capture(
 		IdleTimeout:    cfg.Limits.IdleTimeout.Duration(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("transparent frontend: %w", err)
+		return nil, nil, fmt.Errorf("transparent frontend: %w", err)
 	}
-	return frontend, nil
+	return frontend, receipt.Families, nil
 }
 
 // uncaptured returns cleartext ports outside the capture and redirect. The
@@ -491,20 +537,10 @@ func uncaptured(captured, cleartext []int) []int {
 // serve runs the proxy service until a signal arrives or a component
 // fails on a fatal error. On shutdown, each server drains within its grace period.
 //
-// Returns once both servers have stopped.
+// Returns once every server has stopped.
 func (p *process) serve(ctx context.Context) error {
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", p.cfg.Listen.Connect)
+	listener, captured, err := p.bind(ctx)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
-	}
-	p.logger.Info("serving",
-		slog.String("connect", listener.Addr().String()),
-		slog.String("admin", p.admin.Path()))
-
-	captured, err := p.captureListeners(ctx)
-	if err != nil {
-		// Tear down the listener we've opened so far, on the way out to a crash.
-		_ = listener.Close()
 		return err
 	}
 	group, ctx := errgroup.WithContext(ctx)
@@ -517,6 +553,9 @@ func (p *process) serve(ctx context.Context) error {
 	group.Go(func() error { return p.admin.Run(ctx) })
 	group.Go(func() error {
 		<-ctx.Done()
+		// The admin socket stops accepting as the drain starts. Clearing
+		// the flag covers a /readyz request that is already in flight.
+		p.listening.Store(false)
 		p.logger.Info("stopping", slog.String("cause", context.Cause(ctx).Error()))
 		return nil
 	})
@@ -536,25 +575,103 @@ func version() string {
 	return info.Main.Version
 }
 
+// bind opens every socket the process serves on and then reports
+// readiness. The order is the contract: /readyz answers 200 only after the
+// transparent sockets are bound, so the kubelet never releases the workload
+// while the port the capture redirects to refuses connections.
+func (p *process) bind(ctx context.Context) (net.Listener, []net.Listener, error) {
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", p.cfg.Listen.Connect)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
+	}
+	captured, err := p.captureListeners(ctx)
+	if err != nil {
+		return nil, nil, errors.Join(err, listener.Close())
+	}
+	p.listening.Store(true)
+	p.logger.Info("serving",
+		slog.String("connect", listener.Addr().String()),
+		slog.String("admin", p.admin.Path()))
+	return listener, captured, nil
+}
+
+// errCapture is a transparent frontend this process refuses to serve
+// behind.
+var errCapture = errors.New("transparent frontend")
+
 // captureListeners binds one transparent frontend socket per address family,
-// on loopback. It returns no listeners when no transparent frontend is
-// configured.
+// on loopback. It returns nil when no transparent frontend is configured.
+//
+// The receipt names the families the init container redirects. If one of
+// them has no bound socket, the proxy refuses to start. Otherwise the
+// redirect would send that family's connections to a closed port.
 func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) {
 	if p.transparent == nil {
 		return nil, nil
 	}
-	listeners, err := transparent.Listen(ctx, p.cfg.Listen.TransparentPort)
+	listen := p.listenCapture
+	if listen == nil {
+		listen = transparent.Listen
+	}
+	listeners, err := listen(ctx, p.cfg.Listen.TransparentPort)
 	if errors.Is(err, syscall.EACCES) {
-		return nil, fmt.Errorf("transparent frontend: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
+		return nil, fmt.Errorf("%w: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
 			"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
 			"grants only from the bounding set and, under no_new_privs, only when the process that ran this binary "+
 			"held it. Give the sidecar capabilities.add NET_BIND_SERVICE and make this binary the container "+
-			"entrypoint", err, p.cfg.Listen.TransparentPort)
+			"entrypoint", errCapture, err, p.cfg.Listen.TransparentPort)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("transparent frontend: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCapture, err)
+	}
+	bound := boundFamilies(listeners)
+	if missing := missingFamilies(p.captureFamilies, bound); len(missing) > 0 {
+		return nil, errors.Join(
+			fmt.Errorf("%w: the netsetup receipt names %s and the capture bound %s, so the redirect sends %s nowhere",
+				errCapture, strings.Join(p.captureFamilies, ","),
+				strings.Join(bound, ","), strings.Join(missing, ",")),
+			closeAll(listeners),
+		)
 	}
 	p.logger.Info("capturing redirected connections",
-		slog.String("transparent", transparent.Addresses(listeners)))
+		slog.String("transparent", transparent.Addresses(listeners)),
+		slog.Any("families", bound))
 	return listeners, nil
+}
+
+// boundFamilies names the address families a set of listeners covers, in
+// the words the netsetup receipt uses.
+func boundFamilies(listeners []net.Listener) []string {
+	var families []string
+	for _, listener := range listeners {
+		family := netsetup.FamilyIPv6.String()
+		if addr, ok := listener.Addr().(*net.TCPAddr); ok && addr.IP.To4() != nil {
+			family = netsetup.FamilyIPv4.String()
+		}
+		if !slices.Contains(families, family) {
+			families = append(families, family)
+		}
+	}
+	return families
+}
+
+// missingFamilies names the families the receipt records that no listener
+// covers.
+func missingFamilies(programmed, bound []string) []string {
+	var missing []string
+	for _, family := range programmed {
+		if !slices.Contains(bound, family) {
+			missing = append(missing, family)
+		}
+	}
+	return missing
+}
+
+// closeAll closes every listener and joins what the closes reported.
+func closeAll(listeners []net.Listener) error {
+	errs := make([]error, 0, len(listeners))
+	for _, listener := range listeners {
+		errs = append(errs, listener.Close())
+	}
+	return errors.Join(errs...)
 }

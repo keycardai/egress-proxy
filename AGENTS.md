@@ -18,8 +18,8 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   `test/acceptance/netfixture/` for the probes, listeners, HTTPS upstream,
   and Go client used by the Docker scenarios,
   `test/e2e/` for the cluster lanes,
-  `test/fakeas/` for the fake authorization server that unit and acceptance
-  tests use for token exchange,
+  `test/fakeas/` a fake authorization server the unit tests and the
+  acceptance lane drive the exchange against,
   `test/gates/` for the gate self-tests, `scripts/` for the gate scripts,
   `images/` for image definitions.
 - Build-time tools are `tool` directives in `go.mod`, run as
@@ -83,7 +83,7 @@ These are settled and load-bearing. Changing one is a design change rather
 than a refactor, and it changes `docs/security-model.md` with it.
 
 - **goproxy handles the CONNECT line and nothing else.** It cannot serve the
-  loop inside a tunnel: v1.9.1 dereferences a nil URL when a request carries
+  loop inside a tunnel: v1.9.1 dereferences a nil URL when a request has
   an asterisk-form target and a `Host` with a port, inside a goroutine it
   starts itself, so no recover outside goproxy reaches it. An allowed tunnel
   is hijacked, TLS is terminated on a goroutine of ours that recovers, and
@@ -128,6 +128,15 @@ than a refactor, and it changes `docs/security-model.md` with it.
   directory is memory-backed with a filesystem-type check rather than
   trusting the manifest, and refuses a path that overlaps the output
   directory. The output directory holds the certificate and nothing else.
+- **Readiness covers every listener.** `/readyz` answers 200 only after the
+  CONNECT listener and the transparent sockets are bound and `ca.crt` is
+  written. The kubelet releases the workload on that answer when the proxy
+  is a sidecar, an init container with `restartPolicy: Always`, so a frontend
+  bound later would leave the workload's first captured connection refused.
+  The netsetup receipt says which address families the redirect covers, and
+  a family it names with no bound socket stops the start. The admin socket
+  stops accepting when the drain starts, so the probe fails from then on. The
+  probe is the binary itself, because the admin surface is a socket.
 
 ## Tests
 
@@ -199,13 +208,15 @@ The gates and what each enforces:
   file linted on the host alone goes unlinted on a macOS workstation and
   fails in CI instead.
 - **Licenses** (`scripts/check-licenses.sh`): every module in the build list
-  carries a license on the SPDX allow-list in that script: Apache-2.0, MIT,
+  has a license on the SPDX allow-list in that script: Apache-2.0, MIT,
   BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0. GPL, LGPL and AGPL are off it.
   MPL-2.0 is allowed because its obligations attach to the MPL-licensed
   files, which a Go module dependency leaves unmodified and unvendored.
 - **NOTICE** (`scripts/notice.sh`): `NOTICE` is generated from the build list
-  with `go-licenses report`. Run `make notice` after changing dependencies
-  and commit the result; CI fails when it is stale.
+  of the binaries under `cmd/` with `go-licenses report`. A module that only
+  `test/` imports does not ship in an image, so `NOTICE` does not list it.
+  Run `make notice` after changing dependencies and commit the result; CI
+  fails when it is stale.
 - **Vulnerabilities** (`scripts/vuln.sh`): `govulncheck` over the module. It
   also runs daily on a schedule, because a vulnerability can be published
   against a dependency that has not changed.

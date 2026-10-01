@@ -176,7 +176,7 @@ func (m *Matcher) Connection(host string, port int) Decision {
 // so the decision and the forwarded request read one path.
 //
 // The path must be absolute and already in its shortest form, decoded as
-// well as escaped. Request refuses a path carrying dot segments, which can
+// well as escaped. Request refuses a path with dot segments, which can
 // match one endpoint here and reach another upstream.
 func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	connection := m.Connection(host, port)
@@ -194,7 +194,7 @@ func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	return deny(ReasonNoMatchingEndpoint)
 }
 
-// DenyList is the list this matcher carries. The upstream dialer checks
+// DenyList is the list this matcher holds. The upstream dialer checks
 // every resolved address against it.
 func (m *Matcher) DenyList() *DenyList {
 	return m.deny
@@ -224,7 +224,7 @@ func normalizedPath(requestPath string) bool {
 		return false
 	}
 	// This guards the path prefix a document declares. A request cannot
-	// carry either character: the request target's query splits off before
+	// have either character: the request target's query splits off before
 	// the path, and EscapedPath writes "#" as "%23".
 	if strings.ContainsAny(requestPath, "?#") {
 		return false

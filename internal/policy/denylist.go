@@ -21,7 +21,7 @@ var errException = errors.New("deny list exception refused")
 // platform policy. Changing the list requires a new build.
 //
 // Sources: RFC 1122 section 3.2.1.3 (loopback), RFC 1918 section 3 (private
-// IPv4), RFC 3927 section 2.1 (IPv4 link-local, which carries the cloud
+// IPv4), RFC 3927 section 2.1 (IPv4 link-local, which includes the cloud
 // metadata address), RFC 6598 section 7 (shared address space), RFC 4193
 // section 3 (IPv6 unique local), RFC 4291 sections 2.4 and 2.5.6 (IPv6
 // loopback, unspecified and link-local), RFC 6666 section 3 (IPv6 discard).

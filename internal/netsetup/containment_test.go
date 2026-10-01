@@ -61,7 +61,7 @@ func TestContainment(t *testing.T) {
 		{
 			name: "a receipt with no timestamp",
 			edit: func(r *netsetup.Receipt) { r.VerifiedAt = time.Time{} },
-			want: []string{"carries no verified_at"},
+			want: []string{"has no verified_at"},
 		},
 		{
 			name: "a receipt dated after now, which this pod's init container did not write",

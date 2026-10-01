@@ -3,6 +3,7 @@ package admin_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +30,13 @@ func socketPath(t *testing.T) string {
 	return filepath.Join(dir, "admin.sock")
 }
 
+// errNotBound stands in for the readiness failure a starting process
+// reports.
+var errNotBound = errors.New("the CONNECT listener is not bound")
+
+// nilInfo is the /info answer for a test that asserts on another route.
+func nilInfo() any { return nil }
+
 func client(path string) *http.Client {
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -53,9 +61,9 @@ func get(t *testing.T, path, route string) (int, string) {
 func TestServerAnswersHealthAndInfo(t *testing.T) {
 	t.Parallel()
 	path := socketPath(t)
-	server, err := admin.New(t.Context(), path, func() any {
+	server, err := admin.New(t.Context(), admin.Options{Path: path, Info: func() any {
 		return map[string]any{"version": "test", "endpoints": []string{"api.github.com"}}
-	}, nil)
+	}})
 	require.NoError(t, err, "admin.New")
 	ctx, cancel := context.WithCancel(t.Context())
 	var group errgroup.Group
@@ -75,6 +83,13 @@ func TestServerAnswersHealthAndInfo(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &decoded), "/info body is not JSON:\n%s", body)
 	assert.Equal(t, "test", decoded["version"], "/info version")
 
+	// No readiness gate fails closed: the kubelet releases the workload on
+	// a 200, so a server that was never told how to answer says it is not
+	// ready.
+	status, body = get(t, path, "/readyz")
+	assert.Equal(t, http.StatusServiceUnavailable, status, "/readyz status with no readiness gate")
+	assert.Equal(t, "no readiness gate is configured\n", body, "/readyz body")
+
 	status, _ = get(t, path, "/metrics")
 	assert.Equal(t, http.StatusNotFound, status, "/metrics is not served")
 
@@ -84,13 +99,45 @@ func TestServerAnswersHealthAndInfo(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "the socket is unlinked once Run returns")
 }
 
+// TestServerWithNoAnswers covers a server built with neither Info nor
+// Ready. Both routes answer 503 with a body that names what is missing, and
+// the process keeps serving.
+func TestServerWithNoAnswers(t *testing.T) {
+	t.Parallel()
+	path := socketPath(t)
+	server, err := admin.New(t.Context(), admin.Options{Path: path})
+	require.NoError(t, err, "admin.New")
+	ctx, cancel := context.WithCancel(t.Context())
+	var group errgroup.Group
+	group.Go(func() error { return server.Run(ctx) })
+
+	tests := []struct {
+		path     string
+		wantBody string
+	}{
+		{path: "/info", wantBody: "no info is configured\n"},
+		{path: "/readyz", wantBody: "no readiness gate is configured\n"},
+	}
+	for _, tc := range tests {
+		status, body := get(t, path, tc.path)
+		assert.Equal(t, http.StatusServiceUnavailable, status, "%s status", tc.path)
+		assert.Equal(t, tc.wantBody, body, "%s body", tc.path)
+	}
+	status, body := get(t, path, "/healthz")
+	assert.Equal(t, http.StatusOK, status, "/healthz status after the 503s")
+	assert.Equal(t, "ok\n", body, "/healthz body after the 503s")
+
+	cancel()
+	require.NoError(t, group.Wait(), "Run after cancellation")
+}
+
 // TestRunReturnsNilOnCancellation covers the shutdown the context asks for.
 // TestRunReturnsTheServeFailure, an internal test, covers the other arm,
 // which needs the listener the Server does not export.
 func TestRunReturnsNilOnCancellation(t *testing.T) {
 	t.Parallel()
 	path := socketPath(t)
-	server, err := admin.New(t.Context(), path, func() any { return nil }, nil)
+	server, err := admin.New(t.Context(), admin.Options{Path: path, Info: nilInfo})
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -107,7 +154,7 @@ func TestNewSetsTheDirectoryMode(t *testing.T) {
 	//nolint:gosec // the fixture stands in for a directory a container runtime mounted
 	require.NoError(t, os.Chmod(dir, 0o777), "stand in for a mounted emptyDir")
 
-	server, err := admin.New(t.Context(), path, func() any { return nil }, nil)
+	server, err := admin.New(t.Context(), admin.Options{Path: path, Info: nilInfo})
 	require.NoError(t, err, "admin.New")
 	t.Cleanup(func() {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -141,7 +188,7 @@ func TestNewRefusals(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := admin.New(t.Context(), tc.path, func() any { return nil }, nil)
+			_, err := admin.New(t.Context(), admin.Options{Path: tc.path, Info: nilInfo})
 			require.ErrorContains(t, err, tc.wantErr, "New(%q)", tc.path)
 		})
 	}
@@ -150,7 +197,7 @@ func TestNewRefusals(t *testing.T) {
 func TestNewReplacesAStaleSocket(t *testing.T) {
 	t.Parallel()
 	path := socketPath(t)
-	first, err := admin.New(t.Context(), path, func() any { return nil }, nil)
+	first, err := admin.New(t.Context(), admin.Options{Path: path, Info: nilInfo})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -166,9 +213,54 @@ func TestNewReplacesAStaleSocket(t *testing.T) {
 	_, err = os.Lstat(path)
 	require.NoError(t, err, "the fixture did not leave a stale socket")
 
-	second, err := admin.New(t.Context(), path, func() any { return nil }, nil)
+	second, err := admin.New(t.Context(), admin.Options{Path: path, Info: nilInfo})
 	require.NoError(t, err, "New over a stale socket")
 	ctx, cancel = context.WithCancel(t.Context())
 	cancel()
 	require.NoError(t, second.Run(ctx))
+}
+
+// TestReadyz pins the two answers a startup probe reads. The kubelet holds
+// the agent container until this route answers 200, so a 503 has to give
+// the reason an operator needs.
+func TestReadyz(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		ready      func() error
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "serving", ready: func() error { return nil }, wantStatus: http.StatusOK, wantBody: "ok\n"},
+		{
+			name:       "the listener is not bound",
+			ready:      func() error { return errNotBound },
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "the CONNECT listener is not bound\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := socketPath(t)
+			server, err := admin.New(t.Context(), admin.Options{Path: path, Info: nilInfo, Ready: tc.ready})
+			require.NoError(t, err, "admin.New")
+			ctx, cancel := context.WithCancel(t.Context())
+			var group errgroup.Group
+			group.Go(func() error { return server.Run(ctx) })
+
+			status, body := get(t, path, "/readyz")
+			assert.Equal(t, tc.wantStatus, status, "/readyz status")
+			assert.Equal(t, tc.wantBody, body, "/readyz body")
+
+			// Liveness never follows readiness, so the kubelet does not
+			// restart a container that has not finished starting.
+			status, body = get(t, path, "/healthz")
+			assert.Equal(t, http.StatusOK, status, "/healthz status")
+			assert.Equal(t, "ok\n", body, "/healthz body")
+
+			cancel()
+			require.NoError(t, group.Wait(), "Run after cancellation")
+		})
+	}
 }

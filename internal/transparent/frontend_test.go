@@ -103,7 +103,7 @@ func TestTheFrontendRecoversWhatAConnectionWasOpenedTo(t *testing.T) {
 		{
 			// The peek deadline is what ends this connection. Nothing names
 			// a destination, so the connection is refused the way one whose
-			// ClientHello carries no server_name is.
+			// ClientHello has no server_name is.
 			name:     "a client that sends nothing at all",
 			original: "192.0.2.77:443", head: []byte{},
 			wantHost: "192.0.2.77", wantPort: 443, wantRefusal: policy.ReasonNoSNI,
@@ -126,7 +126,7 @@ func TestTheFrontendRecoversWhatAConnectionWasOpenedTo(t *testing.T) {
 		},
 		{
 			// RFC 6066 section 3 forbids an IP literal in server_name and
-			// crypto/tls sends none for one, so only a Host header carries
+			// crypto/tls sends none for one, so only a Host header gives
 			// an address.
 			name:     "a cleartext connection whose Host is the address it was opened to",
 			original: "192.0.2.77:80", head: []byte("GET /p HTTP/1.1\r\nHost: 192.0.2.77\r\n\r\n"),
@@ -143,7 +143,7 @@ func TestTheFrontendRecoversWhatAConnectionWasOpenedTo(t *testing.T) {
 			wantHost: "192.0.2.77", wantPort: 80, wantClear: true, wantRefusal: policy.ReasonHostMismatch,
 		},
 		{
-			name:     "a cleartext connection carrying no Host header",
+			name:     "a cleartext connection with no Host header",
 			original: "192.0.2.77:80", head: []byte("GET /p HTTP/1.1\r\n\r\n"),
 			// A cleartext connection is refused whatever its head says, so
 			// one the frontend cannot read names the same reason as one it
@@ -228,7 +228,7 @@ func TestAConnectionWithNoRecoverableDestinationIsClosed(t *testing.T) {
 }
 
 // TestNewRefusals pins the options a frontend cannot be built without. The
-// process reads each from the document, which carries a default for it, so a
+// process reads each from the document, which has a default for it, so a
 // zero here is a caller that never asked what bound it wanted.
 func TestNewRefusals(t *testing.T) {
 	t.Parallel()
@@ -276,7 +276,7 @@ func waitCaptured(t *testing.T, handed <-chan captured) captured {
 }
 
 // TestTheConnectionCapHoldsUntilAConnectionCloses proves the transparent
-// listener carries the same bound the CONNECT frontend does. A slot is
+// listener has the same bound the CONNECT frontend does. A slot is
 // taken before the accept, so a connection past the cap waits in the
 // backlog rather than reaching a frontend that will not read it.
 func TestTheConnectionCapHoldsUntilAConnectionCloses(t *testing.T) {

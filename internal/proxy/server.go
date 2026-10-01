@@ -8,7 +8,7 @@
 //
 // net/http serves the loop inside the tunnel, not goproxy. goproxy v1.9.1
 // dereferences a nil URL in (*ProxyHttpServer).handleHttps when a request
-// inside a MITM tunnel carries an asterisk-form target and a Host with a
+// inside a MITM tunnel has an asterisk-form target and a Host with a
 // port. That panic runs in a goroutine goproxy starts, so no recover outside
 // goproxy reaches it. net/http recovers a panic per connection, routes `OPTIONS *`
 // to the handler through DisableGeneralOptionsHandler, and streams
@@ -223,7 +223,7 @@ func New(opts Options) (*Server, error) {
 // close of whatever is still open. It returns the first server failure, or
 // nil after a shutdown the context asked for. Call Run once per Server.
 //
-// A request carries the run context's values and not its cancellation, so
+// A request gets the run context's values and not its cancellation, so
 // cancelling ctx starts the drain. The requests still open when the drain
 // ends are cancelled, which is how an upgraded connection ends, because
 // Close does not reach a hijacked connection.
@@ -360,8 +360,8 @@ func (s *Server) newFrontend() *goproxy.ProxyHttpServer {
 //
 // Four budgets bound an upstream that goes quiet, because a stalled request
 // holds a frontend connection and the connection cap is finite. The dial and
-// the TLS handshake each carry one. ResponseHeaderTimeout bounds the wait
-// for a response head. Every upstream connection carries the same idle bound
+// the TLS handshake each get one. ResponseHeaderTimeout bounds the wait
+// for a response head. Every upstream connection gets the same idle bound
 // the frontend uses, which covers a body that stops arriving. Nothing bounds
 // a whole request, because a server-sent event stream is a long request that
 // is working.

@@ -146,7 +146,7 @@ func (s *JSONSink) Failures() int64 {
 	return s.failures.Load()
 }
 
-// Stamp is what every record of one process carries, whatever the decision.
+// Stamp is what every record of one process holds, whatever the decision.
 type Stamp struct {
 	SandboxID      string
 	DocumentDigest string

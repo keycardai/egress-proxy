@@ -1,0 +1,60 @@
+# The admin surface through the built binary, the way the kubelet drives
+# it. Two things are under test: the probe subcommand and the readyz answer
+# over the life of the process.
+#
+# The admin socket is in the proxy's mount namespace and never a port, so
+# the probe subcommand is the only way in. readyz fails while the process
+# is starting and passes once every frontend is bound and ca.crt is
+# written, which is what holds the workload container back.
+
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+
+# Nothing is listening yet, so every route fails and the failure names the
+# socket it dialled.
+! exec egress-proxy probe readyz
+stderr 'probe: readyz on .*admin\.sock'
+! exec egress-proxy probe healthz
+stderr 'probe: healthz on .*admin\.sock'
+
+# A route the admin socket does not serve is refused before anything is
+# dialled. The probe knows the routes it has.
+! exec egress-proxy probe metrics
+stderr '"metrics" is not a route'
+! exec egress-proxy probe
+stderr 'name one route: healthz, readyz, info'
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+# Every route answers once the process serves. The probe reads the same
+# EGRESS_PROXY_ADMIN the serving process read, because both run in the
+# proxy's container.
+exec egress-proxy probe healthz
+stdout '^ok$'
+exec egress-proxy probe readyz
+stdout '^ok$'
+exec egress-proxy probe info
+stdout '"sandbox_id": "acceptance"'
+stdout '"credential_source": "none"'
+
+sigterm
+wait proxy
+
+# The socket goes with the process, so a probe after the stop fails again.
+# A kubelet reading a stale answer would keep sending traffic to a proxy
+# that is gone.
+! exec egress-proxy probe readyz
+stderr 'probe: readyz on .*admin\.sock'
+
+-- config.yaml --
+version: 1
+endpoints:
+  - host: example.com

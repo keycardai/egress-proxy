@@ -119,7 +119,7 @@ audit stdout scope=connection destination.host=169.254.169.254 decision.verdict=
 audit stdout scope=connection destination.host=localhost destination.port=443 decision.verdict=deny decision.reason=no_matching_endpoint
 
 # A request refused inside a tunnel is recorded at request scope, with the
-# connection that carried it and the reason the workload was told.
+# connection it arrived on and the reason the workload was told.
 audit stdout scope=request request.path=/secret decision.verdict=deny decision.reason=no_matching_endpoint
 audit stdout scope=request request.path=/hello/%2e%2e/secret decision.verdict=deny decision.reason=malformed_request
 audit stdout scope=request request.path=/hello request.host=other.example decision.verdict=deny decision.reason=host_mismatch

@@ -22,7 +22,7 @@ decide what the proxy allows. Each audit record attributes that decision to the
 document digest. An override can hide a decision-affecting value from that
 attribution, so these values cannot come from another source.
 
-Every record also carries `config.digest`, which covers the settings after an
+Every record also holds `config.digest`, which covers the settings after an
 override applies. Read it with `document.digest` to distinguish the mounted
 file from the settings in force. See "What the digests identify" below.
 
@@ -42,7 +42,7 @@ The parser rejects these errors:
 
 ### What the digests identify
 
-Every audit record carries two digests. Each value contains `sha256:` followed
+Every audit record holds two digests. Each value contains `sha256:` followed
 by the hexadecimal SHA-256 digest of a document in RFC 8785 canonical JSON.
 
 `document.digest` identifies the mounted file. `config.digest` identifies what
@@ -129,9 +129,12 @@ that the endpoint list denies.
 | `connect` | `127.0.0.1:3128` | `--connect`, `EGRESS_PROXY_CONNECT` | The CONNECT frontend in `host:port` form. A workload that honors `HTTPS_PROXY` reaches the proxy through this address. |
 | `transparent_port` | unset | `--transparent-port`, `EGRESS_PROXY_TRANSPARENT_PORT` | The redirect target. The netsetup init container sends captured TCP here, so clients reach the proxy without a proxy variable. The frontend binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every captured connection to loopback. Other pods cannot connect to it. Unset or 0 disables the transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start` so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when the port is not below it. containerd 2.0 and later sets the sysctl to 0, so set it to `1024` in the pod's `securityContext.sysctls`. The proxy binds the port with `NET_BIND_SERVICE` from a file capability. Add `NET_BIND_SERVICE` to the sidecar and run the binary as its entrypoint. Linux only. |
 | `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP. It gets the destination from the `Host` header. It reads every other captured port as TLS and gets the destination from the ClientHello. Endpoints name HTTPS destinations, so the proxy reads a cleartext connection and then refuses it. `config.digest` includes this setting only when `transparent_port` is set. |
-| `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. |
+| `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. `egress-proxy probe` does not read the document, so set a socket path other than the default with the variable. |
 
-The admin socket answers `GET /healthz` with `ok`. It answers `GET /info`
+The admin socket answers `GET /healthz` with `ok` while the process is
+alive. It answers `GET /readyz` with `ok` once every frontend is bound
+and `ca.crt` is written to `ca.out_dir`, and with 503 and the reason before
+that and again for the whole shutdown drain. It answers `GET /info`
 with a JSON object that contains the binary version, `sandbox_id`,
 `document_digest`, `config_digest`, `overridden`, the listen and limit
 settings, the CA output directory and expiry, the credential source, the
@@ -141,11 +144,17 @@ mode on every start and refuses to start when the directory does not end up
 at mode 0700, so no other uid in the pod can reach the socket. Keep
 `ca.out_dir` out of that directory: the workload cannot traverse it.
 
+`egress-proxy probe <healthz|readyz|info>` dials that socket, prints the
+answer and exits non-zero on anything but a 200. It reads the same `--admin`
+and `EGRESS_PROXY_ADMIN` the serving process reads, because it runs in the
+same container. It needs no shell and no curl, so it is how the kubelet's
+probes, an operator and the cluster lane reach the admin surface.
+
 ### `netsetup`
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `receipt` | `/run/egress/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it only when `listen.transparent_port` is set. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. |
+| `receipt` | `/run/egress/netsetup/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it only when `listen.transparent_port` is set. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. Keep it out of the admin socket directory, which the proxy takes to mode 0700. |
 
 The proxy reads the receipt before it serves requests. It refuses to start if
 the active rules differ from the receipt: the rules were not verified, the
@@ -167,7 +176,7 @@ environment variables, so the pod spec shows the whole ruleset.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `out_dir` | `/shared-ca` | `--ca-out-dir`, `EGRESS_PROXY_CA_OUT_DIR` | The directory where the proxy writes `ca.crt` before it listens. The file has mode 0644, and the directory has mode 0755. The workload mounts the directory read-only and installs the file. The directory contains only the certificate. |
+| `out_dir` | `/shared-ca/out` | `--ca-out-dir`, `EGRESS_PROXY_CA_OUT_DIR` | The directory where the proxy writes `ca.crt` before it listens. The file has mode 0644, and the directory has mode 0755. The proxy sets that mode at every start, so this must be a directory the proxy creates inside the shared volume rather than the mount point, which belongs to root. The workload mounts the volume read-only and installs the file. The directory holds only the certificate. |
 | `state_dir` | unset | `--ca-state-dir`, `EGRESS_PROXY_CA_STATE_DIR` | The directory that stores the CA key and certificate across a restart. This keeps the same authority that a running workload already trusts. The path must use a memory-backed volume, such as `emptyDir` with `medium: Memory`. The process checks that the directory uses tmpfs, rejects other file systems, and rejects a path that overlaps `out_dir`. When unset, the proxy keeps the authority only in memory. A restart then creates a new authority. Linux only. |
 | `leaf_ttl` | `24h` | `--leaf-ttl`, `EGRESS_PROXY_LEAF_TTL` | How long a minted leaf certificate stays valid. A leaf never outlives the authority, which lives for 30 days. |
 | `cache_size` | `1024` | `--cache-size`, `EGRESS_PROXY_CACHE_SIZE` | The number of minted leaf certificates that the proxy keeps. The proxy uses an LRU keyed by server name. |
@@ -272,7 +281,7 @@ connections and requests.
 The proxy decides on the escaped path, the bytes it forwards upstream. An
 escaped character is not a separator, so `/a%2Fb` is one segment named `a/b`
 and the prefix `/a/` does not cover it. The proxy refuses a path whose
-escaped or decoded form carries dot segments, so `/api/%2e%2e/secret`, which
+escaped or decoded form holds dot segments, so `/api/%2e%2e/secret`, which
 an upstream that decodes first reads as `/secret`, is rejected with
 `malformed_request`.
 
@@ -322,7 +331,7 @@ The proxy writes the credential after it removes the hop-by-hop headers that
 the workload named in `Connection`. A workload cannot name the placement
 header there and have the credential dropped on the way out.
 
-No credential reaches a log line or an audit record. A record carries the
+No credential reaches a log line or an audit record. A record holds the
 method, the path without its query, and the host. The proxy redacts credentials
 from request error text. It suppresses raw ReverseProxy diagnostics and reports
 incomplete responses in the audit record. Static-file parse errors name the
@@ -334,34 +343,34 @@ The proxy writes one JSON line to stdout for every decision. `scope` is
 `connection` for the decision made when a CONNECT arrives or when the
 transparent frontend recovers a captured connection's destination. It is
 `request` for each request inside the tunnel. `connection_id` joins the two
-records. A captured connection also carries `destination.original_address`,
+records. A captured connection also names `destination.original_address`,
 the address the client opened before the redirect rewrote it. That field
 identifies a captured connection in the audit stream.
 `decision.reason` has one of these values:
 
 | Reason | Verdict | Scope | Meaning |
 |---|---|---|---|
-| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never carries an allow. |
+| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never gets an allow. |
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. |
-| `cleartext_not_forwarded` | deny | both | The connection or request carries cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
+| `cleartext_not_forwarded` | deny | both | The connection or request sends cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
 | `no_sni` | deny | connection | The TLS handshake named no server, either inside a tunnel or on a captured connection whose ClientHello had no `server_name`. RFC 6066 section 3 forbids an IP literal there, so a client connecting straight to an address sends none. |
 | `not_redirected` | deny | connection | The destination recovered from a connection on the transparent listener is that listener's own address, so the connection was opened to the proxy rather than redirected into it. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
-| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form carries dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
+| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
 | `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it refused the exchange for a reason that is not its policy, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
-| `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and the tunnel carries no request. |
+| `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and no request crosses the tunnel. |
 
-A refusal carries its reason in the `X-Keycard-Deny-Reason` header. It carries
+A refusal names its reason in the `X-Keycard-Deny-Reason` header. It holds
 the connection or request ID in `X-Keycard-Request-Id`. The proxy uses status
-403 for a policy refusal, 400 for a malformed or non-proxy request, and 502
-when a dependency fails. `upstream_failed` and `exchange_failed` both answer
-502 because a retry can succeed. A refused handshake has no response to put a
-header on. The client sees a TLS failure, and the record names the reason.
+403 for a policy refusal, 400 for a malformed or non-proxy request, and 502 when
+a dependency fails. `upstream_failed` and `exchange_failed` both answer 502
+because a retry can succeed. A refused handshake does not have a response to put
+a header on. The client sees a TLS failure, and the record names the reason.
 
 The proxy writes JSON logs to stderr. These logs contain no decision. The
 audit stream on stdout contains the decision record.

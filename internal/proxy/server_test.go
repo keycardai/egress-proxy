@@ -131,7 +131,7 @@ func (m *memorySink) none(t *testing.T, what string, match func(audit.Record) bo
 }
 
 // byReason matches a record by scope and reason. Use it only where one
-// record in the test carries that pair.
+// record in the test has that pair.
 func byReason(scope audit.Scope, reason policy.Reason) func(audit.Record) bool {
 	return func(record audit.Record) bool {
 		return record.Scope == scope && record.Decision.Reason == reason
@@ -464,7 +464,7 @@ func (h *harness) connect(t *testing.T, conn net.Conn, reader *bufio.Reader, aut
 	return readConnect(t, reader)
 }
 
-// readConnect reads the answer to a CONNECT. A 200 carries no body, and what
+// readConnect reads the answer to a CONNECT. A 200 has no body, and what
 // follows on the connection is the tunnel, so readConnect drains a refusal
 // only.
 func readConnect(t *testing.T, reader *bufio.Reader) reply {
@@ -520,7 +520,7 @@ func (h *harness) roundTrip(t *testing.T, conn io.ReadWriter, reader *bufio.Read
 }
 
 // upgrade drives one request the upstream answers with a protocol switch and
-// returns the connection carrying it and the reader over that connection.
+// returns the connection it ran on and the reader over that connection.
 // The reader holds anything the upstream sent after the 101.
 func (h *harness) upgrade(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
@@ -531,7 +531,7 @@ func (h *harness) upgrade(t *testing.T) (net.Conn, *bufio.Reader) {
 		"\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n")
 	require.NoError(t, err)
 	reader := bufio.NewReader(conn)
-	//nolint:bodyclose // a 101 response carries http.NoBody
+	//nolint:bodyclose // a 101 response has http.NoBody
 	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
 	require.NoError(t, err, "read the answer to the upgrade request")
 	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "the upstream switched protocols")
@@ -539,7 +539,7 @@ func (h *harness) upgrade(t *testing.T) (net.Conn, *bufio.Reader) {
 	require.NoError(t, err)
 	echoed, err := reader.ReadString('\n')
 	require.NoError(t, err)
-	require.Equal(t, "ping\n", echoed, "the upgraded connection carries bytes both ways")
+	require.Equal(t, "ping\n", echoed, "the upgraded connection moves bytes both ways")
 	return conn, reader
 }
 
@@ -564,7 +564,7 @@ func TestAllowedRequestReachesTheUpstream(t *testing.T) {
 		// No endpoint: the connection decision took no path into account.
 		Decision: audit.Decision{Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed},
 	}
-	assert.NotEmpty(t, connection.ConnectionID, "the connection record carries an id")
+	assert.NotEmpty(t, connection.ConnectionID, "the connection record holds an id")
 	assert.Equal(t, wantConnection, connection, "connection record")
 	request := h.sink.find(t, "the allowed request", byReason(audit.ScopeRequest, policy.ReasonEndpointAllowed))
 	wantRequest := audit.Record{
@@ -575,12 +575,12 @@ func TestAllowedRequestReachesTheUpstream(t *testing.T) {
 		Request:     &audit.RequestInfo{Method: http.MethodGet, Path: "/ok/echo", Host: h.upstreamAuthority()},
 		Decision: audit.Decision{
 			Verdict: policy.VerdictAllow, Reason: policy.ReasonEndpointAllowed,
-			// The endpoint id names the authority, so it carries the port.
+			// The endpoint id names the authority, so it includes the port.
 			Endpoint: fmt.Sprintf("%s:%d/ok/", upstreamHost, h.upstream.port),
 		},
 		Outcome: &audit.Outcome{Status: http.StatusOK},
 	}
-	assert.NotEmpty(t, request.RequestID, "the request record carries an id")
+	assert.NotEmpty(t, request.RequestID, "the request record holds an id")
 	assert.Equal(t, wantRequest, request, "request record")
 }
 
@@ -628,7 +628,7 @@ func TestDeniedConnections(t *testing.T) {
 			answer := h.connect(t, conn, bufio.NewReader(conn), tc.authority)
 			assert.Equal(t, tc.wantStatus, answer.status, "CONNECT status")
 			assert.Equal(t, tc.wantReason, answer.reason(), "CONNECT reason")
-			require.NotEmpty(t, answer.id(), "the refusal carries a connection id")
+			require.NotEmpty(t, answer.id(), "the refusal holds a connection id")
 			record := h.sink.find(t, tc.name, byConnection(answer.id(), tc.wantReason))
 			assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record = %+v", record)
 		})
@@ -878,7 +878,7 @@ func TestANameResolvingIntoADeniedRangeIsRefusedAtTheDial(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, answer.status, "response status")
 	assert.Equal(t, policy.ReasonDenyAlways, answer.reason(), "response reason")
-	// The refusal comes from the reverse proxy's error handler. It carries
+	// The refusal comes from the reverse proxy's error handler. It holds
 	// the request id, so the workload can name the record to an operator.
 	require.NotEmpty(t, answer.id(), "the refusal names its record")
 	record := h.sink.find(t, "the refused dial", byRequest(answer.id()))

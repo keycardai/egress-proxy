@@ -40,9 +40,12 @@ func TestCapture(t *testing.T) {
 		receipt func(*netsetup.Receipt)
 		// wantErr is the refusal on a platform that can recover the redirected
 		// destination.
-		wantErr   error
-		wantLog   []string
-		wantNoLog string
+		wantErr error
+		// wantFamilies is what capture reports from the receipt, which the
+		// bind checks the sockets against.
+		wantFamilies []string
+		wantLog      []string
+		wantNoLog    string
 	}{
 		{
 			name:      "no transparent frontend, no receipt read",
@@ -55,19 +58,27 @@ func TestCapture(t *testing.T) {
 			wantErr: netsetup.ErrNoReceipt,
 		},
 		{
-			name:    "a transparent frontend under a receipt that matches it",
-			listen:  "listen:\n  transparent_port: 1015\n",
-			receipt: func(*netsetup.Receipt) {},
+			name:         "a transparent frontend under a receipt that matches it",
+			listen:       "listen:\n  transparent_port: 1015\n",
+			receipt:      func(*netsetup.Receipt) {},
+			wantFamilies: []string{"ipv4"},
 			wantLog: []string{
 				`"msg":"transparent network capture enabled"`, `"redirect_port":1015`, `"capture_ports":[80,443]`,
 			},
 			wantNoLog: "outside of the network capture and transparent redirect",
 		},
 		{
-			name:    "a cleartext port outside of the network capture and transparent redirect",
-			listen:  "listen:\n  transparent_port: 1015\n  cleartext_ports: [80, 8080]\n",
-			receipt: func(*netsetup.Receipt) {},
-			wantLog: []string{`names a port outside of the network capture and transparent redirect`, `"port":8080`},
+			name:         "a receipt that names both families",
+			listen:       "listen:\n  transparent_port: 1015\n",
+			receipt:      func(r *netsetup.Receipt) { r.Families = []string{"ipv4", "ipv6"} },
+			wantFamilies: []string{"ipv4", "ipv6"},
+		},
+		{
+			name:         "a cleartext port outside of the network capture and transparent redirect",
+			listen:       "listen:\n  transparent_port: 1015\n  cleartext_ports: [80, 8080]\n",
+			receipt:      func(*netsetup.Receipt) {},
+			wantFamilies: []string{"ipv4"},
+			wantLog:      []string{`names a port outside of the network capture and transparent redirect`, `"port":8080`},
 		},
 		{
 			name:    "a receipt whose rules exclude the wrong uid",
@@ -106,7 +117,8 @@ func TestCapture(t *testing.T) {
 				"netsetup:\n  receipt: "+path+"\nendpoints:\n  - host: pypi.org\n"), config.Overrides{})
 			require.NoError(t, err, "parse the document")
 			var logs bytes.Buffer
-			frontend, err := capture(cfg, nil, slog.New(slog.NewJSONHandler(&logs, nil)), netsetup.ContainmentRequest{
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			frontend, families, err := capture(cfg, nil, logger, netsetup.ContainmentRequest{
 				PortStart: func() (int, error) { return 1024, nil },
 			})
 			wantErr := tc.wantErr
@@ -115,11 +127,13 @@ func TestCapture(t *testing.T) {
 			}
 			if wantErr != nil {
 				require.ErrorIs(t, err, wantErr, "the refusal the caller keys on")
-				assert.Nil(t, frontend, "a capture error does not build a frontend")
+				assert.Nil(t, frontend, "a refused check does not build a frontend")
+				assert.Nil(t, families, "a refused check does not report families")
 				return
 			}
 			require.NoError(t, err, "the check passes")
 			assert.Equal(t, cfg.Listen.TransparentPort != 0, frontend != nil, "a frontend exactly when one is configured")
+			assert.Equal(t, tc.wantFamilies, families, "the receipt's families, which the bind checks the sockets against")
 			for _, want := range tc.wantLog {
 				assert.Contains(t, logs.String(), want, "the start-up log")
 			}

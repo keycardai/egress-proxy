@@ -31,8 +31,8 @@ func TestParseAppliesDefaults(t *testing.T) {
 		// Zero disables the transparent frontend.
 		{"listen.transparent_port", cfg.Listen.TransparentPort, 0},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
-		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup.json"},
-		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca"},
+		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup/netsetup.json"},
+		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca/out"},
 		{"ca.state_dir", cfg.CA.StateDir, ""},
 		{"ca.leaf_ttl", cfg.CA.LeafTTL.Duration(), 24 * time.Hour},
 		{"ca.cache_size", cfg.CA.CacheSize, 1024},
@@ -69,7 +69,7 @@ func TestParseNormalizesTheEndpointHost(t *testing.T) {
 		{name: "in mixed case", host: "PyPI.ORG", wantHost: "pypi.org"},
 		{name: "padded", host: " pypi.org. ", wantHost: "pypi.org"},
 		// One trailing dot is the root label. A second one is an empty
-		// label, which no name can carry. Normalization drops a single dot,
+		// label, which a name cannot hold. Normalization drops a single dot,
 		// so the host still holds the empty label when it is validated.
 		{name: "with two trailing dots", host: "pypi.org..", wantErr: "must be a DNS name"},
 		{name: "with three trailing dots", host: "pypi.org...", wantErr: "must be a DNS name"},
@@ -524,7 +524,7 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 }
 
 // TestParseRefusesInvalidEndpoints covers the host forms, ports and path
-// prefixes an endpoint can carry. A host must be a DNS name, so every
+// prefixes an endpoint can name. A host must be a DNS name, so every
 // spelling of an address is refused here.
 func TestParseRefusesInvalidEndpoints(t *testing.T) {
 	t.Parallel()
@@ -616,7 +616,7 @@ func TestParseRefusesInvalidEndpoints(t *testing.T) {
 		{
 			name:    "resource with userinfo",
 			doc:     endpoint("host: pypi.org\n    resource: https://u@pypi.org/"),
-			wantErr: "no userinfo",
+			wantErr: "must not hold userinfo",
 		},
 	})
 }
@@ -703,7 +703,7 @@ func TestParseEndpointIdentity(t *testing.T) {
 }
 
 // TestParseRefusesInvalidCredentials covers the credential source and the
-// placement that carries it.
+// placement that names it.
 func TestParseRefusesInvalidCredentials(t *testing.T) {
 	t.Parallel()
 	endpoint := func(fields string) string {
