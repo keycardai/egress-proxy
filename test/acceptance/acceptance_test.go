@@ -32,8 +32,10 @@ import (
 	"time"
 
 	"github.com/rogpeppe/go-internal/testscript"
+	"github.com/stretchr/testify/require"
 
 	"github.com/keycardai/egress-proxy/internal/ca"
+	"github.com/keycardai/egress-proxy/test/baseimage"
 	"github.com/keycardai/egress-proxy/test/fakeas"
 )
 
@@ -64,10 +66,15 @@ func TestMain(m *testing.M) {
 
 func TestAcceptance(t *testing.T) {
 	t.Parallel()
+	// A scenario that builds a Debian image passes DEBIAN_IMAGE as a build
+	// argument, so its Dockerfile does not name a digest of its own.
+	debian, err := baseimage.Debian("../..")
+	require.NoError(t, err, "read the Debian base image")
 	testscript.Run(t, testscript.Params{
 		Dir: "testdata",
 		Setup: func(env *testscript.Env) error {
 			env.Setenv("PATH", binDir+string(os.PathListSeparator)+env.Getenv("PATH"))
+			env.Setenv("DEBIAN_IMAGE", debian)
 			return nil
 		},
 		Condition: condition,

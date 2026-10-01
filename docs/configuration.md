@@ -147,8 +147,16 @@ at mode 0700, so no other uid in the pod can reach the socket. Keep
 `egress-proxy probe <healthz|readyz|info>` dials that socket, prints the
 answer and exits non-zero on anything but a 200. It reads the same `--admin`
 and `EGRESS_PROXY_ADMIN` the serving process reads, because it runs in the
-same container. It needs no shell and no curl, so it is how the kubelet's
-probes, an operator and the cluster lane reach the admin surface.
+same container. The proxy image has no shell and no curl, so this subcommand
+is how the kubelet's probes, an operator and the cluster lane reach the
+admin surface.
+
+`egress-proxy settings` prints the settings this binary accepts as JSON,
+with no document and no socket: every variable in the table above, the flag
+that fills the same setting, and the default the parser applies. It also
+prints the probe routes and the netsetup defaults a pod has to match. A
+duration default is a whole number of seconds, so `--leaf-ttl` publishes
+`86400`. The sandbox chart's lint reads it. See `docs/containers.md`.
 
 ### `netsetup`
 

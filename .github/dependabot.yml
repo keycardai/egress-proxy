@@ -12,6 +12,19 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+  # Updates the FROM lines in the Dockerfiles under images/.
+  - package-ecosystem: "docker"
+    directories:
+      - "/images/netsetup"
+      - "/images/proxy"
+      - "/images/sandbox-base"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      base-images:
+        patterns:
+          - "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

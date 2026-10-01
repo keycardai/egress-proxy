@@ -79,7 +79,8 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 
 // TestCommandRequiresTheConfigPath checks that starting the proxy without a
 // config path fails with errNoConfig. --config is not marked Required,
-// because probe runs without it, so the serve action has to check for it.
+// because probe and settings run without it, so the serve action has to
+// check for it.
 func TestCommandRequiresTheConfigPath(t *testing.T) { //nolint:paralleltest // the environment must not supply it
 	tests := []struct {
 		name string

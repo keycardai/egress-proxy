@@ -30,13 +30,15 @@ it, so a pod does not need a shell or curl to probe the proxy:
     ./egress-proxy --admin /tmp/egress-admin.sock probe info
 
 `docs/configuration.md` describes every key of the document and every reason
-code in the audit stream. `docs/security-model.md` states what the proxy
+code in the audit stream. `docs/containers.md` states what the containers
+this repository ships need. `docs/security-model.md` states what the proxy
 enforces and what it does not.
 
 ## Build
 
     make build      # the binaries
     make all        # build, test, lint, checks, acceptance
+    make images     # the three images under images/, built locally
 
 Go 1.27.1 or newer. The build-time tools are `tool` directives in `go.mod`,
 built by the `go` command on first use. Nothing else needs installing.

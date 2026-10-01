@@ -11,6 +11,7 @@ help:
 	@echo "checks          license allow-list, NOTICE freshness and govulncheck"
 	@echo "acceptance      the acceptance tests under test/acceptance, which drive the built binary"
 	@echo "e2e             the cluster lanes under test/e2e"
+	@echo "images          build the three images locally and check each one"
 	@echo "notice          regenerate NOTICE from the build list"
 	@echo "tidy            go mod tidy"
 	@echo "all             build, test, lint, checks, acceptance, in gate order"
@@ -79,6 +80,60 @@ e2e:
 	else \
 		echo "e2e: no lanes under test/e2e yet"; \
 	fi
+
+# The three images, built locally. ko builds the proxy straight from the
+# module. The other two are Dockerfiles, and the netsetup one takes the
+# repository root as its build context. Nothing here pushes: publishing is
+# a release step.
+IMAGE_TAG ?= dev
+
+# The reference the proxy image ends up under.
+PROXY_IMAGE ?= egress-proxy:$(IMAGE_TAG)
+
+# The intermediate image ko builds and the setcap step reads. ko also tags
+# it with its digest. The recipe removes both tags when it finishes. Do not
+# override this: the binary in that image does not have the capability, so
+# nothing outside this recipe may run it.
+PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
+
+# Two steps. ko compiles the binary and builds the distroless image, then
+# images/proxy/Dockerfile puts cap_net_bind_service=+ep on the binary,
+# which ko has no step for. test/images runs this target, so the lane
+# drives the image the release builds.
+#
+# SOURCE_DATE_EPOCH keeps the created timestamp of the final image at the
+# epoch, which is the timestamp ko gives the image it loads. The file
+# timestamps inside the layers keep the values the setcap stage wrote.
+#
+# Both ko references are removed whether or not the setcap build succeeds.
+# The recipe exits with the build's status, then with the removal's.
+.PHONY: image-proxy
+image-proxy:
+	ko_ref=$$(KO_CONFIG_PATH=images/proxy KO_DOCKER_REPO=ko.local $(GO) tool ko build --local --bare \
+		--tags $(IMAGE_TAG)-ko --platform linux/$(shell $(GO) env GOARCH) ./cmd/egress-proxy) || exit $$?; \
+	build_status=0; \
+	SOURCE_DATE_EPOCH=0 docker build -f images/proxy/Dockerfile --build-arg KO_IMAGE=$(PROXY_KO_IMAGE) \
+		-t $(PROXY_IMAGE) images/proxy || build_status=$$?; \
+	rm_status=0; \
+	docker image rm $(PROXY_KO_IMAGE) "$$ko_ref" || rm_status=$$?; \
+	[ $$build_status -eq 0 ] || exit $$build_status; \
+	exit $$rm_status
+
+.PHONY: image-netsetup
+image-netsetup:
+	docker build -f images/netsetup/Dockerfile -t egress-netsetup:$(IMAGE_TAG) .
+
+.PHONY: image-sandbox-base
+image-sandbox-base:
+	docker build -t sandbox-base:$(IMAGE_TAG) images/sandbox-base
+
+# The image lane builds all three and checks each one in a container: the
+# proxy image answers `probe`, the netsetup image resolves the legacy
+# iptables binaries, and the base image entrypoint installs a certificate
+# from a fake /shared-ca. It skips when no Docker daemon answers.
+.PHONY: images
+images:
+	$(GO) test -tags images -count=1 -timeout 30m ./test/images/...
 
 .PHONY: all
 all: build test lint checks acceptance
