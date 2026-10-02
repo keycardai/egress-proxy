@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -40,6 +41,34 @@ const (
 // that matches the user.
 const serviceAccount = "system:serviceaccount:" + namespace + ":" + user
 
+// The issuer and audience of a projected token in a cluster. The fixture
+// verifies both, so the tokens these tests mint hold them.
+const (
+	zoneIssuer   = "https://kubernetes.default.svc.cluster.local"
+	zoneAudience = "keycard"
+)
+
+// The fixture's signing key and the token it minted for each subject. One key
+// for the whole test binary, and one token per subject, so the value a test
+// writes to a file is the value it compares the exchange against.
+//
+//nolint:gochecknoglobals // one signing key and one token per subject for the test binary
+var (
+	fixtureKey = sync.OnceValues(func() (*fakeas.Signer, error) {
+		return fakeas.NewSigner(zoneIssuer, zoneAudience)
+	})
+	fixtureMu     sync.Mutex
+	fixtureTokens = map[string]string{}
+)
+
+// signer is the key the fixture verifies a client assertion against.
+func signer(t *testing.T) *fakeas.Signer {
+	t.Helper()
+	key, err := fixtureKey()
+	require.NoError(t, err, "build the fixture signing key")
+	return key
+}
+
 // zone is a fake authorization server over TLS. The exchange refuses a
 // cleartext zone, so every fixture here serves https.
 type fakeZone struct {
@@ -62,6 +91,7 @@ func newZone(t *testing.T, front http.HandlerFunc) *fakeZone {
 		ClientSecrets:    map[string]string{clientID: clientSecret},
 		AssertionClients: []string{clientID},
 		Namespace:        namespace,
+		Assertions:       signer(t).Verifier(),
 	})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front != nil && r.URL.Path == fakeas.TokenPath {
@@ -108,7 +138,7 @@ func workloadIdentity(t *testing.T, subject string) (func(*exchange.Options), st
 // path.
 func tokenFile(t *testing.T, subject string) string {
 	t.Helper()
-	return writeToken(t, unsignedJWT(t, subject))
+	return writeToken(t, projectedToken(t, subject))
 }
 
 // writeToken writes content to a token file and returns its path.
@@ -119,14 +149,21 @@ func writeToken(t *testing.T, content string) string {
 	return path
 }
 
-// unsignedJWT builds a token the fixture reads the sub out of. Nothing here
-// signs anything, because the fixture verifies no signature.
-func unsignedJWT(t *testing.T, subject string) string {
+// projectedToken is the projected ServiceAccount token for subject, signed by
+// the key the fixture verifies. It is minted once per subject, because the
+// claims hold the time it was minted and a test compares the exchange against
+// the value it wrote.
+func projectedToken(t *testing.T, subject string) string {
 	t.Helper()
-	payload, err := json.Marshal(map[string]string{"sub": subject})
-	require.NoError(t, err, "encode the claims")
-	encode := base64.RawURLEncoding.EncodeToString
-	return encode([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + encode(payload) + "." + encode([]byte("signature"))
+	fixtureMu.Lock()
+	defer fixtureMu.Unlock()
+	if token, ok := fixtureTokens[subject]; ok {
+		return token
+	}
+	token, err := signer(t).Token(subject)
+	require.NoError(t, err, "mint the projected token for %s", subject)
+	fixtureTokens[subject] = token
+	return token
 }
 
 // TestTheWireForm checks every exchange parameter for both client
@@ -165,7 +202,7 @@ func TestTheWireForm(t *testing.T) {
 				"subject_token_type":    "urn:keycard:params:oauth:token-type:substitute-user",
 				"resource":              resource,
 				"client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-				"client_assertion":      unsignedJWT(t, serviceAccount),
+				"client_assertion":      projectedToken(t, serviceAccount),
 				// The token-federation credential uses client_id to identify the
 				// client.
 				"client_id": clientID,
@@ -780,7 +817,7 @@ func TestDescribeNamesTheSourceAndNoSecret(t *testing.T) {
 				assert.Contains(t, describe, want, "Describe names %s", want)
 			}
 			assert.NotContains(t, describe, clientSecret, "Describe NEVER includes the client secret")
-			assert.NotContains(t, describe, unsignedJWT(t, serviceAccount),
+			assert.NotContains(t, describe, projectedToken(t, serviceAccount),
 				"Describe NEVER includes the workload token")
 		})
 	}
@@ -798,9 +835,16 @@ func TestTheWorkloadTokenIsReadOnEveryExchange(t *testing.T) {
 	_, err := source.Credential(t.Context(), resource)
 	require.NoError(t, err, "the first exchange")
 
-	// The kubelet replaces the file. The claims stay the same, so the second
-	// exchange succeeds with different token bytes.
-	rotated := unsignedJWT(t, serviceAccount) + "-rotated"
+	// The kubelet replaces the file with a token for the same ServiceAccount
+	// and a later expiry, signed by the same key.
+	rotated, err := signer(t).Sign(jwt.Claims{
+		Issuer:   zoneIssuer,
+		Audience: jwt.Audience{zoneAudience},
+		Subject:  serviceAccount,
+		Expiry:   jwt.NewNumericDate(time.Now().Add(2 * time.Hour)),
+	})
+	require.NoError(t, err, "mint the rotated token")
+	require.NotEqual(t, projectedToken(t, serviceAccount), rotated, "the rotated token is different bytes")
 	require.NoError(t, os.WriteFile(path, []byte(rotated), 0o600), "rotate the token file")
 
 	_, err = source.Credential(t.Context(), resource)
@@ -808,7 +852,7 @@ func TestTheWorkloadTokenIsReadOnEveryExchange(t *testing.T) {
 
 	requests := zone.server.Requests()
 	require.Len(t, requests, 2, "one exchange per call")
-	assert.Equal(t, unsignedJWT(t, serviceAccount), requests[0].Form.Get("client_assertion"),
+	assert.Equal(t, projectedToken(t, serviceAccount), requests[0].Form.Get("client_assertion"),
 		"the first exchange sends the token as written")
 	assert.Equal(t, rotated, requests[1].Form.Get("client_assertion"),
 		"the second exchange sends the rotated token, not the one read at start-up")

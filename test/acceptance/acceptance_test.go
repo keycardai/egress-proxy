@@ -13,7 +13,6 @@ package acceptance_test
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -144,12 +144,38 @@ const (
 	zoneClientSecret = "acceptance-client-secret"
 )
 
+// The issuer and audience of a projected token in a cluster. The fixture
+// verifies both, so satoken mints a token that holds them.
+const (
+	zoneIssuer   = "https://kubernetes.default.svc.cluster.local"
+	zoneAudience = "keycard"
+)
+
+// zoneSigner is the key satoken signs a projected token with and the fake
+// zone verifies it against. One key for the test binary, so the zone a
+// scenario starts accepts the token that scenario writes.
+//
+//nolint:gochecknoglobals // one fixture signing key for the test binary
+var zoneSigner = sync.OnceValues(func() (*fakeas.Signer, error) {
+	return fakeas.NewSigner(zoneIssuer, zoneAudience)
+})
+
+// zoneForger holds a key no zone verifies against. satoken -forged signs
+// with it, so a scenario drives what the proxy does when the zone refuses an
+// assertion the cluster did not sign.
+//
+//nolint:gochecknoglobals // one forged signing key for the test binary
+var zoneForger = sync.OnceValues(func() (*fakeas.Signer, error) {
+	return fakeas.NewSigner(zoneIssuer, zoneAudience)
+})
+
 // cmdFakeAS starts a fake Keycard zone over TLS in the test process:
 //
 //	fakeas DIR RESOURCE=CREDENTIAL...
 //
 // It grants each named resource the credential beside it and refuses other
-// resources with access_denied. It writes its CA certificate to DIR/ca.crt,
+// resources with access_denied. It verifies a client assertion against the
+// key satoken signs with. It writes its CA certificate to DIR/ca.crt,
 // appends one line per token request to DIR/requests.log, and exports its port
 // as $ZONE_PORT. It exports the known client as $ZONE_CLIENT_ID and
 // $ZONE_CLIENT_SECRET. It stops when the script ends.
@@ -175,10 +201,13 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	requests, err := os.OpenFile(filepath.Join(dir, "requests.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	ts.Check(err)
 
+	signer, err := zoneSigner()
+	ts.Check(err)
 	zone := fakeas.New(fakeas.Options{
 		Credentials:      grants,
 		ClientSecrets:    map[string]string{zoneClientID: zoneClientSecret},
 		AssertionClients: []string{zoneClientID},
+		Assertions:       signer.Verifier(),
 	})
 	server := httptest.NewUnstartedServer(fakeas.LogExchanges(zone, requests))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
@@ -196,19 +225,29 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 
 // cmdSAToken writes a projected ServiceAccount token to a file:
 //
-//	satoken FILE SUBJECT
+//	satoken [-forged] FILE SUBJECT
 //
-// The token is an unsigned JWT with SUBJECT as its sub claim. The fake zone
-// reads that claim and does not verify a signature, so the scenario needs no
-// signing secret. The command sets SA_TOKEN to the token it wrote.
+// The token names SUBJECT as its sub, the cluster issuer as its iss and the
+// keycard audience as its aud, and it is signed by the key the fake zone
+// verifies. It stands in for what the API server signs for a pod. With
+// -forged it is signed by a key no zone holds, which stands in for a pod
+// that mints its own token. The command sets SA_TOKEN to the token it wrote.
 func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
-	if neg || len(args) != 2 {
-		ts.Fatalf("usage: satoken FILE SUBJECT")
+	forged := len(args) > 0 && args[0] == "-forged"
+	if forged {
+		args = args[1:]
 	}
-	claims, err := json.Marshal(map[string]string{"sub": args[1]})
+	if neg || len(args) != 2 {
+		ts.Fatalf("usage: satoken [-forged] FILE SUBJECT")
+	}
+	key := zoneSigner
+	if forged {
+		key = zoneForger
+	}
+	signer, err := key()
 	ts.Check(err)
-	encode := base64.RawURLEncoding.EncodeToString
-	token := encode([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + encode(claims) + "." + encode([]byte("signature"))
+	token, err := signer.Token(args[1])
+	ts.Check(err)
 	// The kubelet writes the projected token with mode 0644.
 	ts.Check(os.WriteFile(ts.MkAbs(args[0]), []byte(token), 0o644))
 	// A scenario asserts the token bytes appear in no output. The wire form is

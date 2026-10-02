@@ -126,6 +126,13 @@ spec:
       configMap:
         name: fixture-ca
     - name: keycard-token
+      {{- if .ForgedToken }}
+      # A token the test suite signed in place of the projected one. The API
+      # server did not sign it, so the zone refuses the assertion.
+      secret:
+        defaultMode: 0644
+        secretName: {{ .ForgedToken }}
+      {{- else }}
       projected:
         defaultMode: 0644
         sources:
@@ -133,3 +140,4 @@ spec:
               path: token
               audience: {{ .Audience }}
               expirationSeconds: 3600
+      {{- end }}
