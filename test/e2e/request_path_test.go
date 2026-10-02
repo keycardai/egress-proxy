@@ -117,6 +117,17 @@ func TestRequestPath(t *testing.T) {
 			},
 		},
 		{
+			name:       "a path no endpoint names is refused and makes no exchange",
+			pod:        sandboxPod,
+			command:    curl("https://" + upstreamHost + "/anything"),
+			wantStdout: "403",
+			wantRecord: audited{
+				scope: audit.ScopeRequest, verdict: policy.VerdictDeny, reason: policy.ReasonNoMatchingEndpoint,
+				host: upstreamHost, path: "/anything",
+			},
+			wantExchanges: []exchange{},
+		},
+		{
 			name:     "a denied host is blocked with a named reason",
 			pod:      sandboxPod,
 			command:  curl("https://" + deniedHost + "/headers"),

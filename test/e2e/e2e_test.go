@@ -124,7 +124,10 @@ func start(t *testing.T) *test {
 
 	ctx, cancel := context.WithTimeout(context.Background(), clusterTimeout)
 	defer cancel()
-	kubeconfig, err := cluster.Create(ctx, "--image", k3sImage, "--wait")
+	// The framework writes its own kubeconfig file, so k3d leaves the
+	// operator's default kubeconfig and current context alone.
+	kubeconfig, err := cluster.Create(ctx, "--image", k3sImage, "--wait",
+		"--kubeconfig-update-default=false", "--kubeconfig-switch-context=false")
 	require.NoError(t, err, "create the k3d cluster %s", clusterName)
 	t.Logf("e2e: cluster %s is up, kubeconfig %s", clusterName, kubeconfig)
 

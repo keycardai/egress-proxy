@@ -131,5 +131,5 @@ spec:
         sources:
           - serviceAccountToken:
               path: token
-              audience: keycard
+              audience: {{ .Audience }}
               expirationSeconds: 3600

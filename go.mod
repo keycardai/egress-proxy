@@ -14,7 +14,9 @@ tool (
 
 require (
 	github.com/coreos/go-iptables v0.8.0
+	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/elazarl/goproxy v1.9.1
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gowebpki/jcs v1.0.2
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/keycardai/go-sdk v0.23.2
@@ -126,7 +128,6 @@ require (
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
-	github.com/coreos/go-oidc/v3 v3.18.0 // indirect
 	github.com/curioswitch/go-reassign v0.3.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/daixiang0/gci v0.13.7 // indirect
@@ -156,7 +157,6 @@ require (
 	github.com/fzipp/gocyclo v0.6.0 // indirect
 	github.com/ghostiam/protogetter v0.3.21 // indirect
 	github.com/go-critic/go-critic v0.14.4 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/analysis v0.25.5 // indirect

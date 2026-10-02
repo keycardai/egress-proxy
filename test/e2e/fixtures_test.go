@@ -30,9 +30,12 @@ import (
 // the projected token and permits the exchange only for the user of the
 // same name.
 const (
-	namespace       = "agents"
-	serviceAccount  = "igmua2g0fwapl21qll7tczdw7t"
-	clientID        = "e2e-app-credential"
+	namespace      = "agents"
+	serviceAccount = "igmua2g0fwapl21qll7tczdw7t"
+	clientID       = "e2e-app-credential"
+	// audience is what the projected token names and what the zone
+	// requires of a client assertion.
+	audience        = "keycard"
 	zoneHost        = "zone." + namespace + ".svc.cluster.local"
 	upstreamHost    = "upstream." + namespace + ".svc.cluster.local"
 	deniedHost      = "denied." + namespace + ".svc.cluster.local"
@@ -89,6 +92,7 @@ func deployFixtures(t *testing.T, run *test) {
 		"ZoneImage":         run.images[roleZone],
 		"UpstreamImage":     run.images[roleUpstream],
 		"ClientID":          clientID,
+		"Audience":          audience,
 		"GrantedResource":   grantedResource,
 		"GrantedCredential": zoneCredential,
 	})
@@ -147,6 +151,7 @@ func sandbox(t *testing.T, run *test, name, user string) {
 		"ProxyUID":       proxyUID,
 		"AgentUID":       agentUID,
 		"Placeholder":    placeholder,
+		"Audience":       audience,
 	})
 	waitReady(t, run, name)
 }

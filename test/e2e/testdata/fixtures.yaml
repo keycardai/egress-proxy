@@ -24,6 +24,7 @@ spec:
         - -key=/tls/tls.key
         - -namespace={{ .Namespace }}
         - -client-id={{ .ClientID }}
+        - -assertion-audience={{ .Audience }}
         - -grant={{ .GrantedResource }}={{ .GrantedCredential }}
       ports:
         - name: https
