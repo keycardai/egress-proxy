@@ -1,0 +1,123 @@
+# The two servers the sandbox talks to in e2e tests. The zone is the fake
+# authorization server the proxy exchanges tokens with. The upstream receives
+# the requests the proxy allows. These Go templates are interpolated and
+# applied to the cluster before the sandbox pod.
+#
+# Both servers use HTTPS on a Service DNS name. The proxy matches endpoints
+# on that name and verifies each server's certificate against the test CA
+# in tls.upstream_ca_files.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zone
+  namespace: {{ .Namespace }}
+  labels:
+    app: zone
+spec:
+  containers:
+    - name: zone
+      image: {{ .ZoneImage }}
+      imagePullPolicy: IfNotPresent
+      args:
+        - -addr=:8443
+        - -cert=/tls/tls.crt
+        - -key=/tls/tls.key
+        - -namespace={{ .Namespace }}
+        - -client-id={{ .ClientID }}
+        - -assertion-audience={{ .Audience }}
+        - -grant={{ .GrantedResource }}={{ .GrantedCredential }}
+      ports:
+        - name: https
+          containerPort: 8443
+      readinessProbe:
+        httpGet:
+          path: /.well-known/oauth-authorization-server
+          port: https
+          scheme: HTTPS
+        periodSeconds: 2
+      volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+  volumes:
+    - name: tls
+      secret:
+        secretName: zone-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zone
+  namespace: {{ .Namespace }}
+spec:
+  selector:
+    app: zone
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: upstream
+  namespace: {{ .Namespace }}
+  labels:
+    app: upstream
+spec:
+  containers:
+    - name: httpbin
+      image: {{ .UpstreamImage }}
+      imagePullPolicy: IfNotPresent
+      # The image sets no entrypoint, so the command names the binary and
+      # the arguments replace its default command.
+      command: ["/bin/go-httpbin"]
+      args:
+        - -port=8443
+        - -https-cert-file=/tls/tls.crt
+        - -https-key-file=/tls/tls.key
+      ports:
+        - name: https
+          containerPort: 8443
+      readinessProbe:
+        httpGet:
+          path: /status/200
+          port: https
+          scheme: HTTPS
+        periodSeconds: 2
+      volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+  volumes:
+    - name: tls
+      secret:
+        secretName: upstream-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upstream
+  namespace: {{ .Namespace }}
+spec:
+  selector:
+    app: upstream
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+# A second name for the same server. No endpoint names it, so the tests use
+# it as the denied host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: denied
+  namespace: {{ .Namespace }}
+spec:
+  selector:
+    app: upstream
+  ports:
+    - name: https
+      port: 443
+      targetPort: https

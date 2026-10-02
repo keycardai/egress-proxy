@@ -31,13 +31,11 @@ go build -modfile="$repo_root/go.mod" -o "$tool_dir/golangci-lint" \
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 
 cd "$dir"
-# The acceptance lane and the images lane are behind build tags. Naming
-# every tag here keeps those packages under the same lint as everything
-# else, the depguard import gate included. A package whose tag is missing is
-# skipped in silence, because the directory then has no buildable file.
+# Some test suites use build tags. Naming every tag here keeps those packages
+# under the same lint as everything else.
 for goos in "${platforms[@]}"; do
 	echo "lint: GOOS=$goos ($dir)"
 	GOOS=$goos "$tool_dir/golangci-lint" run --config "$repo_root/.golangci.yml" \
-		--build-tags acceptance,images ./... "$@"
+		--build-tags acceptance,e2e,images ./... "$@"
 done
 echo "lint: OK ($dir)"

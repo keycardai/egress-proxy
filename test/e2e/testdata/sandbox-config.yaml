@@ -1,0 +1,31 @@
+# The configuration document the sandbox pod mounts. Rendered as a Go template,
+# once per sandbox, and put in a ConfigMap.
+version: 1
+identity:
+  zone_url: "https://{{ .ZoneHost }}"
+  client_id: "{{ .ClientID }}"
+  workload_token_file: "/var/run/secrets/keycard/token"
+  impersonate:
+    user: "{{ .ImpersonateUser }}"
+listen:
+  transparent_port: {{ .RedirectPort }}
+netsetup:
+  receipt: "/run/egress/netsetup/netsetup.json"
+ca:
+  out_dir: "/shared-ca/out"
+tls:
+  upstream_ca_files: ["/etc/keycard/fixture-ca/ca.crt"]
+policy:
+  # The zone and the upstream are cluster addresses, which the platform
+  # deny list covers as RFC 1918 space. These exceptions are what lets the
+  # proxy dial them, and the process announces them at every start.
+  deny_list_exceptions: {{ .DenyListExceptions }}
+endpoints:
+  - host: {{ .UpstreamHost }}
+    path_prefix: /status/
+  - host: {{ .UpstreamHost }}
+    path_prefix: /headers
+    resource: "{{ .GrantedResource }}"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: UPSTREAM_TOKEN

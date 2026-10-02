@@ -26,7 +26,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -181,7 +180,7 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 		ClientSecrets:    map[string]string{zoneClientID: zoneClientSecret},
 		AssertionClients: []string{zoneClientID},
 	})
-	server := httptest.NewUnstartedServer(logExchanges(zone, requests))
+	server := httptest.NewUnstartedServer(fakeas.LogExchanges(zone, requests))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
 	server.StartTLS()
 	ts.Defer(func() {
@@ -215,24 +214,6 @@ func cmdSAToken(ts *testscript.TestScript, neg bool, args []string) {
 	// A scenario asserts the token bytes appear in no output. The wire form is
 	// base64url, so matching the subject text would match nothing.
 	ts.Setenv("SA_TOKEN", token)
-}
-
-// logExchanges writes one line per token request that the zone reads. A
-// scenario can count exchanges for allowed requests and confirm that denied
-// requests make none. The line never includes the issued credential or the
-// client secret.
-func logExchanges(zone *fakeas.Server, log io.Writer) http.Handler {
-	var mu sync.Mutex
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		seen := len(zone.Requests())
-		zone.ServeHTTP(w, r)
-		for _, request := range zone.Requests()[seen:] {
-			fmt.Fprintf(log, "exchange client=%s actor=%q subject=%s resource=%s error=%q\n",
-				request.ClientID, request.Actor, request.Subject, request.Form.Get("resource"), request.Error)
-		}
-	})
 }
 
 // streamEvents and streamInterval shape the event stream: the stream runs

@@ -19,9 +19,13 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   and Go client used by the Docker scenarios,
   `test/baseimage/` for the Debian base image the tests build on, read
   from the pin in `images/sandbox-base/Dockerfile`,
-  `test/e2e/` for the cluster lanes,
+  `test/e2e/` the e2e tests, Go behind the `e2e` build tag, which builds
+  the images, creates a k3d cluster, imports them, applies the pod and the
+  fixtures under `testdata/` and drives requests from inside the agent
+  container,
   `test/fakeas/` a fake authorization server the unit tests and the
-  acceptance lane drive the exchange against,
+  acceptance tests drive the exchange against, with `cmd/fakeas` the command
+  the e2e tests deploy it as,
   `test/gates/` for the gate self-tests,
   `test/images/` the image lane, Go behind the `images` build tag, which
   builds the three images locally and checks each one in a container,
@@ -206,7 +210,7 @@ job, so the local gate and the CI gate are one gate.
     make lint        golangci-lint at the pinned version, with the depguard import gate
     make checks      license allow-list, NOTICE freshness, govulncheck
     make acceptance  the acceptance tests under test/acceptance, against the built binary
-    make e2e         the cluster lanes (skips when there are none)
+    make e2e         the e2e tests on k3d (skips without Docker or k3d)
     make images      build the three images locally and check each one
 
 `make all` runs build, test, lint, checks and acceptance in that order.
@@ -214,13 +218,23 @@ job, so the local gate and the CI gate are one gate.
 The gates and what each enforces:
 
 - **Lint** (`scripts/lint.sh`): `.golangci.yml`. The `depguard` rule is the
-  import gate for working agreement 6. `gci` requires imports in three
+  import gate for working agreement 6. A second `depguard` rule keeps
+  `cmd/` and `internal/` from importing anything under `test/`. A file
+  under `test/` is exempt, because the test suites there run the fixtures and
+  `test/fakeas/cmd` runs one as a command. That exemption is an
+  `issues.exclusions` rule on the path under the module root, and NEVER a
+  `depguard` files glob: depguard matches a glob against the absolute path,
+  so a glob naming `test/` turns the rule off for anyone whose checkout
+  sits under a directory of that name. `run.relative-path-mode` is `gomod`
+  so that the exclusion path means the same thing wherever the checkout
+  lives. `gci` requires imports in three
   groups: standard library, third-party, this module. `cyclop` caps a
   function's cyclomatic complexity at 10, and does not run on tests. The
   script runs the linter once per GOOS, linux and then darwin, because a
   file its build constraints exclude is never loaded. A `//go:build linux`
   file linted on the host alone goes unlinted on a macOS workstation and
-  fails in CI instead.
+  fails in CI instead. The script also names every build tag in the tree, so
+  a tagged package stays under the same lint as everything else.
 - **Licenses** (`scripts/check-licenses.sh`): every module in the build list
   has a license on the SPDX allow-list in that script: Apache-2.0, MIT,
   BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0. GPL, LGPL and AGPL are off it.
@@ -237,6 +251,12 @@ The gates and what each enforces:
 - **Images** (`make images`): the three images under `images/`, built
   locally with `ko build --local` and `docker build`. The lane skips when no
   Docker daemon answers. Nothing in this repository pushes an image.
+- **Cluster** (`make e2e`): the e2e tests under `test/e2e`. It builds the images,
+  creates a k3d cluster, imports them, applies a sandbox pod and asserts the
+  request path from the proxy audit stream and the fake zone request log. It
+  skips with a message when Docker or k3d is missing, it never installs a
+  provider, and it deletes the cluster and the images it built whether it
+  passed or failed.
 
 Each gate has a negative fixture under `test/gates/testdata/` that makes it
 fail, and `test/gates` runs the gate scripts against those fixtures as part

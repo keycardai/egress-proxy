@@ -1,0 +1,17 @@
+# The fake authorization server image the e2e tests deploy. ko builds it
+# straight from the module, on the same base as the proxy image, so the tests
+# pull one base for both.
+#
+# NEVER publish this image. The fake AS should never be deployed outside an e2e
+# test setup.
+defaultBaseImage: gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+builds:
+  - id: fakeas
+    main: ./test/fakeas/cmd/fakeas
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
