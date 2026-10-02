@@ -4,9 +4,9 @@
 // and keeps every request for tests to read.
 //
 // It authenticates clients with client_secret_basic or a client assertion, and
-// refuses a request that sends both. It verifies a client assertion only when
-// Options.Assertions is set. It never verifies the substitute-user token,
-// which is unsigned.
+// refuses a request that sends both. It verifies each client assertion with
+// Options.Assertions. It never verifies the substitute-user token, which is
+// unsigned.
 package fakeas
 
 import (
@@ -76,8 +76,7 @@ type Options struct {
 	// assertion. An empty slice accepts no assertion.
 	AssertionClients []string
 	// Assertions checks the signature, issuer, audience and expiry of each
-	// client assertion. When it is nil, the server reads the sub claim and
-	// checks nothing else, so a test can send an unsigned assertion.
+	// client assertion. When it is nil, the server refuses every assertion.
 	Assertions *oidc.IDTokenVerifier
 }
 
@@ -89,8 +88,8 @@ type Request struct {
 	// ClientID is the authenticated client ID from basic credentials or the
 	// client_id parameter.
 	ClientID string
-	// Actor is the subject of the client assertion. It is empty when the
-	// request uses a client secret.
+	// Actor is the verified subject of the client assertion. It is empty when
+	// the request uses a client secret or the server refused the assertion.
 	Actor string
 	// HasBasic reports whether the request sent an Authorization header with
 	// basic credentials.
@@ -188,12 +187,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	if hasBasic {
 		record.ClientID = basicID
 	}
-	var assertionErr error
-	if r.PostForm.Get("client_assertion_type") == assertionTypeJWTBearer {
-		record.Actor, assertionErr = s.assertionSubject(r.Context(), r.PostForm.Get("client_assertion"))
-	}
 
-	value, refusal := s.issue(record, basicSecret, assertionErr)
+	value, refusal := s.issue(r.Context(), &record, basicSecret)
 	if refusal != nil {
 		record.Error = refusal.Code
 	}
@@ -233,26 +228,13 @@ func requestShape(r *http.Request) *denial {
 	return nil
 }
 
-// assertionSubject returns the sub claim of a client assertion. With
-// Options.Assertions set, it returns an error for an assertion that does not
-// verify.
-func (s *Server) assertionSubject(ctx context.Context, assertion string) (string, error) {
-	if s.opts.Assertions == nil {
-		return claimSub(assertion), nil
-	}
-	token, err := s.opts.Assertions.Verify(ctx, assertion)
-	if err != nil {
-		return "", fmt.Errorf("the client assertion does not verify: %w", err)
-	}
-	return token.Subject, nil
-}
-
 // issue checks client authentication, the grant shape, the impersonation rule,
-// and the resource grant before it returns the credential. assertionErr is
-// why the client assertion did not verify, nil when it did or when the
-// request sent none.
-func (s *Server) issue(record Request, secret string, assertionErr error) (string, *denial) {
-	if refusal := s.authenticate(record, secret, assertionErr); refusal != nil {
+// and the resource grant before it returns the credential. It sets
+// record.Actor to the subject of a verified assertion.
+func (s *Server) issue(ctx context.Context, record *Request, secret string) (string, *denial) {
+	actor, refusal := s.authenticate(ctx, *record, secret)
+	record.Actor = actor
+	if refusal != nil {
 		return "", refusal
 	}
 	if refusal := grantShape(record.Form); refusal != nil {
@@ -265,7 +247,7 @@ func (s *Server) issue(record Request, secret string, assertionErr error) (strin
 			Description: "the substitute-user token has no sub claim",
 		}
 	}
-	if refusal := s.impersonation(record); refusal != nil {
+	if refusal := s.impersonation(*record); refusal != nil {
 		return "", refusal
 	}
 	resource := record.Form.Get("resource")
@@ -298,40 +280,49 @@ func (s *Server) impersonation(record Request) *denial {
 	return nil
 }
 
-// authenticate accepts exactly one client authentication method. RFC 6749
-// section 2.3 says a client must not use more than one in a request. An
-// assertion names its client in client_id, because the token-federation
-// credential identifies the client by that parameter and not by the assertion.
-func (s *Server) authenticate(record Request, secret string, assertionErr error) *denial {
-	hasAssertion := record.Form.Get("client_assertion") != ""
+// authenticate accepts exactly one client authentication method and returns
+// the subject of a verified assertion. RFC 6749 section 2.3 says a client
+// must not use more than one in a request.
+func (s *Server) authenticate(ctx context.Context, record Request, secret string) (string, *denial) {
+	assertion := record.Form.Get("client_assertion")
 	switch {
-	case hasAssertion && record.HasBasic:
-		return unknownClient("the request sends both a client assertion and basic credentials")
-	case hasAssertion:
-		return s.assertionClient(record, assertionErr)
+	case assertion != "" && record.HasBasic:
+		return "", unknownClient("the request sends both a client assertion and basic credentials")
+	case assertion != "":
+		return s.assertionClient(ctx, record, assertion)
 	case record.HasBasic:
 		if known, ok := s.opts.ClientSecrets[record.ClientID]; ok && known == secret {
-			return nil
+			return "", nil
 		}
-		return unknownClient("the client secret is not the one this server holds")
+		return "", unknownClient("the client secret is not the one this server holds")
 	default:
-		return unknownClient("the request authenticates with neither a client secret nor a client assertion")
+		return "", unknownClient("the request authenticates with neither a client secret nor a client assertion")
 	}
 }
 
-// assertionClient accepts a client that authenticated with a client
-// assertion.
-func (s *Server) assertionClient(record Request, assertionErr error) *denial {
+// assertionClient checks that the client may authenticate with an assertion,
+// verifies the assertion, and returns its subject. An assertion names its
+// client in client_id, because the token-federation credential identifies the
+// client by that parameter and not by the assertion.
+func (s *Server) assertionClient(ctx context.Context, record Request, assertion string) (string, *denial) {
 	switch {
-	case assertionErr != nil:
-		return unknownClient(assertionErr.Error())
-	case record.Actor == "":
-		return unknownClient("the client assertion has no sub claim")
+	case record.Form.Get("client_assertion_type") != assertionTypeJWTBearer:
+		return "", unknownClient("the client assertion type is not " + assertionTypeJWTBearer)
+	case record.ClientID == "":
+		return "", unknownClient("the client assertion sends no client_id")
 	case !slices.Contains(s.opts.AssertionClients, record.ClientID):
-		return unknownClient(record.ClientID + " may not authenticate with a client assertion")
-	default:
-		return nil
+		return "", unknownClient(record.ClientID + " may not authenticate with a client assertion")
+	case s.opts.Assertions == nil:
+		return "", unknownClient("this server has no assertion verifier, so it accepts no assertion")
 	}
+	token, err := s.opts.Assertions.Verify(ctx, assertion)
+	if err != nil {
+		return "", unknownClient("the client assertion does not verify: " + err.Error())
+	}
+	if token.Subject == "" {
+		return "", unknownClient("the client assertion has no sub claim")
+	}
+	return token.Subject, nil
 }
 
 // unknownClient is the RFC 6749 section 5.2 answer to a client that did not

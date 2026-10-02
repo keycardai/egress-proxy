@@ -3,8 +3,9 @@
 # the ServiceAccount from the assertion and refuses a proxy that impersonates a
 # user with a different ServiceAccount.
 #
-# This scenario uses test/fakeas, which does not verify signatures. The cluster
-# lane uses a real zone that signs the token.
+# The zone verifies the assertion against the key satoken signs with, the way
+# a cluster zone verifies it against the API server's key set. The last case
+# here sends an assertion signed by a key the zone does not hold.
 
 [!exec:curl] skip 'curl is not installed'
 
@@ -94,6 +95,35 @@ grep 'actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=so
 sigterm
 wait wrongproxy
 audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_denied decision.endpoint=localhost:$UPSTREAM_PORT/granted/
+
+# An assertion the zone's key set does not cover authenticates nobody. The
+# zone answers invalid_client, which is not a policy denial, so the proxy
+# denies with exchange_failed and 502.
+freeport FORGED_PROXY_PORT
+shortdir FORGED_ADMIN_DIR
+chmod 0777 $FORGED_ADMIN_DIR
+satoken -forged forged-token system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_CONNECT=127.0.0.1:$FORGED_PROXY_PORT
+env EGRESS_PROXY_ADMIN=$FORGED_ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/forged-ca
+env EGRESS_PROXY_WORKLOAD_TOKEN_FILE=$WORK/forged-token
+exec egress-proxy &forgedproxy&
+waitfile forged-ca/ca.crt
+waitport 127.0.0.1:$FORGED_PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$FORGED_PROXY_PORT
+exec curl -sS --cacert forged-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
+stdout '^502$'
+
+# The forged assertion names no actor, because nothing verified it.
+grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error="invalid_client"' zone/requests.log
+grep -count=1 '^request ' upstream/requests.log
+
+sigterm
+wait forgedproxy
+audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_failed decision.endpoint=localhost:$UPSTREAM_PORT/granted/
 
 -- config.yaml --
 version: 1

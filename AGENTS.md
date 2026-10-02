@@ -25,7 +25,9 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   container,
   `test/fakeas/` a fake authorization server the unit tests and the
   acceptance tests drive the exchange against, with `cmd/fakeas` the command
-  the e2e tests deploy it as,
+  the e2e tests deploy it as. It verifies the client assertion against a
+  test key in the unit and acceptance tests, and against the cluster's
+  service account keys in the e2e tests,
   `test/gates/` for the gate self-tests,
   `test/images/` the image lane, Go behind the `images` build tag, which
   builds the three images locally and checks each one in a container,

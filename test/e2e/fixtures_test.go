@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
+	"github.com/keycardai/egress-proxy/test/fakeas"
 )
 
 // What the fixtures are named. The ServiceAccount is named after the user
@@ -48,6 +50,9 @@ const (
 	zonePod         = "zone"
 	upstreamPod     = "upstream"
 	agentUID        = 1000
+	// forgedTokenSecret holds a workload token this test suite signed. The
+	// API server did not sign it, so the zone refuses the assertion.
+	forgedTokenSecret = "forged-workload-token"
 	// proxyUID is the uid the sidecar runs as and the uid the capture
 	// exempts. It is the published default, and it is not the agent's, so
 	// the capture tells the two apart.
@@ -86,6 +91,7 @@ func deployFixtures(t *testing.T, run *test) {
 		Name: fixtureCAConfig, Namespace: namespace,
 		Data: map[string]string{ca.CertificateFileName: string(authority.CertificatePEM())},
 	}), "publish the fixture authority for tls.upstream_ca_files")
+	createForgedToken(t, run, res)
 
 	apply(t, run, "fixtures.yaml", map[string]string{
 		"Namespace":         namespace,
@@ -98,6 +104,36 @@ func deployFixtures(t *testing.T, run *test) {
 	})
 	waitReady(t, run, zonePod)
 	waitReady(t, run, upstreamPod)
+}
+
+// createForgedToken publishes a workload token signed by a key the API
+// server does not hold. Its issuer, audience and subject are the ones a
+// projected token has, so the zone can refuse it only on the signature.
+func createForgedToken(t *testing.T, run *test, res *resources.Resources) {
+	t.Helper()
+	signer, err := fakeas.NewSigner(clusterIssuer(t, run), audience)
+	require.NoError(t, err, "build the key the API server does not hold")
+	token, err := signer.Token("system:serviceaccount:" + namespace + ":" + serviceAccount)
+	require.NoError(t, err, "sign the forged workload token")
+	require.NoError(t, res.Create(context.Background(), &corev1.Secret{
+		Name: forgedTokenSecret, Namespace: namespace,
+		StringData: map[string]string{"token": token},
+	}), "create the forged workload token")
+}
+
+// clusterIssuer reads the service account issuer from the API server's
+// discovery document.
+func clusterIssuer(t *testing.T, run *test) string {
+	t.Helper()
+	raw, err := run.clientset.Discovery().RESTClient().Get().
+		AbsPath("/.well-known/openid-configuration").DoRaw(context.Background())
+	require.NoError(t, err, "read the service account issuer discovery document")
+	var document struct {
+		Issuer string `json:"issuer"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &document), "decode the discovery document: %s", raw)
+	require.NotEmpty(t, document.Issuer, "the discovery document names an issuer: %s", raw)
+	return document.Issuer
 }
 
 // createTLSSecret mints a leaf for host and publishes it as a TLS secret.
@@ -120,11 +156,22 @@ func createTLSSecret(t *testing.T, res *resources.Resources, name string, author
 	require.NoError(t, res.Create(context.Background(), secret), "create the %s secret", name)
 }
 
-// sandbox applies one sandbox pod and its configuration document, and
-// waits for it to report ready. name is the pod and the sandbox id, and
-// user is what the document impersonates.
-func sandbox(t *testing.T, run *test, name, user string) {
+// sandboxSpec is one sandbox the test suite applies.
+type sandboxSpec struct {
+	// name is the pod and the sandbox id.
+	name string
+	// user is what the document impersonates.
+	user string
+	// forgedToken mounts the token this test suite signed in place of the
+	// projected one.
+	forgedToken bool
+}
+
+// sandbox applies one sandbox pod and its configuration document, and waits
+// for it to report ready.
+func sandbox(t *testing.T, run *test, spec sandboxSpec) {
 	t.Helper()
+	name, user := spec.name, spec.user
 	document := render(t, "sandbox-config.yaml", map[string]any{
 		"ZoneHost":           zoneHost,
 		"ClientID":           clientID,
@@ -140,6 +187,10 @@ func sandbox(t *testing.T, run *test, name, user string) {
 		Data: map[string]string{"config.yaml": document},
 	}), "create the configuration document for %s", name)
 
+	forged := ""
+	if spec.forgedToken {
+		forged = forgedTokenSecret
+	}
 	apply(t, run, "sandbox-pod.yaml", map[string]any{
 		"Name":           name,
 		"Namespace":      namespace,
@@ -152,6 +203,7 @@ func sandbox(t *testing.T, run *test, name, user string) {
 		"AgentUID":       agentUID,
 		"Placeholder":    placeholder,
 		"Audience":       audience,
+		"ForgedToken":    forged,
 	})
 	waitReady(t, run, name)
 }

@@ -18,14 +18,15 @@ import (
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
-// The two sandboxes the test suite applies. Both run the same images against the
-// same zone. They differ in the user their document impersonates, which is
-// what the zone's policy answers on.
+// The sandboxes the test suite applies. All run the same images against the
+// same zone. wrongUserPod impersonates a user the zone's policy refuses.
+// forgedTokenPod authenticates with a token the API server did not sign.
 const (
 	sandboxPod   = "sandbox"
 	wrongUserPod = "wrong-user"
 	// wrongUser is a user the pod's ServiceAccount is not named after.
-	wrongUser = "someone-else"
+	wrongUser      = "someone-else"
+	forgedTokenPod = "forged-token"
 )
 
 // actor is the ServiceAccount subject the zone reads out of the projected
@@ -46,12 +47,14 @@ const deniedExit = 35
 func TestRequestPath(t *testing.T) {
 	run := start(t)
 	deployFixtures(t, run)
-	sandbox(t, run, sandboxPod, serviceAccount)
-	sandbox(t, run, wrongUserPod, wrongUser)
+	sandbox(t, run, sandboxSpec{name: sandboxPod, user: serviceAccount})
+	sandbox(t, run, sandboxSpec{name: wrongUserPod, user: wrongUser})
+	sandbox(t, run, sandboxSpec{name: forgedTokenPod, user: serviceAccount, forgedToken: true})
 	t.Cleanup(func() {
 		if t.Failed() {
 			dump(t, run, sandboxPod)
 			dump(t, run, wrongUserPod)
+			dump(t, run, forgedTokenPod)
 			t.Logf("e2e: zone log:\n%s", containerLog(t, run, zonePod, zonePod, false))
 		}
 	})
@@ -149,6 +152,20 @@ func TestRequestPath(t *testing.T) {
 			},
 			wantExchanges: []exchange{
 				{Client: clientID, Actor: actor, Subject: wrongUser, Resource: grantedResource, Error: "access_denied"},
+			},
+		},
+		{
+			name:       "a workload token the API server did not sign is refused with exchange_failed",
+			pod:        forgedTokenPod,
+			command:    curl("https://" + upstreamHost + "/headers"),
+			wantStdout: "502",
+			wantRecord: audited{
+				scope: audit.ScopeRequest, verdict: policy.VerdictDeny, reason: policy.ReasonExchangeFailed,
+				host: upstreamHost, path: "/headers", endpoint: upstreamHost + ":443/headers",
+			},
+			// The zone refuses the assertion, so the record names no actor.
+			wantExchanges: []exchange{
+				{Client: clientID, Subject: serviceAccount, Resource: grantedResource, Error: "invalid_client"},
 			},
 		},
 	}
