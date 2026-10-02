@@ -92,6 +92,9 @@ type ContainmentRequest struct {
 	Path string
 	// TransparentPort is the port the transparent frontend will bind.
 	TransparentPort int
+	// DNSPort is the port listen.dns binds, zero when the process runs no
+	// resolver.
+	DNSPort int
 	// UID is the uid of this process.
 	UID int
 	// Now is the time used to check the receipt's age. The zero time uses the
@@ -158,6 +161,7 @@ func Containment(request ContainmentRequest) (Receipt, error) {
 			"--redirect-port %d",
 			receipt.RedirectPort, request.TransparentPort, receipt.RedirectPort, request.TransparentPort)
 	}
+	found.add(dnsPortProblems(receipt, request)...)
 	if len(receipt.Families) == 0 {
 		found.addf("the receipt names no address family, so nothing was programmed")
 	}
@@ -169,6 +173,27 @@ func Containment(request ContainmentRequest) (Receipt, error) {
 		return Receipt{}, fmt.Errorf("%w:\n  %s", ErrNotContained, strings.Join(found, "\n  "))
 	}
 	return receipt, nil
+}
+
+// dnsPortProblems refuses a sidecar whose resolver port and DNS redirect
+// port differ. If they differ, every lookup fails.
+func dnsPortProblems(receipt Receipt, request ContainmentRequest) []string {
+	if receipt.DNSPort == request.DNSPort {
+		return nil
+	}
+	if request.DNSPort == 0 {
+		return []string{fmt.Sprintf("the rules redirect DNS to port %d and this process runs no resolver, so "+
+			"every lookup the workload makes is refused. Set listen.dns to :%d, or program the rules with "+
+			"--dns-port 0", receipt.DNSPort, receipt.DNSPort)}
+	}
+	if receipt.DNSPort == 0 {
+		return []string{fmt.Sprintf("listen.dns binds port %d and the rules redirect no DNS to it, so a client "+
+			"that names any other resolver reaches the terminal DROP. Program the rules with --dns-port %d, "+
+			"or leave listen.dns empty", request.DNSPort, request.DNSPort)}
+	}
+	return []string{fmt.Sprintf("the rules redirect DNS to port %d and listen.dns binds port %d, so no lookup "+
+		"arrives on this resolver. Set listen.dns to :%d, or program the rules with --dns-port %d",
+		receipt.DNSPort, request.DNSPort, receipt.DNSPort, request.DNSPort)}
 }
 
 // receiptAgeProblems checks when the receipt was written. A missing timestamp
@@ -214,11 +239,15 @@ func netAdminProblems(request ContainmentRequest) []string {
 		"the init container needs NET_ADMIN"}
 }
 
-// portStartProblems refuses a redirect port an unprivileged process can
-// bind. A workload that can bind it can stand in for the proxy during a
-// sidecar restart. Read the kernel value instead of trusting the manifest.
-// A receipt that records allow-unprotected is not checked, because the init
-// container was told to accept that exposure.
+// portStartProblems refuses a port the sidecar binds that an unprivileged
+// process can bind too. A workload that can bind one can stand in for the
+// proxy during a sidecar restart, or answer its own lookups. Read the kernel
+// value instead of trusting the manifest. A receipt that records
+// allow-unprotected is not checked, because the init container was told to
+// accept that exposure.
+//
+// The sysctl has to be above the redirect port and above the DNS port, so
+// the check compares it with the higher of the two.
 func portStartProblems(receipt Receipt, request ContainmentRequest) []string {
 	if receipt.RedirectPortProtection == PortProtectionAllowUnprotected {
 		return nil
@@ -227,22 +256,25 @@ func portStartProblems(receipt Receipt, request ContainmentRequest) []string {
 	if read == nil {
 		read = UnprivilegedPortStart
 	}
+	highest, which := receipt.RedirectPort, "redirect port"
+	if receipt.DNSPort > highest {
+		highest, which = receipt.DNSPort, "DNS port"
+	}
 	start, err := read()
 	switch {
 	case errors.Is(err, ErrPortStartNotSupported):
 		return nil
 	case err != nil:
 		return []string{fmt.Sprintf("the lowest port an unprivileged process may bind could not be read, so "+
-			"there is no saying whether the workload can bind the redirect port %d: %v",
-			receipt.RedirectPort, err)}
-	case start > receipt.RedirectPort:
+			"there is no saying whether the workload can bind the %s %d: %v", which, highest, err)}
+	case start > highest:
 		return nil
 	}
 	return []string{fmt.Sprintf("net.ipv4.ip_unprivileged_port_start is %d, so a process holding no "+
-		"CAP_NET_BIND_SERVICE can bind the redirect port %d and stand in for the proxy during a restart. "+
+		"CAP_NET_BIND_SERVICE can bind the %s %d and stand in for the proxy during a restart. "+
 		"Set the pod sysctl net.ipv4.ip_unprivileged_port_start to 1024 in securityContext.sysctls and keep the "+
-		"redirect port below it. containerd 2.0 and later sets it to 0 in a pod that does not set it",
-		start, receipt.RedirectPort)}
+		"%s below it. containerd 2.0 and later sets it to 0 in a pod that does not set it",
+		start, which, highest, which)}
 }
 
 // netNamespaceProblems refuses a receipt written in another network

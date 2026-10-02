@@ -126,15 +126,24 @@ stdout '^udp EPERM$'
 exec docker exec -u 1000 $LAB-workload netfixture ping $LAB_UPSTREAM4
 stdout '^ping EPERM$'
 
-# DNS reaches the named resolver over both protocols, and no other address.
-exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_UPSTREAM4:53
-stdout '^udp REPLY upstream 53$'
+# DNS to any resolver goes to port 53 on loopback, where the sidecar's
+# resolver listens, and never to the resolver the client named. A stand-in
+# answers TCP there with the destination the redirect preserved. Nothing
+# answers UDP there, so a datagram is refused rather than dropped or
+# answered by the upstream. The proxy uid reaches the upstream directly.
+exec docker exec -d $LAB-workload setpriv --reuid 1337 --regid 1337 --clear-groups --inh-caps +net_bind_service --ambient-caps +net_bind_service netfixture capture 53
 exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:53
-stdout '^upstream 53$'
+stdout '^captured '$LAB_UPSTREAM4':53$'
+exec docker exec -u 1000 $LAB-workload netfixture dial [$LAB_UPSTREAM6]:53
+stdout '^captured \['$LAB_UPSTREAM6'\]:53$'
+exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_UPSTREAM4:53
+stdout '^udp REFUSED$'
 exec docker exec -u 1000 $LAB-workload netfixture udp $LAB_GATEWAY4:53
-stdout '^udp EPERM$'
+stdout '^udp REFUSED$'
 exec docker exec -u 1000 $LAB-workload netfixture udp [$LAB_UPSTREAM6]:53
-stdout '^udp EPERM$'
+stdout '^udp REFUSED$'
+exec docker exec -u 1337 $LAB-workload netfixture udp $LAB_UPSTREAM4:53
+stdout '^udp REPLY upstream 53$'
 
 # Loopback is not captured and not dropped.
 exec docker exec -u 1000 $LAB-workload netfixture dial 127.0.0.1:9000
@@ -155,7 +164,7 @@ stdout '^# ipv4 verified: '
 exec docker exec $LAB-workload iptables-legacy -S OUTPUT
 stdout -count=1 '^-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT$'
 exec docker exec $LAB-workload iptables-legacy -t nat -S OUTPUT
-stdout -count=1 '^-A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT$'
+stdout -count=1 '^-A OUTPUT -j EGRESS_PROXY_NAT_OUTPUT$'
 exec docker exec -u 1000 $LAB-workload netfixture dial $LAB_UPSTREAM4:443
 stdout '^captured '$LAB_UPSTREAM4':443$'
 

@@ -26,6 +26,12 @@ func build(t *testing.T, cfg netsetup.Config, family netsetup.Family) netsetup.P
 
 // The expected iptables-restore input for each ruleset. Each is pinned
 // whole, so a rule that is added, dropped or moved fails the test.
+//
+// The DNS redirect is ahead of the cluster ranges. The cluster resolver's
+// address is inside the service range, and a RETURN there would leave the
+// query for the DROP instead of the sidecar's resolver. The filter chain
+// does not accept DNS to any resolver. The nat jump does not match on
+// protocol, so UDP reaches the redirect.
 const (
 	wantIPv4 = `# ipv4 ruleset
 *filter
@@ -34,8 +40,6 @@ const (
 -A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -d 127.0.0.0/8 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
--A EGRESS_PROXY_FILTER_OUTPUT -d 10.43.0.10 -p udp --dport 53 -j ACCEPT
--A EGRESS_PROXY_FILTER_OUTPUT -d 10.43.0.10 -p tcp --dport 53 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -j DROP
 -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT
 COMMIT
@@ -43,11 +47,13 @@ COMMIT
 :EGRESS_PROXY_NAT_OUTPUT - [0:0]
 -A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN
 -A EGRESS_PROXY_NAT_OUTPUT -o lo -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 53
+-A EGRESS_PROXY_NAT_OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports 53
 -A EGRESS_PROXY_NAT_OUTPUT -d 10.42.0.0/16 -j RETURN
 -A EGRESS_PROXY_NAT_OUTPUT -d 10.43.0.0/16 -j RETURN
 -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015
 -A EGRESS_PROXY_NAT_OUTPUT -j RETURN
--I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT
+-I OUTPUT 1 -j EGRESS_PROXY_NAT_OUTPUT
 COMMIT
 `
 	wantIPv6 = `# ipv6 ruleset
@@ -65,8 +71,6 @@ COMMIT
 -A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 135 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 136 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 143 -j ACCEPT
--A EGRESS_PROXY_FILTER_OUTPUT -d fd00::a -p udp --dport 53 -j ACCEPT
--A EGRESS_PROXY_FILTER_OUTPUT -d fd00::a -p tcp --dport 53 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -j DROP
 -I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT
 COMMIT
@@ -74,9 +78,34 @@ COMMIT
 :EGRESS_PROXY_NAT_OUTPUT - [0:0]
 -A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN
 -A EGRESS_PROXY_NAT_OUTPUT -o lo -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 53
+-A EGRESS_PROXY_NAT_OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports 53
 -A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015
 -A EGRESS_PROXY_NAT_OUTPUT -j RETURN
--I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT
+-I OUTPUT 1 -j EGRESS_PROXY_NAT_OUTPUT
+COMMIT
+`
+	// With DNSPort 0 nothing redirects DNS and nothing accepts it, so every
+	// query the workload sends anywhere but loopback reaches the DROP.
+	wantIPv4NoDNS = `# ipv4 ruleset
+*filter
+:EGRESS_PROXY_FILTER_OUTPUT - [0:0]
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -d 127.0.0.0/8 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -j DROP
+-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT
+COMMIT
+*nat
+:EGRESS_PROXY_NAT_OUTPUT - [0:0]
+-A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -o lo -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -d 10.42.0.0/16 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -d 10.43.0.0/16 -j RETURN
+-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015
+-A EGRESS_PROXY_NAT_OUTPUT -j RETURN
+-I OUTPUT 1 -j EGRESS_PROXY_NAT_OUTPUT
 COMMIT
 `
 	// The denied family redirects nothing and accepts no egress: no owner
@@ -101,7 +130,7 @@ COMMIT
 *nat
 :EGRESS_PROXY_NAT_OUTPUT - [0:0]
 -A EGRESS_PROXY_NAT_OUTPUT -j RETURN
--I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT
+-I OUTPUT 1 -j EGRESS_PROXY_NAT_OUTPUT
 COMMIT
 `
 )
@@ -116,6 +145,8 @@ func TestProgramRules(t *testing.T) {
 	cluster.PodCIDRs = []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")}
 	cluster.ServiceCIDRs = []netip.Prefix{netip.MustParsePrefix("10.43.0.0/16")}
 	cluster.DNSServers = []netip.Addr{netip.MustParseAddr("10.43.0.10"), netip.MustParseAddr("fd00::a")}
+	noResolver := cluster
+	noResolver.DNSPort = 0
 
 	tests := []struct {
 		name   string
@@ -129,6 +160,7 @@ func TestProgramRules(t *testing.T) {
 		{name: "the IPv6 ruleset", cfg: cluster, family: netsetup.FamilyIPv6, want: wantIPv6},
 		{name: "the IPv6 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv6, want: wantIPv6Deny},
 		{name: "the IPv4 ruleset under IPv6Deny", cfg: denying(cluster), family: netsetup.FamilyIPv4, want: wantIPv4},
+		{name: "no resolver, so no DNS is redirected", cfg: noResolver, family: netsetup.FamilyIPv4, want: wantIPv4NoDNS},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,12 +223,12 @@ func TestRestoreInsertsOnlyTheJumpsItIsGiven(t *testing.T) {
 		{
 			name:  "the nat jump alone",
 			jumps: []netsetup.Rule{natJump},
-			want:  []string{"-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT"},
+			want:  []string{"-I OUTPUT 1 -j EGRESS_PROXY_NAT_OUTPUT"},
 		},
 		{
 			name:  "both jumps, as on a first run",
 			jumps: []netsetup.Rule{filterJump, natJump},
-			want:  []string{"-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT", "-I OUTPUT 1 -p tcp -j EGRESS_PROXY_NAT_OUTPUT"},
+			want:  []string{"-I OUTPUT 1 -j EGRESS_PROXY_FILTER_OUTPUT", "-I OUTPUT 1 -j EGRESS_PROXY_NAT_OUTPUT"},
 		},
 	}
 	for _, tc := range tests {

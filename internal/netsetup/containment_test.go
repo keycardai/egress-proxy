@@ -23,6 +23,7 @@ func request(path string) netsetup.ContainmentRequest {
 	return netsetup.ContainmentRequest{
 		Path:            path,
 		TransparentPort: netsetup.DefaultRedirectPort,
+		DNSPort:         netsetup.DefaultDNSPort,
 		UID:             netsetup.DefaultProxyUID,
 		Now:             now,
 		NetAdmin:        func() (bool, error) { return false, nil },
@@ -77,6 +78,21 @@ func TestContainment(t *testing.T) {
 			name: "a transparent listener on a port the redirect does not target",
 			ask:  func(q *netsetup.ContainmentRequest) { q.TransparentPort = 15001 },
 			want: []string{"sends captured traffic to port 1015 and listen.transparent_port is 15001"},
+		},
+		{
+			name: "a resolver on a port the DNS redirect does not target",
+			ask:  func(q *netsetup.ContainmentRequest) { q.DNSPort = 5353 },
+			want: []string{"redirect DNS to port 53 and listen.dns binds port 5353", "--dns-port 5353"},
+		},
+		{
+			name: "DNS redirected to a sidecar that runs no resolver",
+			ask:  func(q *netsetup.ContainmentRequest) { q.DNSPort = 0 },
+			want: []string{"this process runs no resolver", "--dns-port 0"},
+		},
+		{
+			name: "a resolver the rules redirect nothing to",
+			edit: func(r *netsetup.Receipt) { r.DNSPort = 0 },
+			want: []string{"the rules redirect no DNS to it", "--dns-port 53"},
 		},
 		{
 			name: "a sidecar with no transparent listener under a redirect that targets one",
@@ -222,6 +238,17 @@ func TestContainmentPortStart(t *testing.T) {
 			name: "an unprivileged port start equal to the redirect port, which the workload can still bind",
 			ask:  func(q *netsetup.ContainmentRequest) { q.PortStart = func() (int, error) { return 1015, nil } },
 			want: []string{"net.ipv4.ip_unprivileged_port_start is 1015"},
+		},
+		{
+			// The sysctl has to be above every port the sidecar binds. A
+			// resolver port above the redirect port is the one to name.
+			name: "a kernel that lets an unprivileged process bind the DNS port",
+			edit: func(r *netsetup.Receipt) { r.DNSPort = 2000 },
+			ask: func(q *netsetup.ContainmentRequest) {
+				q.DNSPort = 2000
+				q.PortStart = func() (int, error) { return 1024, nil }
+			},
+			want: []string{"can bind the DNS port 2000 and stand in for the proxy"},
 		},
 		{
 			name: "a platform that does not report the unprivileged port start, which is not a failure to read it",

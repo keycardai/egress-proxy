@@ -31,6 +31,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
 	"github.com/keycardai/egress-proxy/internal/credential"
+	"github.com/keycardai/egress-proxy/internal/dns"
 	"github.com/keycardai/egress-proxy/internal/exchange"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/policy"
@@ -68,6 +69,8 @@ type flags struct {
 	connect               string
 	transparentPort       int
 	transparentPortSet    bool
+	dns                   string
+	dnsForwardTo          []string
 	admin                 string
 	netsetupReceipt       string
 	caOutDir              string
@@ -78,6 +81,7 @@ type flags struct {
 	cacheSize             int
 	upstreamCAFiles       []string
 	maxConnections        int
+	maxDNSConnections     int
 	idleTimeout           time.Duration
 	responseHeaderTimeout time.Duration
 	exchangeTimeout       time.Duration
@@ -94,6 +98,8 @@ func (f flags) overrides() config.Overrides {
 		Connect:               f.connect,
 		TransparentPort:       f.transparentPort,
 		TransparentPortSet:    f.transparentPortSet,
+		DNS:                   f.dns,
+		DNSForwardTo:          f.dnsForwardTo,
 		Admin:                 f.admin,
 		NetsetupReceipt:       f.netsetupReceipt,
 		CAOutDir:              f.caOutDir,
@@ -104,6 +110,7 @@ func (f flags) overrides() config.Overrides {
 		CacheSize:             f.cacheSize,
 		UpstreamCAFiles:       f.upstreamCAFiles,
 		MaxConnections:        f.maxConnections,
+		MaxDNSConnections:     f.maxDNSConnections,
 		IdleTimeout:           f.idleTimeout,
 		ResponseHeaderTimeout: f.responseHeaderTimeout,
 		ExchangeTimeout:       f.exchangeTimeout,
@@ -148,6 +155,11 @@ func flagSet(opts *flags) []cli.Flag {
 			Name: "max-connections", Destination: &opts.maxConnections, Sources: env("MAX_CONNECTIONS"),
 			Usage: "simultaneous connections on the listener (limits.max_connections)",
 		},
+		&cli.IntFlag{
+			Name: "max-dns-connections", Destination: &opts.maxDNSConnections,
+			Sources: env("MAX_DNS_CONNECTIONS"),
+			Usage:   "simultaneous TCP connections on each resolver listener (limits.max_dns_connections)",
+		},
 		&cli.DurationFlag{
 			Name: "idle-timeout", Destination: &opts.idleTimeout, Sources: env("IDLE_TIMEOUT"),
 			Usage: "close a connection idle for this long (limits.idle_timeout)",
@@ -174,6 +186,13 @@ func listenFlags(opts *flags) []cli.Flag {
 			Name: "transparent-port", Destination: &opts.transparentPort, Sources: env("TRANSPARENT_PORT"),
 			Usage: "port the netsetup rules redirect to, bound on 127.0.0.1 and ::1 " +
 				"(listen.transparent_port); 0 runs no transparent frontend",
+		},
+		stringFlag("dns", "DNS", &opts.dns,
+			"address of the allowlist resolver on the pod loopback, host:port (listen.dns); empty disables the resolver"),
+		&cli.StringSliceFlag{
+			Name: "dns-forward-to", Destination: &opts.dnsForwardTo, Sources: env("DNS_FORWARD_TO"),
+			Usage: "cluster resolver an allowed name is forwarded to; repeatable, comma-separated in the " +
+				"variable (dns.forward_to); empty reads the netsetup receipt",
 		},
 		stringFlag("admin", "ADMIN", &opts.admin, "path of the admin Unix socket (listen.admin)"),
 		stringFlag("netsetup-receipt", "NETSETUP_RECEIPT", &opts.netsetupReceipt,
@@ -235,6 +254,9 @@ type process struct {
 	// listenCapture binds the capture sockets. Nil binds them with
 	// transparent.Listen.
 	listenCapture func(ctx context.Context, port int) ([]net.Listener, error)
+	// resolver answers the sandbox's name lookups. It is nil when
+	// listen.dns is unset.
+	resolver *dns.Resolver
 	// captureFamilies are the address families the netsetup receipt says
 	// the redirect covers. Every one of them needs a bound capture socket,
 	// or the redirect sends that family nowhere.
@@ -282,14 +304,18 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, err
 	}
+	// One sink for every decision this process makes. The JSON writer
+	// serializes its writes, so a connection, a request and a name lookup
+	// never interleave on stdout.
+	sink := audit.NewStamped(audit.NewJSONSink(stdout), audit.Stamp{
+		SandboxID:      cfg.Sandbox.ID,
+		DocumentDigest: cfg.Digest,
+		ConfigDigest:   cfg.ConfigDigest,
+	}, nil)
 	server, err := proxy.New(proxy.Options{
-		Matcher:      matcher,
-		Certificates: store,
-		Audit: audit.NewStamped(audit.NewJSONSink(stdout), audit.Stamp{
-			SandboxID:      cfg.Sandbox.ID,
-			DocumentDigest: cfg.Digest,
-			ConfigDigest:   cfg.ConfigDigest,
-		}, nil),
+		Matcher:               matcher,
+		Certificates:          store,
+		Audit:                 sink,
 		UpstreamRoots:         roots,
 		Credentials:           credentials,
 		Logger:                logger,
@@ -305,18 +331,34 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
 		credentials: credentials, server: server, certPath: certPath,
 	}
-	proc.transparent, proc.captureFamilies, err = capture(cfg, server, logger, netsetup.ContainmentRequest{})
-	if err != nil {
+	if err := proc.buildFrontends(ctx, sink); err != nil {
 		return nil, err
-	}
-	proc.admin, err = admin.New(ctx, admin.Options{
-		Path: cfg.Listen.Admin, Info: proc.info, Ready: proc.ready, Logger: logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("admin socket: %w", err)
 	}
 	proc.announce()
 	return proc, nil
+}
+
+// buildFrontends adds the frontends the netsetup receipt governs and the
+// admin socket. The receipt is read once: the capture and the resolver
+// both check themselves against it.
+func (p *process) buildFrontends(ctx context.Context, sink audit.Sink) error {
+	receipt, err := containment(p.cfg, netsetup.ContainmentRequest{})
+	if err != nil {
+		return err
+	}
+	if p.transparent, p.captureFamilies, err = capture(p.cfg, receipt, p.server, p.logger); err != nil {
+		return err
+	}
+	if p.resolver, err = nameResolver(p.cfg, receipt, sink, p.logger); err != nil {
+		return err
+	}
+	p.admin, err = admin.New(ctx, admin.Options{
+		Path: p.cfg.Listen.Admin, Info: p.info, Ready: p.ready, Logger: p.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("admin socket: %w", err)
+	}
+	return nil
 }
 
 // certificates prepares the authority the proxy terminates tunnels with and
@@ -356,6 +398,7 @@ func (p *process) announce() {
 		slog.String("sandbox_id", p.cfg.Sandbox.ID),
 		slog.Any("overridden", p.cfg.Overridden),
 		slog.Any("endpoint_hosts", p.matcher.Hosts()),
+		slog.String("listen_dns", p.cfg.Listen.DNS),
 		slog.Any("cluster_cidrs", deny.ClusterCIDRs()))
 	for _, exception := range deny.Exceptions() {
 		p.logger.Warn("deny list exception: the platform deny list does not cover this range",
@@ -433,16 +476,33 @@ func (p *process) info() any {
 		"document_digest":      p.cfg.Digest,
 		"config_digest":        p.cfg.ConfigDigest,
 		"overridden":           p.cfg.Overridden,
-		"listen":               p.cfg.Listen,
+		listenKey:              p.cfg.Listen,
 		"ca":                   map[string]any{"out_dir": p.cfg.CA.OutDir, "not_after": p.authority.NotAfter()},
 		"limits":               p.cfg.Limits,
 		"credential_source":    source,
 		"netsetup_receipt":     p.cfg.Netsetup.Receipt,
+		"dns":                  p.dnsInfo(),
 		"endpoint_hosts":       p.matcher.Hosts(),
 		"cluster_cidrs":        deny.ClusterCIDRs(),
 		"deny_list_exceptions": deny.Exceptions(),
 	}
 }
+
+// dnsInfo is what /info reports about name resolution: whether a resolver
+// runs, the names it answers for and where it forwards.
+func (p *process) dnsInfo() map[string]any {
+	if p.resolver == nil {
+		return map[string]any{listenKey: ""}
+	}
+	return map[string]any{
+		listenKey:    p.cfg.Listen.DNS,
+		"resolves":   p.resolver.Hosts(),
+		"forward_to": p.resolver.Forward(),
+	}
+}
+
+// listenKey is the field /info reports a listen address under.
+const listenKey = "listen"
 
 // errNotReady is what the admin socket reports at /readyz while the
 // process is not serving, which is before the bind and again from the
@@ -465,34 +525,46 @@ func (p *process) ready() error {
 	return nil
 }
 
-// capture builds the transparent frontend after the receipt shows that the
-// rules redirect to it and that this process cannot change them. A
-// configuration without listen.transparent_port does not run capture frontends.
+// containment reads the netsetup receipt and refuses to serve behind a
+// ruleset that disagrees with what this process is about to do. It returns
+// nil without reading the receipt when the process runs neither a
+// transparent frontend nor a resolver.
+//
+// A process that runs only the resolver still reads the receipt. Without
+// the DNS redirect, no lookup reaches the resolver.
 //
 // The check runs before any listener is bound, so a sidecar that fails the
 // check never services any request. The probes supply capability, sysctl,
 // network namespace, and owner reads. A zero-value request reads this process
 // and its filesystem.
-//
-// It also returns the address families the receipt records, which is what
-// the bind compares the capture sockets against.
-func capture(
-	cfg *config.Config, server *proxy.Server, logger *slog.Logger, probes netsetup.ContainmentRequest,
-) (*transparent.Frontend, []string, error) {
-	if cfg.Listen.TransparentPort == 0 {
-		return nil, nil, nil
+func containment(cfg *config.Config, probes netsetup.ContainmentRequest) (*netsetup.Receipt, error) {
+	if cfg.Listen.TransparentPort == 0 && cfg.Listen.DNS == "" {
+		return nil, nil //nolint:nilnil // no capture and no resolver is a posture, not a failure
 	}
-	if !transparent.Supported {
-		return nil, nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
+	if cfg.Listen.TransparentPort != 0 && !transparent.Supported {
+		return nil, fmt.Errorf("%w: listen.transparent_port is set and this platform has no SO_ORIGINAL_DST",
 			transparent.ErrNotSupported)
 	}
 	request := probes
 	request.Path = cfg.Netsetup.Receipt
 	request.TransparentPort = cfg.Listen.TransparentPort
+	request.DNSPort = cfg.DNSPort()
 	request.UID = os.Getuid()
 	receipt, err := netsetup.Containment(request)
 	if err != nil {
-		return nil, nil, fmt.Errorf("network capture: %w", err)
+		return nil, fmt.Errorf("network capture: %w", err)
+	}
+	return &receipt, nil
+}
+
+// capture builds the transparent frontend behind a receipt that checked
+// out. It also returns the address families the receipt records, which is
+// what the bind compares the capture sockets against.
+func capture(cfg *config.Config, receipt *netsetup.Receipt, server *proxy.Server, logger *slog.Logger) (
+	*transparent.Frontend, []string, error,
+) {
+	if receipt == nil || cfg.Listen.TransparentPort == 0 {
+		return nil, nil, nil
 	}
 	logger.Info("transparent network capture enabled",
 		slog.String("receipt", cfg.Netsetup.Receipt),
@@ -500,6 +572,7 @@ func capture(
 		slog.Int("proxy_uid", receipt.ProxyUID),
 		slog.Int("redirect_port", receipt.RedirectPort),
 		slog.Any("capture_ports", receipt.CapturePorts),
+		slog.Int("dns_port", receipt.DNSPort),
 		slog.Any("families", receipt.Families),
 		slog.Any("cleartext_ports", cfg.Listen.CleartextPorts))
 	for _, port := range uncaptured(receipt.CapturePorts, cfg.Listen.CleartextPorts) {
@@ -518,6 +591,47 @@ func capture(
 		return nil, nil, fmt.Errorf("transparent frontend: %w", err)
 	}
 	return frontend, receipt.Families, nil
+}
+
+// errResolver is an allowlist resolver this process refuses to serve.
+var errResolver = errors.New("dns resolver")
+
+// nameResolver builds the allowlist resolver. It returns nil when
+// listen.dns is unset.
+//
+// The names that resolve come from the document alone. The resolvers an
+// allowed name is forwarded to come from dns.forward_to, or from the
+// netsetup receipt when dns.forward_to is empty.
+func nameResolver(cfg *config.Config, receipt *netsetup.Receipt, sink audit.Sink, logger *slog.Logger) (
+	*dns.Resolver, error,
+) {
+	if cfg.Listen.DNS == "" {
+		return nil, nil //nolint:nilnil // no resolver is a posture, not a failure
+	}
+	forward := cfg.DNS.ForwardTo
+	if len(forward) == 0 && receipt != nil {
+		forward = receipt.DNSServers
+	}
+	if len(forward) == 0 {
+		return nil, fmt.Errorf("%w: listen.dns is set and no resolver is named. Set dns.forward_to, or run "+
+			"the init container so the receipt names the cluster resolvers", errResolver)
+	}
+	resolver, err := dns.New(dns.Options{
+		Hosts:          cfg.DNSHosts(),
+		Forward:        forward,
+		Listen:         cfg.Listen.DNS,
+		Audit:          sink,
+		Logger:         logger,
+		MaxConnections: cfg.Limits.MaxDNSConnections,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errResolver, err)
+	}
+	logger.Info("name resolution in force",
+		slog.String("listen", cfg.Listen.DNS),
+		slog.Any("resolves", resolver.Hosts()),
+		slog.Any("forward_to", resolver.Forward()))
+	return resolver, nil
 }
 
 // uncaptured returns cleartext ports outside the capture and redirect. The
@@ -542,7 +656,7 @@ func uncaptured(captured, cleartext []int) []int {
 //
 // Returns once every server has stopped.
 func (p *process) serve(ctx context.Context) error {
-	listener, captured, err := p.bind(ctx)
+	listener, captured, resolver, err := p.bind(ctx)
 	if err != nil {
 		return err
 	}
@@ -551,6 +665,9 @@ func (p *process) serve(ctx context.Context) error {
 	defer stop()
 	for _, captured := range captured {
 		group.Go(func() error { return p.transparent.Serve(ctx, captured) })
+	}
+	if p.resolver != nil {
+		group.Go(func() error { return p.resolver.Serve(ctx, resolver) })
 	}
 	group.Go(func() error { return p.server.Run(ctx, listener) })
 	group.Go(func() error { return p.admin.Run(ctx) })
@@ -582,20 +699,39 @@ func version() string {
 // readiness. The order is the contract: /readyz answers 200 only after the
 // transparent sockets are bound, so the kubelet never releases the workload
 // while the port the capture redirects to refuses connections.
-func (p *process) bind(ctx context.Context) (net.Listener, []net.Listener, error) {
+func (p *process) bind(ctx context.Context) (net.Listener, []net.Listener, dns.Sockets, error) {
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", p.cfg.Listen.Connect)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
+		return nil, nil, dns.Sockets{}, fmt.Errorf("listen on %s: %w", p.cfg.Listen.Connect, err)
 	}
 	captured, err := p.captureListeners(ctx)
 	if err != nil {
-		return nil, nil, errors.Join(err, listener.Close())
+		return nil, nil, dns.Sockets{}, errors.Join(err, listener.Close())
+	}
+	resolver, err := p.resolverSockets(ctx)
+	if err != nil {
+		return nil, nil, dns.Sockets{}, errors.Join(err, listener.Close(), closeAll(captured))
 	}
 	p.listening.Store(true)
 	p.logger.Info("serving",
 		slog.String("connect", listener.Addr().String()),
 		slog.String("admin", p.admin.Path()))
-	return listener, captured, nil
+	return listener, captured, resolver, nil
+}
+
+// resolverSockets binds the allowlist resolver, one UDP and one TCP socket
+// per address family. It returns nothing when the process runs no
+// resolver.
+func (p *process) resolverSockets(ctx context.Context) (dns.Sockets, error) {
+	if p.resolver == nil {
+		return dns.Sockets{}, nil
+	}
+	sockets, err := dns.Listen(ctx, p.cfg.Listen.DNS)
+	if err != nil {
+		return dns.Sockets{}, fmt.Errorf("%w: %w", errResolver, err)
+	}
+	p.logger.Info("answering name lookups", slog.String("sockets", sockets.Addresses()))
+	return sockets, nil
 }
 
 // errCapture is a transparent frontend this process refuses to serve

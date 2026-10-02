@@ -177,6 +177,7 @@ func sandbox(t *testing.T, run *test, spec sandboxSpec) {
 		"ClientID":           clientID,
 		"ImpersonateUser":    user,
 		"RedirectPort":       netsetup.DefaultRedirectPort,
+		"DNSPort":            netsetup.DefaultDNSPort,
 		"DenyListExceptions": "[" + strings.Join(quoted(clusterRanges), ", ") + "]",
 		"UpstreamHost":       upstreamHost,
 		"GrantedResource":    grantedResource,
@@ -206,6 +207,18 @@ func sandbox(t *testing.T, run *test, spec sandboxSpec) {
 		"ForgedToken":    forged,
 	})
 	waitReady(t, run, name)
+}
+
+// serviceAddress is a Service's cluster address. A client that opens a
+// connection to it names no host, which is the connection-scoped decision
+// no name lookup takes part in.
+func serviceAddress(t *testing.T, run *test, name string) string {
+	t.Helper()
+	service := &corev1.Service{}
+	require.NoError(t, run.client.Resources().Get(context.Background(), name, namespace, service),
+		"read the %s service", name)
+	require.NotEmpty(t, service.Spec.ClusterIP, "the %s service has a cluster address", name)
+	return service.Spec.ClusterIP
 }
 
 // quoted wraps each entry in double quotes, so a Go slice renders as a

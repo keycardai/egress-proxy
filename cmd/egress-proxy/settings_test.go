@@ -69,6 +69,7 @@ func TestSettingsPublishWhatADeploymentHasToMatch(t *testing.T) {
 		ProxyUID:     netsetup.DefaultProxyUID,
 		RedirectPort: netsetup.DefaultRedirectPort,
 		CapturePorts: netsetup.DefaultConfig().CapturePorts,
+		DNSPort:      netsetup.DefaultDNSPort,
 		ReceiptPath:  netsetup.DefaultReceiptPath,
 	}, report.Netsetup, "the capture defaults the pod has to agree with")
 

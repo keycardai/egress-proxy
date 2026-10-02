@@ -88,7 +88,9 @@ func (c Config) Program(family Family) (Program, error) {
 		Chains: []Chain{{Table: filterTable, Name: filterChain}, {Table: natTable, Name: natChain}},
 		Jumps: []Rule{
 			{Table: filterTable, Chain: "OUTPUT", Spec: []string{"-j", filterChain}},
-			{Table: natTable, Chain: "OUTPUT", Spec: []string{"-p", "tcp", "-j", natChain}},
+			// The nat jump does not match on protocol, because the DNS
+			// redirect covers UDP as well as TCP.
+			{Table: natTable, Chain: "OUTPUT", Spec: []string{"-j", natChain}},
 		},
 	}
 	if family == FamilyIPv6 && c.IPv6 == IPv6Deny {
@@ -162,6 +164,17 @@ func (p *Program) nat(cfg Config, family Family) {
 	// The redirected connections and the explicit proxy listener go over
 	// loopback. Redirecting it would loop.
 	p.add("-o", "lo", "-j", "RETURN")
+	// DNS goes to the sidecar's allowlist resolver on loopback, whatever
+	// resolver the client named. This is ahead of the cluster ranges,
+	// because the cluster resolver's own address is inside the service
+	// range and a RETURN there would leave the query for the terminal
+	// DROP. Both protocols are redirected: DNS falls back to TCP for an
+	// answer that does not fit in a datagram, RFC 7766 section 5.
+	if cfg.DNSPort > 0 {
+		for _, protocol := range []string{"udp", "tcp"} {
+			p.add("-p", protocol, "--dport", "53", "-j", "REDIRECT", "--to-ports", strconv.Itoa(cfg.DNSPort))
+		}
+	}
 	for _, prefix := range prefixesFor(family, cfg.PodCIDRs) {
 		p.add("-d", prefix.String(), "-j", "RETURN")
 	}
@@ -187,13 +200,13 @@ func (p *Program) filter(cfg Config, family Family) {
 	if family == FamilyIPv6 {
 		p.acceptNeighbourDiscovery()
 	}
-	// DNS falls back to TCP for a response that does not fit in a datagram,
-	// RFC 7766 section 5, so both protocols are accepted to each resolver.
-	for _, protocol := range []string{"udp", "tcp"} {
-		for _, server := range addrsFor(family, cfg.DNSServers) {
-			p.accept("-d", server.String(), "-p", protocol, "--dport", "53", "-j", "ACCEPT")
-		}
-	}
+	// NEVER accept DNS to a resolver here. The nat chain redirects every
+	// query the workload sends to the sidecar's resolver on loopback,
+	// which the loopback accepts above already cover, and the sidecar's
+	// own forwarded queries leave under the owner accept. An accept by
+	// destination would let a query the redirect missed leave the pod
+	// unread.
+
 	// UDP/443 falls here, so QUIC and HTTP/3 are dropped, along with ICMP,
 	// every other non-TCP protocol, and every TCP port outside CapturePorts.
 	p.accept("-j", "DROP")
@@ -297,16 +310,6 @@ func prefixesFor(family Family, prefixes []netip.Prefix) []netip.Prefix {
 	for _, prefix := range prefixes {
 		if prefix.Addr().Is4() == (family == FamilyIPv4) {
 			out = append(out, prefix)
-		}
-	}
-	return out
-}
-
-func addrsFor(family Family, addrs []netip.Addr) []netip.Addr {
-	out := make([]netip.Addr, 0, len(addrs))
-	for _, addr := range addrs {
-		if addr.Is4() == (family == FamilyIPv4) {
-			out = append(out, addr)
 		}
 	}
 	return out

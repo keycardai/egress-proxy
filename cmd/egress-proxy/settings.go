@@ -66,6 +66,7 @@ type netsetupDefaults struct {
 	ProxyUID     int    `json:"proxy_uid"`
 	RedirectPort int    `json:"redirect_port"`
 	CapturePorts []int  `json:"capture_ports"`
+	DNSPort      int    `json:"dns_port"`
 	ReceiptPath  string `json:"receipt_path"`
 }
 
@@ -144,6 +145,7 @@ func settings() (*settingsReport, error) {
 			ProxyUID:     capture.ProxyUID,
 			RedirectPort: capture.RedirectPort,
 			CapturePorts: capture.CapturePorts,
+			DNSPort:      capture.DNSPort,
 			ReceiptPath:  netsetup.DefaultReceiptPath,
 		},
 	}, nil
@@ -194,6 +196,7 @@ func parserDefaults() (map[string]any, error) {
 		"leaf-ttl":                seconds(cfg.CA.LeafTTL.Duration()),
 		"cache-size":              strconv.Itoa(cfg.CA.CacheSize),
 		"max-connections":         strconv.Itoa(cfg.Limits.MaxConnections),
+		"max-dns-connections":     strconv.Itoa(cfg.Limits.MaxDNSConnections),
 		"idle-timeout":            seconds(cfg.Limits.IdleTimeout.Duration()),
 		"response-header-timeout": seconds(cfg.Limits.ResponseHeaderTimeout.Duration()),
 		"exchange-timeout":        seconds(cfg.Limits.ExchangeTimeout.Duration()),
@@ -212,6 +215,8 @@ func flagsWithNoDefault() map[string]bool {
 		"workload-token-file":    true,
 		"impersonate-user":       true,
 		"transparent-port":       true,
+		"dns":                    true,
+		"dns-forward-to":         true,
 		"ca-state-dir":           true,
 		"client-secret-file":     true,
 		"credential-static-file": true,

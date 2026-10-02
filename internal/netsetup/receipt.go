@@ -53,6 +53,15 @@ type Receipt struct {
 	RedirectPortProtection PortProtection `json:"redirect_port_protection,omitempty"`
 	// CapturePorts are the destination ports the redirect covers.
 	CapturePorts []int `json:"capture_ports"`
+	// DNSPort is where the nat REDIRECT sends UDP and TCP port 53. It must
+	// be the port listen.dns binds. Zero says no DNS redirect was
+	// programmed.
+	DNSPort int `json:"dns_port"`
+	// DNSServers are the cluster resolvers the sidecar's allowlist
+	// resolver forwards an allowed name to. The init container takes them
+	// from --dns-servers or from resolv.conf. The sidecar reads them here,
+	// so both containers use the same list.
+	DNSServers []string `json:"dns_servers"`
 	// Families are the address families programmed.
 	Families []string `json:"families"`
 	// RulesetDigest identifies the exact ruleset, so two sidecars are
@@ -101,6 +110,10 @@ func NewReceipt(cfg Config, programs []Program, verified bool, now time.Time) Re
 	for _, program := range programs {
 		families = append(families, program.Family.String())
 	}
+	resolvers := make([]string, 0, len(cfg.DNSServers))
+	for _, server := range cfg.DNSServers {
+		resolvers = append(resolvers, server.String())
+	}
 	return Receipt{
 		Version:       receiptVersion,
 		VerifiedAt:    now.UTC(),
@@ -108,6 +121,8 @@ func NewReceipt(cfg Config, programs []Program, verified bool, now time.Time) Re
 		ProxyUID:      cfg.ProxyUID,
 		RedirectPort:  cfg.RedirectPort,
 		CapturePorts:  append([]int(nil), cfg.CapturePorts...),
+		DNSPort:       cfg.DNSPort,
+		DNSServers:    resolvers,
 		Families:      families,
 		RulesetDigest: RulesetDigest(programs),
 	}

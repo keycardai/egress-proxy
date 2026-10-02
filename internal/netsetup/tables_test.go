@@ -127,7 +127,7 @@ const (
 	filterKey  = "filter EGRESS_PROXY_FILTER_OUTPUT"
 	natKey     = "nat EGRESS_PROXY_NAT_OUTPUT"
 	filterJump = "-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT"
-	natJump    = "-A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT"
+	natJump    = "-A OUTPUT -j EGRESS_PROXY_NAT_OUTPUT"
 	drop       = "-A EGRESS_PROXY_FILTER_OUTPUT -j DROP"
 	// Rules of the kind Docker's embedded resolver puts in a container's
 	// OUTPUT chains.

@@ -118,9 +118,7 @@ func TestCapture(t *testing.T) {
 			require.NoError(t, err, "parse the document")
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))
-			frontend, families, err := capture(cfg, nil, logger, netsetup.ContainmentRequest{
-				PortStart: func() (int, error) { return 1024, nil },
-			})
+			frontend, families, err := containAndCapture(cfg, logger)
 			wantErr := tc.wantErr
 			if !transparent.Supported && cfg.Listen.TransparentPort != 0 {
 				wantErr = transparent.ErrNotSupported
@@ -142,6 +140,18 @@ func TestCapture(t *testing.T) {
 			}
 		})
 	}
+}
+
+// containAndCapture runs the start-up check and builds the frontend the way
+// buildFrontends does, with the kernel default for the port-start check.
+func containAndCapture(cfg *config.Config, logger *slog.Logger) (*transparent.Frontend, []string, error) {
+	receipt, err := containment(cfg, netsetup.ContainmentRequest{
+		PortStart: func() (int, error) { return 1024, nil },
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return capture(cfg, receipt, nil, logger)
 }
 
 // thisNetNamespace reads the network namespace of the test process. It is

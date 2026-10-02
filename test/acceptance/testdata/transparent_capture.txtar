@@ -42,7 +42,11 @@ exec docker run -d --name $LAB-workload --network $LAB --ip $LAB_WORKLOAD4 --ip6
 
 # The init container loads both address families with iptables-legacy, reads
 # every rule back, drops NET_ADMIN, and writes the receipt.
-exec docker exec $LAB-workload egress-netsetup --receipt /run/egress/netsetup.json
+#
+# --dns-port 0 runs no resolver in this pod. The clients below reach
+# upstream.test through the hosts file, and dns_allowlist.txtar is where
+# the resolver and the DNS redirect are proved.
+exec docker exec $LAB-workload egress-netsetup --receipt /run/egress/netsetup.json --dns-port 0
 stdout '^# ipv4: /usr/sbin/iptables-legacy \(iptables v[0-9.]+ \(legacy\)\), /usr/sbin/iptables-legacy-restore$'
 stdout '^# ipv6: /usr/sbin/ip6tables-legacy \(ip6tables v[0-9.]+ \(legacy\)\), /usr/sbin/ip6tables-legacy-restore$'
 stdout -count=2 '^-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015$'
@@ -87,7 +91,7 @@ stderr 'the init container and the sidecar are not in the same pod network'
 # enforce privileged ports. netsetup runs with allow-unprotected and the
 # receipt records it, so the proxy starts without checking the sysctl.
 # timeout stops the proxy once it serves.
-! exec docker run --rm --network $LAB --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=0 --mount type=tmpfs,destination=/run/egress,tmpfs-mode=0777 -v $WORK:/work:ro $LAB_IMAGE sh -c 'egress-netsetup --receipt /run/egress/netsetup.json --redirect-port-protection allow-unprotected && exec timeout 10 setpriv --reuid 1337 --regid 1337 --clear-groups egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca'
+! exec docker run --rm --network $LAB --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=0 --mount type=tmpfs,destination=/run/egress,tmpfs-mode=0777 -v $WORK:/work:ro $LAB_IMAGE sh -c 'egress-netsetup --receipt /run/egress/netsetup.json --dns-port 0 --redirect-port-protection allow-unprotected && exec timeout 10 setpriv --reuid 1337 --regid 1337 --clear-groups egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca'
 stdout '^# WARNING: redirect-port protection is waived'
 stderr 'capturing redirected connections'
 ! stderr 'ip_unprivileged_port_start is'
@@ -203,7 +207,7 @@ audit -all out/audit.jsonl sandbox_id=transparent-capture
 # closes until they are removed. --verify never writes or removes the receipt,
 # so it remains after a failed check.
 exec docker exec $LAB-workload iptables-legacy -I EGRESS_PROXY_FILTER_OUTPUT 1 -j ACCEPT
-! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
+! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json --dns-port 0
 stderr 'holds a rule this ruleset did not put there'
 exec docker exec $LAB-workload test -f /run/egress/netsetup.json
 exec docker exec $LAB-workload iptables-legacy -D EGRESS_PROXY_FILTER_OUTPUT -j ACCEPT
@@ -211,13 +215,13 @@ exec docker exec $LAB-workload iptables-legacy -D EGRESS_PROXY_FILTER_OUTPUT -j 
 # A rule ahead of the OUTPUT jump decides the packet first. Checking the jump
 # with -C cannot see that rule.
 exec docker exec $LAB-workload iptables-legacy -I OUTPUT 1 -j ACCEPT
-! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
+! exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json --dns-port 0
 stderr 'the first rule in the OUTPUT chain in the filter table is not "-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT"'
 exec docker exec $LAB-workload iptables-legacy -D OUTPUT -j ACCEPT
 
 # With both rules gone, the check passes again. Each refusal above came from
 # the rule that case inserted.
-exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json
+exec docker exec $LAB-workload egress-netsetup --verify --receipt /run/egress/netsetup.json --dns-port 0
 stdout '# ipv4 verified: '
 stdout '# ipv6 verified: '
 

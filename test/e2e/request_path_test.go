@@ -33,10 +33,20 @@ const (
 // token. The API server signs that half, so a pod cannot claim another.
 const actor = "system:serviceaccount:" + namespace + ":" + serviceAccount
 
-// deniedExit is the status curl leaves when the proxy refuses a captured
-// TLS connection. The refusal closes the connection without a ServerHello,
-// so the client sees a failed handshake and never a response.
-const deniedExit = 35
+// resolveExit is the status curl leaves for a name it could not resolve.
+// The allowlist resolver answers NXDOMAIN for a name no endpoint declares,
+// so a denied host fails before any connection is opened.
+const resolveExit = 6
+
+// tlsConnectExit is the status curl leaves when the peer closes the
+// connection during the TLS handshake, which is what a refused connection
+// looks like to the client.
+const tlsConnectExit = 35
+
+// attackerName is a name no endpoint declares. The cluster resolver would
+// answer for it as readily as for any other name outside the cluster, so
+// the allowlist is what refuses it.
+const attackerName = "data.attacker.example"
 
 // TestRequestPath proves the request path in a cluster: the images this
 // repository ships, a pod that runs them, and requests made from inside the
@@ -59,6 +69,19 @@ func TestRequestPath(t *testing.T) {
 		}
 	})
 
+	t.Run("the proxy answers the sandbox's name lookups", func(t *testing.T) {
+		announced := containerLog(t, run, sandboxPod, proxyContainer, false)
+		assert.Contains(t, announced, "name resolution in force",
+			"the start-up log says the resolver is running")
+		// The whole /info body also holds endpoint_hosts, so the
+		// assertions read the dns object alone.
+		resolves := reportedResolves(t, run, sandboxPod)
+		for _, host := range []string{upstreamHost, zoneHost} {
+			assert.Contains(t, resolves, host, "/info reports that %s resolves", host)
+		}
+		assert.NotContains(t, resolves, deniedHost, "/info reports no name the document does not declare")
+	})
+
 	t.Run("the proxy announces the deny list exceptions it runs with", func(t *testing.T) {
 		announced := containerLog(t, run, sandboxPod, proxyContainer, false)
 		for _, prefix := range clusterRanges {
@@ -69,6 +92,10 @@ func TestRequestPath(t *testing.T) {
 			assert.Contains(t, reported, prefix, "/info reports the exception %s", prefix)
 		}
 	})
+
+	// The upstream's cluster address, which a client can open a connection
+	// to without looking up a name.
+	upstreamAddress := serviceAddress(t, run, upstreamPod)
 
 	tests := []struct {
 		name string
@@ -131,13 +158,43 @@ func TestRequestPath(t *testing.T) {
 			wantExchanges: []exchange{},
 		},
 		{
-			name:     "a denied host is blocked with a named reason",
+			// The host runs in the cluster and CoreDNS answers for it, so
+			// the allowlist is what refuses the name. The refusal comes
+			// at the lookup rather than at the connection, which is why
+			// curl exits 6 and the record has scope dns.
+			name:     "a denied host does not resolve and is refused with a named reason",
 			pod:      sandboxPod,
 			command:  curl("https://" + deniedHost + "/headers"),
-			wantExit: deniedExit,
+			wantExit: resolveExit,
+			wantRecord: audited{
+				scope: audit.ScopeDNS, verdict: policy.VerdictDeny,
+				reason: policy.ReasonNoMatchingEndpoint, host: deniedHost,
+			},
+			wantExchanges: []exchange{},
+		},
+		{
+			name:     "a name no endpoint declares does not resolve",
+			pod:      sandboxPod,
+			command:  curl("https://" + attackerName + "/"),
+			wantExit: resolveExit,
+			wantRecord: audited{
+				scope: audit.ScopeDNS, verdict: policy.VerdictDeny,
+				reason: policy.ReasonNoMatchingEndpoint, host: attackerName,
+			},
+			wantExchanges: []exchange{},
+		},
+		{
+			// No name is looked up, so this is the connection-scoped
+			// decision. RFC 6066 section 3 forbids an IP literal in
+			// server_name, so the ClientHello names no host and the proxy
+			// has nothing to decide against.
+			name:     "a connection to a cluster address offers no server name and is refused",
+			pod:      sandboxPod,
+			command:  curlInsecure("https://" + upstreamAddress + "/"),
+			wantExit: tlsConnectExit,
 			wantRecord: audited{
 				scope: audit.ScopeConnection, verdict: policy.VerdictDeny,
-				reason: policy.ReasonNoMatchingEndpoint, host: deniedHost,
+				reason: policy.ReasonNoSNI, host: upstreamAddress,
 			},
 			wantExchanges: []exchange{},
 		},
@@ -206,6 +263,13 @@ func TestRequestPath(t *testing.T) {
 // the capture put it there.
 func curl(url string) []string {
 	return []string{"curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", url}
+}
+
+// curlInsecure fetches a URL without verifying the server certificate, so
+// a connection the proxy refuses fails on the refusal rather than on the
+// name the leaf authenticates.
+func curlInsecure(url string) []string {
+	return append(curl(url), "-k")
 }
 
 // curlWithPlaceholder fetches a URL with the placeholder the workload
@@ -336,6 +400,20 @@ func waitForExchanges(t *testing.T, run *test, count int) []exchange {
 		return len(found) >= count
 	})
 	return found
+}
+
+// reportedResolves is the names /info says the resolver answers for.
+func reportedResolves(t *testing.T, run *test, pod string) []string {
+	t.Helper()
+	var info struct {
+		DNS struct {
+			Resolves []string `json:"resolves"`
+		} `json:"dns"`
+	}
+	body := probeInfo(t, run, pod)
+	require.NoError(t, json.Unmarshal([]byte(body), &info), "parse /info from %s:\n%s", pod, body)
+	require.NotEmpty(t, info.DNS.Resolves, "/info names what resolves in %s", pod)
+	return info.DNS.Resolves
 }
 
 // probeInfo runs the probe subcommand in the proxy container, which is how

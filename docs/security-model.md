@@ -65,8 +65,17 @@ unprivileged workload.
 - The proxy mints the upstream credential only after the endpoint list allows
   the request. The exchange sends the user name without a signature, so the
   zone's policy must refuse an unauthorized user.
+- The sidecar answers the sandbox's name lookups. It refuses every name
+  that is not an endpoint host or the zone host, over UDP and over TCP. A
+  refused name answers `NXDOMAIN` and does not reach the cluster resolver.
+  For an allowed name, the resolver builds a new message from the
+  canonical name, the type and the class. The query type is the only value
+  the workload chooses that reaches the authoritative server, and the
+  audit record includes it.
 - The audit stream cannot be turned off. It is the process stdout, with one
-  JSON object per decision and the `sandbox_id` and document digest.
+  JSON object per decision and the `sandbox_id` and document digest. A name
+  lookup is a decision: it gets a record with scope `dns`, the question and
+  the response code.
 
 ## What the e2e tests prove
 
@@ -147,7 +156,7 @@ nothing about whether the port was checked.
 |---|---|---|
 | A workload calls `setuid` to the proxy uid. The nat chain returns early for that uid and the filter chain accepts it, so the workload's own traffic would be neither redirected nor dropped. This bypass is published against Istio (https://pulsesecurity.co.nz/advisories/istio-egress-bypass), and Istio states the same limit (https://istio.io/latest/docs/ops/best-practices/security/#understand-traffic-capture-limitations). | Traffic capture is not a boundary on its own. The workload securityContext is: run as a uid that is not the proxy's, `allowPrivilegeEscalation` false, `capabilities.drop` ALL. Without CAP_SETUID the call fails, and `no_new_privs` keeps an execve from granting it. The ruleset excludes the proxy uid and no other. The proxy uid may not be 0, which would exempt every root process in the pod. | `TestProgramRules`, `TestValidate` |
 | A workload binds the redirect port before the sidecar starts or while it restarts. | The workload holds no NET_BIND_SERVICE. Before it programs or verifies the rules, netsetup refuses a redirect port at or above `net.ipv4.ip_unprivileged_port_start`, and fails when it cannot read that value. `allow-unprotected` skips this check and the receipt records it. | `TestCheckRedirectPort`, `TestPortCheckPrecedesTableAccess`, `netsetup_ruleset.txtar` |
-| A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, DNS to the named resolvers, and the ICMPv6 Neighbour Discovery the kernel sends. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
+| A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, and the ICMPv6 Neighbour Discovery the kernel sends. There is no accept for DNS to a resolver: the nat chain redirects every query to the sidecar's resolver on loopback. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
 | A process with CAP_NET_RAW sends ICMPv6 of a neighbour discovery type, with any payload, to any IPv6 address. The ip6tables filter chain must accept neighbour discovery, because the kernel needs it to reach any IPv6 neighbour. | The ICMPv6 accepts match only packets from the kernel's own sockets: `-m owner ! --uid-owner 0-4294967294`. xt_owner matches a process's socket by its uid, and a kernel socket only when every uid condition is negated (linux `net/netfilter/xt_owner.c`, `owner_mt`). No process can send ICMPv6 past the DROP, whatever its uid. | `TestProgramRules`, `netsetup_ruleset.txtar` |
 | A workload leaves over IPv6, on a kernel whose ip6tables rules were never programmed. | Both address families are programmed. `--ipv6 auto` follows the kernel, `--ipv6 on` requires IPv6, and `--ipv6 off` programs an ip6tables ruleset that drops every IPv6 packet the pod sends. A probe that cannot tell whether the kernel has IPv6 fails the run. | `TestProgramRules`, `TestIPv6Modes`, `TestKernelHasIPv6`, `netsetup_ruleset.txtar` |
 | A rule another component put in OUTPUT decides the packet ahead of the ruleset, or a rule is added to a chain this package owns. | Each OUTPUT jump is inserted at position 1. After applying, the init container reads every rule back with `-C`, counts each chain it owns and checks that the first rule in each OUTPUT chain is exactly the jump. The nat chain must end with the REDIRECT and then an unconditional RETURN, so every exemption comes before the REDIRECT. The IPv6 deny nat chain holds only the RETURN. An extra rule, a misplaced jump or a reordered nat rule fails verification. | `TestApply`, `TestVerifyProblems`, `netsetup_ruleset.txtar` |
@@ -182,7 +191,7 @@ capability to pass on.
 |---|---|---|
 | A workload binds the redirect port during a sidecar restart and decides its own traffic. | The redirect target is port 1015. A process without CAP_NET_BIND_SERVICE can bind it only when `net.ipv4.ip_unprivileged_port_start` is at or below 1015, in either address family (Linux `net/ipv6/af_inet6.c`, `__inet6_bind`). The sidecar reads the sysctl and refuses to start in that case. It skips this check when the receipt records `allow-unprotected`. containerd 2.0 and later, and Docker, set it to 0 unless the pod sets it. The pod sets it to 1024. Kubernetes lists it as a safe sysctl (https://kubernetes.io/docs/tasks/administer-cluster/sysctl-cluster/). | `TestContainmentPortStart`, `TestContainmentReadsThisProcess`, `TestUnprivilegedPortStart`, `transparent_capture.txtar` (`bind EACCES`, the allow-unprotected pod) |
 | The proxy cannot bind the redirect port, so it cannot serve captured connections. | The filter chain drops traffic the listener does not receive. The proxy binds the port with CAP_NET_BIND_SERVICE from a file capability. A bind that fails with EACCES names the capability the sidecar needs and requires the binary to be its entrypoint. | `transparent_capture.txtar` (the `no_new_privs` refusal), `TestProxyImageBindsAPrivilegedPort` |
-| The sidecar starts with rules that were not applied, target another uid or port, or remain changeable by this process. | The sidecar reads the netsetup receipt at start-up. It refuses an unverified receipt, a receipt that says the capability was kept, a mismatched proxy uid or redirect port, uid 0, a receipt with no family, or a process that holds CAP_NET_ADMIN in its effective or permitted set. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestCapture`, `transparent_capture.txtar` (the refusal naming uid 1000) |
+| The sidecar starts with rules that were not applied, target another uid or port, or remain changeable by this process. | The sidecar reads the netsetup receipt at start-up. It refuses an unverified receipt, a receipt that says the capability was kept, a mismatched proxy uid, redirect port or DNS port, uid 0, a receipt with no family, or a process that holds CAP_NET_ADMIN in its effective or permitted set. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestCapture`, `transparent_capture.txtar` (the refusal naming uid 1000) |
 | Another container replaces the receipt on the shared volume, so the sidecar starts with data the init container did not write. | The sidecar refuses a receipt that group or other can write, or a receipt or directory owned by a uid other than root or its own. An emptyDir mount point is 0777 (Kubernetes `pkg/volume/emptydir/empty_dir.go`, `perm`), so any uid that mounts it can create a file there. The owner check refuses that file. The sidecar opens the receipt once without following a symlink or blocking, so its mode, owner, and contents come from one descriptor. | `TestContainment`, `TestReadReceiptRefusals`, `transparent_capture.txtar` (the receipt on a 0777 volume) |
 | The sidecar starts on a receipt written in another network namespace. The rules it describes govern that namespace, not the one the sidecar and the workload share. | The init container records the device and inode of `/proc/self/ns/net` in the receipt. Two processes are in the same network namespace when both values are equal (namespaces(7), The /proc/[pid]/ns/ directory). The sidecar reads its own and refuses a receipt that names another namespace or none. The check does not detect `hostNetwork: true`. See the netsetup pod contract. | `TestContainment`, `TestContainmentReadsThisProcess`, `TestNetNamespaceAt`, `TestKeepNetAdminIsRecorded`, `TestCapture`, `transparent_capture.txtar` (the proxy in a second container) |
 | Another pod connects to the transparent listener, or a DNAT rule in the pod sends outside traffic to it. SO_ORIGINAL_DST then returns the pre-DNAT address, so the connection looks redirected and would be served with this sandbox's credentials. | The listener binds 127.0.0.1 and ::1 and no other address. REDIRECT sends a locally generated packet to loopback (Linux `net/netfilter/nf_nat_redirect.c`, gVisor `pkg/tcpip/stack/iptables_targets.go`), so every captured connection still arrives. The kernel drops an IPv4 packet to 127.0.0.0/8 that arrives on another interface unless `route_localnet` is set (Linux `Documentation/networking/ip-sysctl.rst`), and drops an IPv6 packet to ::1 (Linux `net/ipv6/ip6_input.c`, `ip6_rcv_core`, RFC 4291 section 2.5.3). | `TestListen`, `transparent_capture.txtar` (the connection from the upstream container, the DNAT to 127.0.0.1) |
@@ -191,6 +200,38 @@ capability to pass on.
 | A redirected connection names a destination that differs from its original address, so the proxy decides one host and reaches another. | The name must hold the original port. An address literal must match the original address. A mismatch gets `host_mismatch`. The proxy resolves the name again before dialing, so the dial guard still catches a permitted name that resolves into a denied range. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` |
 | A client sends nothing or a partial ClientHello and holds a goroutine and connection slot. | The peek has a ten-second read deadline. The connection then gets `no_sni`, or `cleartext_not_forwarded` on a cleartext port. The transparent listener has required connection and idle limits. The peek waits for one byte beyond the data it has served, then hands over all data it received. | `TestTheFrontendRecoversWhatAConnectionWasOpenedTo` (silent and partial clients), `TestTheConnectionCapHoldsUntilAConnectionCloses`, `TestNewRefusals`, `TestCapturedConnectionsAreServedOneAfterAnother` |
 | A captured cleartext connection sends a credential to a destination in cleartext. | Endpoints name HTTPS destinations. The frontend reads the `Host` header on a cleartext port, then denies the connection with `cleartext_not_forwarded`. A deny-listed host gets `deny_always`, and an uncovered host gets `no_matching_endpoint`. The proxy forwards no cleartext, even to a covered host and port. | `TestRedirectedConnectionsAreRefused` (a cleartext connection to a covered name and port), `transparent_capture.txtar` (the `http://` request) |
+
+### Name resolution
+
+A DNS query is not a connection, so a destination the endpoint list refuses
+still leaves the pod as a query unless the resolver is constrained. A
+workload can encode data in query names and read data back out of the
+answers.
+
+`internal/dns` answers name lookups on the pod loopback over UDP and TCP.
+The netsetup init container redirects UDP and TCP port 53 to it, whatever
+resolver the client named. The filter chain does not accept DNS to any
+resolver. The resolver answers `NXDOMAIN` for a name outside the allowlist
+and forwards the rest to the cluster resolvers the receipt names.
+
+The allowlist is the endpoint hosts plus the zone host, taken from the
+document. No setting changes it. The match is exact equality on the whole
+name, case-insensitive. The connection decision matches a host the same
+way.
+
+| Threat | Mitigation | Test |
+|---|---|---|
+| A workload encodes data in a query name and reads data back out of the answers, reaching no endpoint rule and no audit record. | A name that is not an endpoint host or the zone host answers `NXDOMAIN`, and the query is not forwarded. Every lookup writes a record with scope `dns` and the reason `no_matching_endpoint`. | `TestTheAllowlistDecidesEveryName`, `dns_allowlist.txtar`, `TestRequestPath` |
+| A workload sends the query straight at the cluster resolver, around the loopback listener, or at a resolver outside the pod entirely. | The nat chain redirects UDP and TCP port 53 to the resolver ahead of the pod and service ranges, so a query at any address off the loopback interface is answered by the sidecar. The filter chain accepts DNS to no resolver, so a query the redirect missed reaches the terminal DROP. A query to a loopback address other than the one the resolver binds matches the `-o lo -j RETURN` above the redirect, so it is not rewritten and nothing answers it. | `TestProgramRules`, `dns_allowlist.txtar` |
+| A workload encodes data in the parts of an allowed query the allowlist does not read: the name's case bits, the message id and an EDNS0 option. The receiver is the authoritative operator for a name the document declares. | The outbound message is built rather than copied. It holds the canonical name, the query type, the class, a message id of this resolver's own, and an OPT of this resolver's own where the client sent one. The query type is what remains, and the record names it. | `TestNothingTheClientSentReachesTheResolver` |
+| A workload asks over TCP, which a resolver that filtered datagrams alone would pass. DNS falls back to TCP for an answer that does not fit in a datagram, RFC 7766 section 5. | Both protocols are redirected and both are served, and the allowlist decides them alike. Every table row runs over each transport, and the record names which one. | `TestTheAllowlistDecidesEveryName`, `dns_allowlist.txtar` |
+| A subdomain of an endpoint host resolves, so the workload reaches a zone no endpoint declares. | The match is exact equality on the whole name. `data.upstream.example` is refused where `upstream.example` resolves. | `TestTheAllowlistDecidesEveryName`, `dns_allowlist.txtar` |
+| A resolver that times out or errors leaves the query to be answered by something else. | A query no resolver answered gets `SERVFAIL` and an `upstream_failed` record. A message that is not one lookup gets `FORMERR` and a `malformed_request` record. Neither forwards. | `TestAResolverThatDoesNotAnswerDenies`, `TestAMessageThatIsNotAQueryDenies` |
+| The redirect sends port 53 to a port that nothing binds, or the resolver binds a port that nothing redirects to. Every lookup fails. | The receipt records the port the rules redirect to, and the proxy refuses to start when it and `listen.dns` disagree, either way round. A sidecar that runs the resolver reads the receipt whether or not it also runs a transparent frontend. | `TestContainment`, `TestTheReceiptIsReadForEverySurfaceTheRulesFeed`, `dns_allowlist.txtar` |
+| A workload binds the resolver port during a sidecar restart and answers its own lookups. | The port is 53, below 1024, so only a process holding CAP_NET_BIND_SERVICE can bind it. The proxy reads `net.ipv4.ip_unprivileged_port_start` at start-up rather than trusting the manifest, and refuses to serve unless it is above every port the sidecar binds below 1024. | `TestContainmentPortStart` |
+| The resolver is reachable from outside the pod, so another peer reads the sandbox's allowlist by asking it. | The listener binds each address family's loopback address and never a wildcard. | `TestListenBindsLoopbackOnBothTransports` |
+| A workload holds TCP connections to the resolver until the sidecar runs out of file descriptors. miekg/dns starts a goroutine per connection and holds it for the ten-second idle window, and the descriptors are the ones the frontends and the audit writer need. | `limits.max_dns_connections` caps the connections one resolver listener accepts, separately from `limits.max_connections`. Further accepts wait in the backlog. The resolver refuses to build without a cap. | `TestTheResolverCapsItsTCPConnections`, `TestNewRefusesAnUnusableResolver` |
+| A resolver forwards to itself, so every allowed name spends the budget and fails. | The proxy refuses a `dns.forward_to` entry that names its own listen address, and one that is a name rather than an address. | `TestNewRefusesAnUnusableResolver` |
 
 ### Decision process
 
@@ -321,10 +362,35 @@ pushes an image.
 - Traffic capture is not a security boundary. A workload that can reach the
   proxy uid escapes the redirect and the filter exclusion together. The
   workload securityContext closes that. See the netsetup ruleset surface.
-- DNS is an open channel out. The filter chain accepts UDP and TCP port 53 to
-  every resolver in `/etc/resolv.conf`, unconditionally and unread. A workload
-  can encode data in query names and read data back out of the answers. That
-  traffic reaches no endpoint rule and no audit record.
+- A name the allowlist refuses fails at the lookup rather than at the
+  connection. The workload sees "could not resolve host", not a 403 with
+  `X-Keycard-Deny-Reason`. The record holds the same reason code under
+  scope `dns`.
+- One lookup can write several records. A stub resolver with `ndots` set
+  tries each search domain before the absolute name, and each attempt is a
+  decision the resolver answers and records. In the e2e tests the pod's
+  search list holds three domains and `ndots` is 5, so one `curl` to an
+  allowed host writes four records: three refusals for the search-expanded
+  names and one allow. One `curl` to a host that resolves nowhere writes
+  eight, because a resolution that fails outright asks for both address
+  families on each of the four candidates. The cluster resolver would
+  also answer those attempts `NXDOMAIN`. The extra records do not change
+  any answer.
+- The name is the allowlist unit, not the query type. Any type resolves for
+  a name an endpoint declares, a `TXT` lookup included, and the answer is
+  whatever the zone's owner published. The endpoint is already reachable
+  over HTTPS through the proxy, and a lookup for it is recorded.
+- The resolver's connection cap is per listener. `limits.max_dns_connections`
+  bounds each of the resolver's TCP listeners, so a resolver bound on both
+  address families can hold twice that many. A connection answers at most
+  64 queries and closes after ten seconds idle. UDP has no cap. The
+  resolver, the frontends and the audit writer share the process's file
+  descriptor limit, so this cap and `limits.max_connections` count against
+  the same limit.
+- Anything listening on the pod loopback is reachable by the workload. The
+  filter chain accepts loopback, because that is where the redirect sends
+  the captured connections and the queries. A pod runs the proxy and the
+  workload and nothing else on that interface.
 - `ESTABLISHED` in OUTPUT is an open channel to any peer that opens a
   connection into the pod. It is the first accept in the filter chain of both
   families. An outbound flow reaches ESTABLISHED only after its own first

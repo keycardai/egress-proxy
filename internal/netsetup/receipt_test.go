@@ -2,6 +2,7 @@ package netsetup_test
 
 import (
 	"io/fs"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -66,6 +67,23 @@ func place(t *testing.T, receipt netsetup.Receipt) string {
 	return path
 }
 
+// TestTheReceiptNamesTheResolversTheSidecarForwardsTo checks that the
+// receipt records the cluster resolvers. The sidecar forwards to the
+// resolvers the receipt names.
+func TestTheReceiptNamesTheResolversTheSidecarForwardsTo(t *testing.T) {
+	t.Parallel()
+	cfg := netsetup.DefaultConfig()
+	cfg.DNSServers = []netip.Addr{netip.MustParseAddr("10.43.0.10"), netip.MustParseAddr("fd00::a")}
+	program, err := cfg.Program(netsetup.FamilyIPv4)
+	require.NoError(t, err, "build the ruleset")
+	written := netsetup.NewReceipt(cfg, []netsetup.Program{program}, true, now)
+
+	read, err := netsetup.ReadReceipt(place(t, written))
+	require.NoError(t, err, "read the receipt back")
+	assert.Equal(t, []string{"10.43.0.10", "fd00::a"}, read.DNSServers, "the resolvers the sidecar forwards to")
+	assert.Equal(t, netsetup.DefaultDNSPort, read.DNSPort, "the port the DNS redirect targets")
+}
+
 // TestRemoveReceiptLeavesNothingBehind proves the unlink a failed run
 // depends on. A receipt an earlier run left says the rules are in force when
 // they are not.
@@ -89,6 +107,10 @@ const wantReceiptJSON = `{
   "capture_ports": [
     80,
     443
+  ],
+  "dns_port": 53,
+  "dns_servers": [
+    "10.43.0.10"
   ],
   "families": [
     "ipv4",
@@ -116,8 +138,8 @@ func TestWriteReceipt(t *testing.T) {
 	syscall.Umask(int(umask))
 	receipt := netsetup.Receipt{
 		Version: 1, VerifiedAt: now, Verified: true, ProxyUID: 1337, RedirectPort: 1015,
-		CapturePorts: []int{80, 443}, Families: []string{"ipv4", "ipv6"},
-		RulesetDigest: "sha256:0123", CapabilitiesDropped: true,
+		CapturePorts: []int{80, 443}, DNSPort: 53, DNSServers: []string{"10.43.0.10"},
+		Families: []string{"ipv4", "ipv6"}, RulesetDigest: "sha256:0123", CapabilitiesDropped: true,
 		NetNamespace: &netsetup.NetNamespace{Device: 4, Inode: 4026532288},
 	}
 	tests := []struct {

@@ -133,7 +133,8 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 				"# resolvers from " + resolv + ": 10.43.0.10",
 				"-A EGRESS_PROXY_NAT_OUTPUT -m owner --uid-owner 1337 -j RETURN",
 				"-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015",
-				"-A EGRESS_PROXY_FILTER_OUTPUT -d 10.43.0.10 -p udp --dport 53 -j ACCEPT",
+				"-A EGRESS_PROXY_NAT_OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 53",
+				"-A EGRESS_PROXY_NAT_OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports 53",
 			},
 		},
 		{
@@ -154,9 +155,9 @@ func TestDryRunPrintsTheRuleset(t *testing.T) {
 			},
 		},
 		{
-			name: "resolvers named explicitly, which are not read from resolv.conf",
-			args: []string{"--dns-servers", "10.96.0.10"},
-			want: []string{"-A EGRESS_PROXY_FILTER_OUTPUT -d 10.96.0.10 -p udp --dport 53 -j ACCEPT"},
+			name: "another resolver port, which is where the sidecar's resolver listens",
+			args: []string{"--dns-port", "15353"},
+			want: []string{"-A EGRESS_PROXY_NAT_OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 15353"},
 		},
 	}
 	for _, tc := range tests {
@@ -223,7 +224,7 @@ func TestIPv6Modes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			opts := settings{
-				proxyUID: 1337, redirectPort: 1015, capturePorts: []string{"80,443"},
+				proxyUID: 1337, redirectPort: 1015, dnsPort: 53, capturePorts: []string{"80,443"},
 				dnsServers: []string{"10.43.0.10", "fd00::a"}, ipv6: tc.mode,
 			}
 			var out bytes.Buffer
@@ -247,7 +248,8 @@ func TestIPv6Modes(t *testing.T) {
 			case "proxy":
 				require.GreaterOrEqual(t, start, 0, "an ip6tables ruleset is printed")
 				assert.Contains(t, printed[start:], "-j REDIRECT --to-ports 1015", "IPv6 TCP is redirected")
-				assert.Contains(t, printed[start:], "-d fd00::a -p udp --dport 53 -j ACCEPT", "the IPv6 resolver is accepted")
+				assert.Contains(t, printed[start:], "-p udp --dport 53 -j REDIRECT --to-ports 53",
+					"IPv6 DNS is redirected to the sidecar's resolver")
 				assert.NotContains(t, printed, "every IPv6 packet this pod sends is dropped", "IPv6 is not denied")
 			case "deny":
 				require.GreaterOrEqual(t, start, 0, "an ip6tables ruleset is printed")
@@ -385,6 +387,7 @@ func verifyFixture(t *testing.T, receipt, run string) ([]string, familyTables) {
 	opts := settings{
 		proxyUID:     1337,
 		redirectPort: 1015,
+		dnsPort:      netsetup.DefaultDNSPort,
 		capturePorts: []string{"80,443"},
 		dnsServers:   []string{"10.43.0.10"},
 		ipv6:         "off",
