@@ -254,13 +254,10 @@ policy:
   # ranges, so runs on one host do not collide.
   deny_list_exceptions: ["192.168.0.0/16", "fd00:e9::/32"]
 endpoints:
-  - host: upstream.test
-    path_prefix: /allowed/
+  - url: https://upstream.test/allowed/
   # This endpoint on port 80 lets the connection decision allow cleartext.
   # The cleartext rule then refuses it instead of the endpoint match.
-  - host: upstream.test
-    port: 80
-    path_prefix: /allowed/
+  - url: http://upstream.test/allowed/
 
 -- probes/bindport.py --
 # Bind the redirect port as the workload uid. The port is below 1024, so the

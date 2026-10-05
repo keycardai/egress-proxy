@@ -114,7 +114,7 @@ func TestCapture(t *testing.T) {
 				require.NoError(t, netsetup.WriteReceipt(path, receipt), "write the receipt")
 			}
 			cfg, err := config.Parse([]byte("version: 1\nsandbox:\n  id: sbx-1\n"+tc.listen+
-				"netsetup:\n  receipt: "+path+"\nendpoints:\n  - host: pypi.org\n"), config.Overrides{})
+				"netsetup:\n  receipt: "+path+"\nendpoints:\n  - url: https://pypi.org/\n"), config.Overrides{})
 			require.NoError(t, err, "parse the document")
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))

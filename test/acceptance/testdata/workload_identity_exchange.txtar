@@ -10,7 +10,7 @@
 [!exec:curl] skip 'curl is not installed'
 
 upstream upstream
-fakeas zone https://granted.example/=zone-issued-sekrit
+fakeas zone https://localhost:$UPSTREAM_PORT/granted/=zone-issued-sekrit
 freeport PROXY_PORT
 shortdir ADMIN_DIR
 chmod 0777 $ADMIN_DIR
@@ -47,7 +47,7 @@ grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-i
 # The zone reads the ServiceAccount from the assertion and the user from the
 # substitute-user token. The client_id beside the assertion identifies the
 # application credential.
-grep 'exchange client=acceptance-app-credential actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
+grep 'exchange client=acceptance-app-credential actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=igmua2g0fwapl21qll7tczdw7t resource=https://localhost:[0-9]+/granted/ error=""' zone/requests.log
 
 sigterm
 wait proxy
@@ -90,7 +90,7 @@ stdout '^403$'
 # instead of issuing a credential for a user that this ServiceAccount cannot
 # impersonate.
 grep -count=1 '^request ' upstream/requests.log
-grep 'actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=someone-else resource=https://granted.example/ error="access_denied"' zone/requests.log
+grep 'actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=someone-else resource=https://localhost:[0-9]+/granted/ error="access_denied"' zone/requests.log
 
 sigterm
 wait wrongproxy
@@ -118,7 +118,7 @@ exec curl -sS --cacert forged-ca/ca.crt -o /dev/null -w '%{http_code}' https://l
 stdout '^502$'
 
 # The forged assertion names no actor, because nothing verified it.
-grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error="invalid_client"' zone/requests.log
+grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://localhost:[0-9]+/granted/ error="invalid_client"' zone/requests.log
 grep -count=1 '^request ' upstream/requests.log
 
 sigterm
@@ -136,10 +136,7 @@ identity:
 policy:
   deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
 endpoints:
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /granted/
-    resource: "https://granted.example/"
+  - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: GRANTED_TOKEN
@@ -154,10 +151,7 @@ identity:
 policy:
   deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
 endpoints:
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /granted/
-    resource: "https://granted.example/"
+  - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: GRANTED_TOKEN

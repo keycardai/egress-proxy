@@ -13,11 +13,17 @@ package acceptance_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	// net/http/cgi does not pass the Proxy request header to the child
+	// (Go issue 16405), so httpoxy (CVE-2016-5386) does not apply.
+	// .golangci.yml does not exempt tests from G504.
+	//nolint:gosec // G504: net/http/cgi drops the Proxy header, and this import is test-only
+	"net/http/cgi"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -79,6 +85,7 @@ func TestAcceptance(t *testing.T) {
 		Condition: condition,
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"upstream":  cmdUpstream,
+			"gitserver": cmdGitServer,
 			"fakeas":    cmdFakeAS,
 			"satoken":   cmdSAToken,
 			"expand":    cmdExpand,
@@ -135,6 +142,74 @@ func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
 	ts.Check(err)
 	ts.Setenv("UPSTREAM_PORT", port)
+}
+
+// gitProjectDir is the directory under a gitserver's DIR that holds the bare
+// repositories it serves. A scenario creates a repository in it with git.
+const gitProjectDir = "repos"
+
+// cmdGitServer starts a TLS git server for localhost in the test process:
+//
+//	gitserver DIR USER CREDENTIAL
+//
+// It serves the bare repositories under DIR/repos with git-http-backend,
+// the server git ships, run over CGI. It answers 401 to any request whose
+// Authorization is not the Basic credentials of USER and CREDENTIAL, the
+// way a forge answers a token it does not know. It writes its CA
+// certificate to DIR/ca.crt, appends one line per request to
+// DIR/requests.log, and exports its port as $UPSTREAM_PORT. It stops when
+// the script ends.
+func cmdGitServer(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 3 {
+		ts.Fatalf("usage: gitserver DIR USER CREDENTIAL")
+	}
+	dir := ts.MkAbs(args[0])
+	root := filepath.Join(dir, gitProjectDir)
+	ts.Check(os.MkdirAll(root, 0o750))
+	authority, err := ca.New(ca.Options{CommonName: "acceptance git CA"})
+	ts.Check(err)
+	leaf, err := authority.Leaf("localhost")
+	ts.Check(err)
+	_, err = authority.WriteCertificate(dir)
+	ts.Check(err)
+	requests, err := os.OpenFile(filepath.Join(dir, "requests.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	ts.Check(err)
+	execPath, err := exec.CommandContext(context.Background(), "git", "--exec-path").Output()
+	ts.Check(err)
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte(args[1]+":"+args[2]))
+
+	server := httptest.NewUnstartedServer(gitHandler(requests, strings.TrimSpace(string(execPath)), root, want))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	ts.Defer(func() {
+		server.Close()
+		_ = requests.Close()
+	})
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	ts.Check(err)
+	ts.Setenv("UPSTREAM_PORT", port)
+}
+
+// gitHandler logs every request and hands the authenticated ones to
+// git-http-backend.
+func gitHandler(requests io.Writer, execPath, root, want string) http.HandlerFunc {
+	backend := &cgi.Handler{
+		Path: filepath.Join(execPath, "git-http-backend"),
+		// The repositories hold no secret and the proxy decides who reaches
+		// them, so the backend exports every one it is given.
+		Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"},
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		fmt.Fprintf(requests, "request %s %s host=%s authorization=%q\n",
+			r.Method, r.URL.RequestURI(), r.Host, got)
+		if got != want {
+			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		backend.ServeHTTP(w, r)
+	}
 }
 
 // These are the client values that the fake authorization server knows. A

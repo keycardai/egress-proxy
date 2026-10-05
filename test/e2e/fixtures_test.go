@@ -41,7 +41,7 @@ const (
 	zoneHost        = "zone." + namespace + ".svc.cluster.local"
 	upstreamHost    = "upstream." + namespace + ".svc.cluster.local"
 	deniedHost      = "denied." + namespace + ".svc.cluster.local"
-	grantedResource = "https://" + upstreamHost + "/"
+	grantedResource = "https://" + upstreamHost + "/headers"
 	//nolint:gosec // G101: the credential the fake zone issues, which is a fixture value
 	zoneCredential  = "e2e-zone-issued-credential"
 	fixtureCAConfig = "fixture-ca"

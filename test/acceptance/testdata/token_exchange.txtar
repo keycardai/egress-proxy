@@ -9,7 +9,7 @@
 [!exec:curl] skip 'curl is not installed'
 
 upstream upstream
-fakeas zone https://granted.example/=zone-issued-sekrit
+fakeas zone https://localhost:$UPSTREAM_PORT/granted/=zone-issued-sekrit
 freeport PROXY_PORT
 shortdir ADMIN_DIR
 
@@ -69,8 +69,8 @@ grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-i
 grep -count=1 '^request ' upstream/requests.log
 
 # The two matched endpoints made exactly two exchanges at the zone.
-grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://granted.example/ error=""' zone/requests.log
-grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://refused.example/ error="access_denied"' zone/requests.log
+grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://localhost:[0-9]+/granted/ error=""' zone/requests.log
+grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://localhost:[0-9]+/refused/ error="access_denied"' zone/requests.log
 grep -count=2 '^exchange ' zone/requests.log
 
 sigterm
@@ -127,17 +127,11 @@ identity:
 policy:
   deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
 endpoints:
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /granted/
-    resource: "https://granted.example/"
+  - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: GRANTED_TOKEN
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /refused/
-    resource: "https://refused.example/"
+  - url: https://localhost:$UPSTREAM_PORT/refused/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: REFUSED_TOKEN
@@ -154,10 +148,7 @@ limits:
 policy:
   deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
 endpoints:
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /granted/
-    resource: "https://granted.example/"
+  - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: GRANTED_TOKEN

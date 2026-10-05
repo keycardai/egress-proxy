@@ -1,6 +1,7 @@
 package credential_test
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,7 +21,19 @@ const (
 	// and "+" becomes "%2B".
 	escapedSecret = "a b=c+d"
 	escapedForm   = "a+b%3Dc%2Bd"
+	// basicUser is the user name GitHub expects a minted token to arrive
+	// under, and the user every basic case here names.
+	basicUser = "x-access-token"
+	// workloadPassword is what a workload puts in a clone URL. It must not
+	// reach the outbound request line or the Authorization header.
+	workloadPassword = "hunter2"
 )
+
+// basicHeader is the Authorization value a basic placement for basicUser
+// writes for a credential.
+func basicHeader(user, secret string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+secret))
+}
 
 // request builds an outbound request the way the reverse proxy hands one to
 // the rewrite: a target with its query, and the headers the workload sent.
@@ -43,12 +56,17 @@ func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 		Kind: credential.KindHeader, Name: "Authorization", Template: "Bearer " + credential.Token,
 	}
 	query := credential.Placement{Kind: credential.KindQuery, Name: "key"}
+	basic := credential.Placement{Kind: credential.KindBasic, User: basicUser}
 	tests := []struct {
 		name      string
 		placement credential.Placement
 		target    string
 		header    http.Header
 		wantQuery string
+		// wantUserinfo is the userinfo left on the outbound request line.
+		// It is empty in every case. Only the basic cases send userinfo, and
+		// the basic writer removes it.
+		wantUserinfo string
 		// wantHeader is the whole outbound value list under the placement
 		// name, or under checkHeader when the placement writes no header.
 		checkHeader string
@@ -104,6 +122,34 @@ func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 			checkHeader: "Authorization", wantHeader: []string{"Bearer placeholder"},
 		},
 		{
+			name: "a basic placement the workload sent nothing for", placement: basic,
+			target:      "/repo.git/info/refs?service=git-upload-pack",
+			wantQuery:   "service=git-upload-pack",
+			checkHeader: "Authorization", wantHeader: []string{basicHeader(basicUser, secret)},
+		},
+		{
+			name: "a basic placement over the Authorization the workload sent", placement: basic,
+			target:      "/repo.git/git-receive-pack",
+			header:      http.Header{"Authorization": []string{basicHeader("someone", "their-password")}},
+			checkHeader: "Authorization", wantHeader: []string{basicHeader(basicUser, secret)},
+		},
+		{
+			name: "a request line naming a user", placement: basic,
+			target:      "https://alice@git.example/repo.git",
+			checkHeader: "Authorization", wantHeader: []string{basicHeader(basicUser, secret)},
+		},
+		{
+			name: "a request line naming a user and a password", placement: basic,
+			target:      "https://alice:" + workloadPassword + "@git.example/repo.git",
+			checkHeader: "Authorization", wantHeader: []string{basicHeader(basicUser, secret)},
+		},
+		{
+			name: "a basic placement leaves every other header alone", placement: basic,
+			target:      "/repo.git/info/refs",
+			header:      http.Header{"Accept": []string{"application/x-git-upload-pack-advertisement"}},
+			checkHeader: "Accept", wantHeader: []string{"application/x-git-upload-pack-advertisement"},
+		},
+		{
 			name:      "a query that does not parse keeps the bytes the workload sent",
 			placement: query, target: "/geocode?q=here&bad=%zz",
 			wantQuery: "q=here&bad=%zz", wantErr: "the request query does not parse",
@@ -128,6 +174,11 @@ func TestWriterReplacesWhatTheWorkloadSent(t *testing.T) {
 				assert.NotContains(t, err.Error(), secret, "the message quotes the credential")
 			}
 			assert.Equal(t, tc.wantQuery, out.URL.RawQuery, "the outbound query")
+			var userinfo string
+			if out.URL.User != nil {
+				userinfo = out.URL.User.String()
+			}
+			assert.Equal(t, tc.wantUserinfo, userinfo, "the userinfo on the outbound request line")
 			name := tc.checkHeader
 			if name == "" {
 				name = tc.placement.Name
@@ -147,9 +198,19 @@ func TestNewWriterRefusals(t *testing.T) {
 		wantErr   string
 	}{
 		{
-			name:      "a basic placement, which this build does not write",
-			placement: credential.Placement{Kind: credential.KindBasic, User: "x-access-token"},
-			wantErr:   "does not write a basic placement",
+			name:      "a basic placement naming no user",
+			placement: credential.Placement{Kind: credential.KindBasic},
+			wantErr:   "the basic placement names no user",
+		},
+		{
+			name:      "a basic placement whose user holds a colon",
+			placement: credential.Placement{Kind: credential.KindBasic, User: "alice:hunter2"},
+			wantErr:   "a basic placement user must not contain a colon or a control character",
+		},
+		{
+			name:      "a basic placement whose user would split the request head",
+			placement: credential.Placement{Kind: credential.KindBasic, User: "alice\r\nX-Injected: 1"},
+			wantErr:   "a basic placement user must not contain a colon or a control character",
 		},
 		{
 			name:      "a kind no build writes",
@@ -298,10 +359,17 @@ func TestValidate(t *testing.T) {
 func TestRedact(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		text       string
+		name string
+		text string
+		// placement is the placement whose wire forms Redact covers. The
+		// zero value names no kind, and its wire form is the credential
+		// itself.
+		placement  credential.Placement
 		credential string
-		want       string
+		// noSecrets drives the call a forward with no credential makes. The
+		// slice is nil and Redact has nothing to cover.
+		noSecrets bool
+		want      string
 	}{
 		{
 			name: "a credential whose escaped form is itself",
@@ -318,6 +386,10 @@ func TestRedact(t *testing.T) {
 			want: "dial tcp 127.0.0.1:1: refused",
 		},
 		{name: "no credential leaves the text alone", text: "anything", credential: "", want: "anything"},
+		{
+			name: "no secrets at all leaves the text alone", text: "dial tcp 127.0.0.1:1: refused",
+			noSecrets: true, want: "dial tcp 127.0.0.1:1: refused",
+		},
 		{
 			name:       "a credential in the raw form a header placement writes",
 			text:       `Post "https://api.example/": header "Bearer ` + escapedSecret + `" rejected`,
@@ -340,11 +412,29 @@ func TestRedact(t *testing.T) {
 			text:       "key=" + escapedForm,
 			credential: escapedSecret, want: "key=[redacted]",
 		},
+		{
+			name:       "the base64 a basic placement writes, which holds none of the credential bytes",
+			text:       `Get "https://git.example/repo.git": ` + basicHeader(basicUser, secret) + " rejected",
+			placement:  credential.Placement{Kind: credential.KindBasic, User: basicUser},
+			credential: secret,
+			want:       `Get "https://git.example/repo.git": Basic [redacted] rejected`,
+		},
+		{
+			name:       "the credential itself under a basic placement",
+			text:       "resource https://git.example/: " + secret + " rejected",
+			placement:  credential.Placement{Kind: credential.KindBasic, User: basicUser},
+			credential: secret,
+			want:       "resource https://git.example/: [redacted] rejected",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, credential.Redact(tc.text, tc.credential), "Redact")
+			var forms []string
+			if !tc.noSecrets {
+				forms = credential.WireForms(tc.placement, tc.credential)
+			}
+			assert.Equal(t, tc.want, credential.Redact(tc.text, forms), "Redact")
 		})
 	}
 }

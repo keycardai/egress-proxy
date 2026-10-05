@@ -114,7 +114,7 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 		}
 		if !normalizedPath(endpoint.PathPrefix) {
 			problems = append(problems, fmt.Sprintf(
-				"endpoints[%d]: path_prefix %q must be an absolute path in its shortest form",
+				"endpoints[%d]: path prefix %q must be an absolute path in its shortest form",
 				i, endpoint.PathPrefix,
 			))
 			continue
@@ -127,7 +127,7 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 		}
 		if previous, ok := seen[endpoint.ID()]; ok {
 			problems = append(problems, fmt.Sprintf(
-				"endpoints[%d]: host %q on port %d with path_prefix %q repeats endpoints[%d]",
+				"endpoints[%d]: host %q on port %d with path prefix %q repeats endpoints[%d]",
 				i, endpoint.Host, endpoint.Port, endpoint.PathPrefix, previous,
 			))
 			continue

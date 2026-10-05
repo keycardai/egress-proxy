@@ -177,8 +177,7 @@ policy:
   # covers. Each run draws its subnet from inside these two ranges.
   deny_list_exceptions: ["192.168.0.0/16", "fd00:e9::/32"]
 endpoints:
-  - host: upstream.test
-    path_prefix: /allowed/
+  - url: https://upstream.test/allowed/
 
 -- probes/get.py --
 # One request with python-requests and no proxy configured.

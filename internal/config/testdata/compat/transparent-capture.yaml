@@ -12,4 +12,4 @@ listen:
 netsetup:
   receipt: "/run/egress/netsetup.json"
 endpoints:
-  - host: api.github.com
+  - url: https://api.github.com/

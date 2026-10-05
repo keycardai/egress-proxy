@@ -258,10 +258,12 @@ type forward struct {
 	// requestID is the id on the record for this request. A refusal the
 	// reverse proxy answers names it, so every deny names a record.
 	requestID string
-	// writer and secret are the endpoint's credential and where it goes.
-	// Both are empty for an endpoint that names none.
-	writer credential.Writer
-	secret string
+	// secret is the endpoint's credential and writer is where it goes. Both
+	// are empty for an endpoint that names none. wireForms are the secrets
+	// redact covers, from credential.WireForms.
+	writer    credential.Writer
+	secret    string
+	wireForms []string
 	// writeErr is what the credential writer reported. The round trip
 	// refuses a forward that has one.
 	writeErr error
@@ -273,6 +275,20 @@ type forward struct {
 	// status is the status the upstream answered, set before the response
 	// is written.
 	status int
+}
+
+// setCredential puts the endpoint credential on the forward together with
+// every form the placement puts on the wire. Set the two together so that
+// redact always covers what the writer sends.
+func (f *forward) setCredential(writer credential.Writer, placement credential.Placement, secret string) {
+	f.writer, f.secret = writer, secret
+	f.wireForms = credential.WireForms(placement, secret)
+}
+
+// redact replaces every wire form of the endpoint credential in text. Text
+// that reaches a log line or an audit record goes through it.
+func (f *forward) redact(text string) string {
+	return credential.Redact(text, f.wireForms)
 }
 
 type forwardKey struct{}
@@ -348,13 +364,13 @@ func (s *Server) emitForwarded(
 	case fwd.denied:
 		record.Decision.Verdict = policy.VerdictDeny
 		record.Decision.Reason = fwd.denyReason
-		record.Decision.Error = credential.Redact(fwd.err.Error(), fwd.secret)
+		record.Decision.Error = fwd.redact(fwd.err.Error())
 	case fwd.err != nil:
 		record.Decision.Verdict = policy.VerdictDeny
 		record.Decision.Reason = policy.ReasonUpstreamFailed
-		record.Outcome.Error = credential.Redact(fwd.err.Error(), fwd.secret)
+		record.Outcome.Error = fwd.redact(fwd.err.Error())
 	case recovered != nil:
-		record.Outcome.Error = credential.Redact(panicOutcome(recovered, r.Context().Err()), fwd.secret)
+		record.Outcome.Error = fwd.redact(panicOutcome(recovered, r.Context().Err()))
 	}
 	s.opts.Audit.Emit(record)
 }
@@ -444,10 +460,12 @@ func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint
 	if err != nil {
 		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
 	}
+	// Attach the secret as soon as it exists, so redact covers every failure
+	// after this point. A forward the proxy denies never reaches the writer.
+	fwd.setCredential(writer, *endpoint.Credential, secret)
 	if err := credential.Validate(secret); err != nil {
 		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
 	}
-	fwd.writer, fwd.secret = writer, secret
 	return nil
 }
 
@@ -462,6 +480,10 @@ func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 	fwd := forwardFrom(proxied.In.Context())
 	proxied.Out.URL.Scheme = "https"
 	proxied.Out.URL.Host = net.JoinHostPort(fwd.host, strconv.Itoa(fwd.port))
+	// NEVER leave userinfo on an outbound request. The password in it belongs
+	// to the workload, so no redactor covers it, and text formatted from the
+	// URL would print it.
+	proxied.Out.URL.User = nil
 	proxied.Out.Host = proxied.In.Host
 	if fwd.writer == nil {
 		return
@@ -472,7 +494,7 @@ func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 		fwd.writeErr = err
 		s.logger.Warn("the credential was not written, so the request is refused",
 			slog.String("request_id", fwd.requestID),
-			slog.String("error", credential.Redact(err.Error(), fwd.secret)))
+			slog.String("error", fwd.redact(err.Error())))
 	}
 }
 

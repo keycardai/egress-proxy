@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -26,6 +28,13 @@ import (
 	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
+
+// queryKeyPlacement is a placement the redaction tests share. A query
+// placement puts the credential on the wire in its own bytes, so the record
+// text a case builds holds the credential itself.
+var queryKeyPlacement = credential.Placement{ //nolint:gochecknoglobals // a fixture the tests share
+	Kind: credential.KindQuery, Name: "key",
+}
 
 // recordingSink collects the records a test emits.
 type recordingSink struct {
@@ -373,6 +382,57 @@ func TestInflightWaitJoins(t *testing.T) {
 	}
 }
 
+// TestRewriteClearsTheUserinfo pins the invariant that no outbound request
+// keeps the userinfo the workload put in the request line, whatever the
+// endpoint names. The basic writer clears it too. This test covers the
+// placements that do not write an Authorization header, and an endpoint with
+// no credential.
+func TestRewriteClearsTheUserinfo(t *testing.T) {
+	t.Parallel()
+	const secret = "query-sekrit" //nolint:gosec // G101: a test fixture, not a credential
+	tests := []struct {
+		name      string
+		placement credential.Placement
+		// noCredential drives an endpoint the document gave no credential,
+		// which reaches rewrite with no writer.
+		noCredential bool
+	}{
+		{
+			name: "a header placement",
+			placement: credential.Placement{
+				Kind: credential.KindHeader, Name: "Authorization", Template: "Bearer " + credential.Token,
+			},
+		},
+		{name: "a query placement", placement: queryKeyPlacement},
+		{name: "a basic placement", placement: credential.Placement{Kind: credential.KindBasic, User: "x-access-token"}},
+		{name: "an endpoint with no credential", noCredential: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := handshakeServer(t, &bytes.Buffer{}, time.Minute, &recordingSink{})
+			fwd := &forward{host: allowedHost, port: 443, requestID: "req-1"}
+			if !tc.noCredential {
+				writer, err := credential.NewWriter(tc.placement)
+				require.NoError(t, err, "NewWriter")
+				fwd.setCredential(writer, tc.placement, secret)
+			}
+			in := httptest.NewRequestWithContext(
+				context.WithValue(t.Context(), forwardKey{}, fwd),
+				http.MethodGet, "https://"+allowedHost+"/repo.git?q=here", nil,
+			)
+			in.URL.User = url.UserPassword("alice", "hunter2")
+			out := in.Clone(in.Context())
+			require.NotNil(t, out.URL.User, "the case must start with userinfo on the outbound request")
+
+			server.rewrite(&httputil.ProxyRequest{In: in, Out: out})
+
+			assert.Nil(t, out.URL.User, "the userinfo on the outbound request line")
+			assert.NotContains(t, out.URL.String(), "hunter2", "the outbound URL holds the workload password")
+		})
+	}
+}
+
 // textError is an error whose text is exactly what a case gives it, so a
 // case can put a credential in the middle of it.
 type textError string
@@ -392,11 +452,22 @@ func TestEmitForwardedRedactsTheCredential(t *testing.T) {
 	escapedText := `Get "https://maps.example/geocode?key=` + escaped + `": refused`
 	const wantText = `Get "https://maps.example/geocode?key=` + credential.Marker + `": refused`
 
+	// The raw credential does not appear in its basic form, so a record
+	// holding the basic form is redacted only when the forward knows it.
+	basicPlacement := credential.Placement{Kind: credential.KindBasic, User: "x-access-token"}
+	basicText := `Get "https://git.example/repo.git": Basic ` +
+		base64.StdEncoding.EncodeToString([]byte(basicPlacement.User+":"+secret)) + " refused"
+	const wantBasicText = `Get "https://git.example/repo.git": Basic ` + credential.Marker + " refused"
+
+	withSecret := func(fwd *forward, placement credential.Placement) *forward {
+		fwd.setCredential(nil, placement, secret)
+		return fwd
+	}
 	deniedError := func(text string) *forward {
-		return &forward{secret: secret, denied: true, err: textError(text)}
+		return withSecret(&forward{denied: true, err: textError(text)}, queryKeyPlacement)
 	}
 	upstreamError := func(text string) *forward {
-		return &forward{secret: secret, err: textError(text)}
+		return withSecret(&forward{err: textError(text)}, queryKeyPlacement)
 	}
 	tests := []struct {
 		name      string
@@ -423,14 +494,19 @@ func TestEmitForwardedRedactsTheCredential(t *testing.T) {
 			field: outcomeError, want: wantText,
 		},
 		{
-			name: "a panic in the handler, raw", fwd: &forward{secret: secret},
+			name: "a panic in the handler, raw", fwd: withSecret(&forward{}, queryKeyPlacement),
 			recovered: textError(rawText),
 			field:     outcomeError, want: "the handler panicked: " + wantText,
 		},
 		{
-			name: "a panic in the handler, query escaped", fwd: &forward{secret: secret},
+			name: "a panic in the handler, query escaped", fwd: withSecret(&forward{}, queryKeyPlacement),
 			recovered: escapedText,
 			field:     outcomeError, want: "the handler panicked: " + wantText,
+		},
+		{
+			name:  "an upstream failure naming the basic credentials",
+			fwd:   withSecret(&forward{err: textError(basicText)}, basicPlacement),
+			field: outcomeError, want: wantBasicText,
 		},
 	}
 	for _, tc := range tests {
@@ -521,10 +597,8 @@ func TestAFailedCredentialWriteDenies(t *testing.T) {
 			upstream := &countingRoundTripper{}
 			server.reverse.Transport = refuseUnwritten{next: upstream}
 
-			fwd := &forward{
-				host: allowedHost, port: 443, requestID: "req-1",
-				writer: tc.writer, secret: secret,
-			}
+			fwd := &forward{host: allowedHost, port: 443, requestID: "req-1"}
+			fwd.setCredential(tc.writer, queryKeyPlacement, secret)
 			request := httptest.NewRequestWithContext(
 				context.WithValue(t.Context(), forwardKey{}, fwd),
 				http.MethodGet, "https://"+allowedHost+"/geocode?q=here", nil,

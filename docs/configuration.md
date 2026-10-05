@@ -247,7 +247,7 @@ change. The file uses this format:
 ```yaml
 version: 1
 credentials:
-  - resource: "https://api.github.com/"
+  - resource: "https://api.github.com"
     value: "<the credential>"
 ```
 
@@ -304,11 +304,16 @@ connections and requests.
 
 | Key | Default | Description |
 |---|---|---|
-| `host` | required | A DNS name without a scheme, port, path, or wildcard. Labels hold ASCII letters, digits and hyphens, and the last label is not all digits. The proxy matches the name case-insensitively against the SNI. It rejects an IP literal, because a TLS client sends no SNI for one, and it rejects an address written another way, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. Write an internationalized name as its A-label, the `xn--` punycode form. RFC 6066 section 3 requires the SNI to be ASCII, so a host holding non-ASCII characters never matches what a client sends. |
-| `port` | `443` | The one port this endpoint covers on that host. A host reachable on two ports is two endpoints, which also gives each one its own prefix and credential. A CONNECT to any other port on the host is rejected with `no_matching_endpoint`, the same reason an unlisted host gets, because a destination the document does not declare is absent whichever part of it differs. |
-| `path_prefix` | `/` | An absolute path in its shortest form. `/` covers every path. A prefix that ends in `/` covers everything below it. Any other prefix covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching prefix decides. Write the prefix as it appears on the wire: the proxy compares it against the escaped path, so a prefix holding a character a client always escapes, such as a space, is rejected because it could never match. |
-| `resource` | `https://<host>/` | The resource identifier that the proxy sends to token exchange. Use an absolute `https` URL without user information, a query, or a fragment. Two endpoints can share one resource. |
+| `url` | required | The endpoint, as `https://host[:port][/path]` or `http://host[:port][/path]`. The proxy reads the host, the port and the path prefix from it, and sends its canonical form to token exchange as the resource. It must not hold user information, a query or a fragment. |
 | `credential` | unset | Defines where the proxy puts a credential and which placeholder the workload holds. See `endpoints[].credential`. |
+
+**Host.** A DNS name without a wildcard. Labels hold ASCII letters, digits and hyphens, and the last label is not all digits. The proxy matches the name case-insensitively against the SNI. It rejects an IP literal, because a TLS client sends no SNI for one, and it rejects an address written another way, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. Write an internationalized name as its A-label, the `xn--` punycode form. RFC 6066 section 3 requires the SNI to be ASCII, so a host holding non-ASCII characters never matches what a client sends.
+
+**Port.** The scheme's port, 443 for `https` and 80 for `http`, unless the URL names another. An endpoint covers one port. A host reachable on two ports is two endpoints, which also gives each one its own prefix and credential. A CONNECT to any other port on the host is rejected with `no_matching_endpoint`, the same reason an unlisted host gets.
+
+**Path.** `/` when the URL has none, and `/` covers every path. A path that ends in `/` covers everything below it. Any other path covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching path decides. Write the path as it appears on the wire: the proxy compares it against the escaped path, so a path holding a character a client always escapes, such as a space, is rejected because it could never match.
+
+**Resource.** The canonical form of the URL: the scheme and host in lowercase, no trailing dot, no port when it is the scheme default, and sub-path as written.
 
 The proxy decides on the escaped path, the bytes it forwards upstream. An
 escaped character is not a separator, so `/a%2Fb` is one segment named `a/b`
@@ -317,11 +322,13 @@ escaped or decoded form holds dot segments, so `/api/%2e%2e/secret`, which
 an upstream that decodes first reads as `/secret`, is rejected with
 `malformed_request`.
 
-Two endpoints with the same `host`, `port` and `path_prefix` are rejected.
-The same host and prefix on two ports are two endpoints, not a repeat.
+Two endpoints whose URLs name the same host, port and path are rejected. The
+same host and path on two ports are two endpoints, not a repeat.
 The proxy forwards nothing cleartext. A cleartext `http://` request is
-rejected with `cleartext_not_forwarded`, and declaring the host on port 80
-does not change that.
+rejected with `cleartext_not_forwarded`, and an `http://` endpoint does not
+change that. An `http://` endpoint lets the connection to port 80 through,
+so the request is refused with `cleartext_not_forwarded` instead of
+`no_matching_endpoint`. An `http://` endpoint cannot hold a credential.
 
 #### `endpoints[].credential`
 
@@ -331,14 +338,16 @@ does not change that.
 | `placement.kind` | `header`, `query`, or `basic`. |
 | `placement.name` | For `header`, the header name. For `query`, the parameter name. |
 | `placement.template` | For `header`, the value with `{credential}` where the proxy puts the credential, such as `Bearer {credential}`. |
-| `placement.user` | For `basic`, the user name. The credential becomes the password. |
+| `placement.user` | For `basic`, the user name. The credential becomes the password. It must not contain a colon or a control character. |
 
 A placement tells the proxy where to write the credential. The placement wins
 over any value that the workload sent there. The proxy also writes the
 credential when the workload sent nothing. A header placement replaces every
 value under that header name. A query placement replaces every value under
 that parameter name and re-encodes the query. The request then leaves with
-its parameters sorted by name.
+its parameters sorted by name. A basic placement replaces every value under
+`Authorization` with `Basic base64(user:credential)`, as RFC 7617 section 2
+writes it.
 
 A header placement cannot name these headers, whatever their case. The proxy
 refuses the document at start-up, and the writer refuses the same names.
@@ -352,12 +361,16 @@ refuses the document at start-up, and the writer refuses the same names.
 
 The proxy allows `Authorization`, which most endpoints use.
 
-The proxy supports the `header` and `query` placements. A request to an
-endpoint with a `basic` placement is denied with `credential_unavailable`,
-and so is a request that the credential source cannot answer. A placement
-If the writer cannot write a placement, the request is denied with the same
-reason before the proxy dials. The proxy never forwards the workload
-placeholder to a credentialed endpoint.
+A basic placement also removes any userinfo from the request line. The
+document names the user and the credential is the password. A user or
+password in a clone URL has no effect on what the proxy sends. Use a basic
+placement for git over HTTPS. The sandbox does not need a credential
+helper.
+
+A request that the credential source cannot answer is denied with
+`credential_unavailable`. If the writer cannot write a placement, the request
+is denied with the same reason before the proxy dials. The proxy never
+forwards the workload placeholder to a credentialed endpoint.
 
 The proxy writes the credential after it removes the hop-by-hop headers that
 the workload named in `Connection`. A workload cannot name the placement
@@ -382,7 +395,7 @@ identifies a captured connection in the audit stream.
 
 | Reason | Verdict | Scope | Meaning |
 |---|---|---|---|
-| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus `path_prefix`. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never gets an allow. |
+| `endpoint_allowed` | allow | both | An endpoint matched. A request record names it in `decision.endpoint`, as `host:port` plus the URL path. The port is always written, so one shape parses every id. A connection record names none, because no path took part in that decision. A connection record is written once the tunnel is established, so it also names the SNI, and a connection the handshake refused never gets an allow. |
 | `deny_always` | deny | both | The host is on the platform deny list, or it resolved into a covered range at dial time. |
 | `no_matching_endpoint` | deny | both | No endpoint covers the destination: none names the host, one does and none names the port, or one does and none covers the path. Read `scope` to tell those apart. |
 | `cleartext_not_forwarded` | deny | both | The connection or request sends cleartext HTTP. The proxy forwards nothing cleartext, so an endpoint that covers the host on that port does not make the destination reachable. Change the client to `https://`. A host on the deny list is refused with `deny_always` instead, and a host no endpoint covers with `no_matching_endpoint`. |
@@ -391,7 +404,7 @@ identifies a captured connection in the audit stream.
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
-| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
+| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
 | `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it refused the exchange for a reason that is not its policy, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |

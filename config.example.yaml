@@ -61,24 +61,18 @@ policy:
   deny_list_exceptions: []                          # announced on every start; never 169.254.169.254
 
 endpoints:
-  - host: "api.github.com"
-    resource: "https://api.github.com/"             # the exchange's resource parameter
+  - url: "https://api.github.com/"                # host, port and path; also the exchange's resource
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: GITHUB_TOKEN
-  - host: "github.com"                              # git over HTTPS
-    resource: "https://api.github.com/"
+  - url: "https://github.com/"                    # git over HTTPS
     credential:
       placement: {kind: basic, user: x-access-token}
       env: GITHUB_TOKEN
-  - host: "openrouter.ai"
-    path_prefix: "/api/v1/"
-    resource: "https://openrouter.ai/api/v1"
+  - url: "https://openrouter.ai/api/v1"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: OPENROUTER_API_KEY
-  - host: "pypi.org"                                # allowed, no credential
-  - host: "files.pythonhosted.org"
-  - host: "registry.internal"                       # a second port is a second endpoint
-    port: 5000
-    path_prefix: "/v2/"
+  - url: "https://pypi.org/"                      # allowed, no credential
+  - url: "https://files.pythonhosted.org/"
+  - url: "https://registry.internal:5000/v2/"   # a second port is a second endpoint

@@ -11,6 +11,7 @@ package credential
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -108,33 +109,62 @@ func BannedHeaderName(name string) bool {
 	}
 }
 
-// NewWriter returns the writer for a placement. It refuses a placement this
-// build cannot write, which denies the request with credential_unavailable.
+// ValidBasicUser reports whether user can be the user name of a basic
+// placement. RFC 7617 section 2 reads the user name up to the first colon of
+// the decoded pair, so a colon would split the user name. A header value
+// cannot contain a control character.
+func ValidBasicUser(user string) bool {
+	return user != "" && !strings.ContainsRune(user, ':') && strings.IndexFunc(user, isControl) < 0
+}
+
+// NewWriter returns the writer for a placement. An error from it denies the
+// request with credential_unavailable.
 //
 //nolint:ireturn // polymorphism intended
 func NewWriter(placement Placement) (Writer, error) {
 	switch placement.Kind {
 	case KindHeader:
-		if !httpguts.ValidHeaderFieldName(placement.Name) {
-			return nil, fmt.Errorf("%w: %q is not a header name", errPlacement, placement.Name)
-		}
-		if BannedHeaderName(placement.Name) {
-			return nil, fmt.Errorf("%w: a header placement cannot name %q", errPlacement, placement.Name)
-		}
-		if !strings.Contains(placement.Template, Token) {
-			return nil, fmt.Errorf("%w: the header template holds no %s", errPlacement, Token)
-		}
-		return headerWriter{name: placement.Name, template: placement.Template}, nil
+		return newHeaderWriter(placement)
 	case KindQuery:
-		if placement.Name == "" {
-			return nil, fmt.Errorf("%w: the query placement names no parameter", errPlacement)
-		}
-		return queryWriter{name: placement.Name}, nil
+		return newQueryWriter(placement)
 	case KindBasic:
-		return nil, fmt.Errorf("%w: this build does not write a %s placement", errPlacement, placement.Kind)
+		return newBasicWriter(placement)
 	default:
 		return nil, fmt.Errorf("%w: %q is not a placement kind", errPlacement, placement.Kind)
 	}
+}
+
+//nolint:ireturn // polymorphism intended
+func newHeaderWriter(placement Placement) (Writer, error) {
+	if !httpguts.ValidHeaderFieldName(placement.Name) {
+		return nil, fmt.Errorf("%w: %q is not a header name", errPlacement, placement.Name)
+	}
+	if BannedHeaderName(placement.Name) {
+		return nil, fmt.Errorf("%w: a header placement cannot name %q", errPlacement, placement.Name)
+	}
+	if !strings.Contains(placement.Template, Token) {
+		return nil, fmt.Errorf("%w: the header template holds no %s", errPlacement, Token)
+	}
+	return headerWriter{name: placement.Name, template: placement.Template}, nil
+}
+
+//nolint:ireturn // polymorphism intended
+func newQueryWriter(placement Placement) (Writer, error) {
+	if placement.Name == "" {
+		return nil, fmt.Errorf("%w: the query placement names no parameter", errPlacement)
+	}
+	return queryWriter{name: placement.Name}, nil
+}
+
+//nolint:ireturn // polymorphism intended
+func newBasicWriter(placement Placement) (Writer, error) {
+	if placement.User == "" {
+		return nil, fmt.Errorf("%w: the basic placement names no user", errPlacement)
+	}
+	if !ValidBasicUser(placement.User) {
+		return nil, fmt.Errorf("%w: a basic placement user must not contain a colon or a control character", errPlacement)
+	}
+	return basicWriter{user: placement.User}, nil
 }
 
 // headerWriter sets one header to the template with the credential in it.
@@ -171,6 +201,23 @@ func (w queryWriter) Write(out *http.Request, credential string) error {
 	return nil
 }
 
+// basicWriter sets Authorization to the RFC 7617 credentials of the
+// placement user and the credential.
+type basicWriter struct {
+	user string
+}
+
+// Write replaces every Authorization value the workload sent and removes the
+// userinfo from the request line.
+//
+// The placement names the user and the credential is the password.
+// Userinfo in the request line has no effect on what the proxy sends.
+func (w basicWriter) Write(out *http.Request, credential string) error {
+	out.URL.User = nil
+	out.SetBasicAuth(w.user, credential)
+	return nil
+}
+
 // Validate refuses a credential the proxy cannot put into a request. A
 // control character in a header value splits the head, and an empty
 // credential authenticates nothing.
@@ -188,14 +235,37 @@ func isControl(r rune) bool {
 	return r < 0x20 || r == 0x7f
 }
 
-// Redact replaces every occurrence of the credential in text with Marker.
-// A query placement percent-encodes the credential into the URL, so the
-// escaped form is replaced as well as the raw one. An empty credential
-// leaves the text alone.
-func Redact(text, credential string) string {
-	if credential == "" {
-		return text
+// WireForms returns the secrets Redact covers for a placement: the
+// credential, and for a basic placement the base64 of the user, a colon and
+// the credential. The raw credential does not appear in that base64. Redact
+// adds the percent-encoded form of each, which a query placement sends. Pass
+// the result to Redact for any text that goes to a log line or an audit
+// record.
+func WireForms(placement Placement, secret string) []string {
+	switch placement.Kind {
+	case KindBasic:
+		return []string{secret, base64.StdEncoding.EncodeToString([]byte(placement.User + ":" + secret))}
+	case KindHeader, KindQuery:
+		return []string{secret}
+	default:
+		return []string{secret}
 	}
-	text = strings.ReplaceAll(text, credential, Marker)
-	return strings.ReplaceAll(text, url.QueryEscape(credential), Marker)
+}
+
+// Redact replaces every occurrence of each secret in text with Marker. A
+// query placement percent-encodes the credential into the URL, so the
+// escaped form is replaced as well as the raw one. An empty secret leaves
+// the text alone.
+//
+// Pass the result of WireForms as secrets, or nil when there is no
+// credential.
+func Redact(text string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, Marker)
+		text = strings.ReplaceAll(text, url.QueryEscape(secret), Marker)
+	}
+	return text
 }

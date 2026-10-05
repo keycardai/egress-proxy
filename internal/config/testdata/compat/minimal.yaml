@@ -4,4 +4,4 @@ version: 1
 sandbox:
   id: sbx-minimal
 endpoints:
-  - host: pypi.org
+  - url: https://pypi.org/
