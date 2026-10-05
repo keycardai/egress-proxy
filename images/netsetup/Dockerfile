@@ -7,7 +7,7 @@
 # with NET_ADMIN, NET_RAW and SETPCAP, and an operator debugging a ruleset
 # needs the iptables binaries and a shell to drive them with.
 # Base images are pinned by tag and digest. Dependabot updates them.
-FROM golang:1.27-trixie@sha256:433790e515d27dc6003e847e644cc0af956985cf315c1c58a3b73ee2dd305183 AS build
+FROM golang:1.27-trixie@sha256:3b77fc618ec235a1ab412de7737f120dd507c57e8d87de4cbb7994fb94275ed5 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
