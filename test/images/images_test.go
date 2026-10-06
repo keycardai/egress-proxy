@@ -319,7 +319,7 @@ func privilegedBindConfig(t *testing.T) string {
 		"sandbox:\n  id: images-lane\n" +
 		"listen:\n  connect: \"0.0.0.0:" + strconv.Itoa(netsetup.DefaultRedirectPort) + "\"\n" +
 		"ca:\n  state_dir: \"/state/ca\"\n" +
-		"endpoints:\n  - host: upstream.test\n"
+		"endpoints:\n  - url: https://upstream.test/\n"
 	writeFile(t, filepath.Join(dir, "config.yaml"), []byte(document))
 	//nolint:gosec // the proxy reads the document as its own uid, not as the host user
 	require.NoError(t, os.Chmod(dir, 0o755), "the container reads the document")

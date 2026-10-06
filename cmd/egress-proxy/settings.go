@@ -173,7 +173,7 @@ func describeFlag(flag cli.Flag, defaults map[string]any) (settingEntry, error) 
 // defaultDocument is the smallest document the parser accepts. Parsing it
 // with no override gives the defaults in force, so this command prints what
 // the parser applies rather than a second copy of the constants.
-const defaultDocument = "version: 1\nsandbox:\n  id: settings\nendpoints:\n  - host: example.com\n"
+const defaultDocument = "version: 1\nsandbox:\n  id: settings\nendpoints:\n  - url: https://example.com/\n"
 
 // parserDefaults maps a flag to the value the document parser applies when
 // the document, the variable and the flag all leave the setting out.

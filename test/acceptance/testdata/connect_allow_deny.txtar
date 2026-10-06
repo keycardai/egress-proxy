@@ -133,12 +133,8 @@ version: 1
 policy:
   deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
 endpoints:
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /hello
-  - host: localhost
-    port: $UPSTREAM_PORT
-    path_prefix: /needs-credential
+  - url: https://localhost:$UPSTREAM_PORT/hello
+  - url: https://localhost:$UPSTREAM_PORT/needs-credential
     credential:
       env: UPSTREAM_TOKEN
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

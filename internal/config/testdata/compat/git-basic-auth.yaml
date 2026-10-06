@@ -1,0 +1,22 @@
+# A document for git over HTTPS. The basic placement sends the minted token
+# as the password of the user the forge expects, and git needs no credential
+# helper. github.com and api.github.com are separate endpoints, and each
+# URL is also the resource the exchange asks for.
+version: 1
+sandbox:
+  id: "sbx-git"
+identity:
+  zone_url: "https://acme.keycard.cloud"
+  client_id: "app-cred-1"
+  workload_token_file: "/var/run/secrets/keycard/token"
+  impersonate:
+    user: "igmua2g0fwapl21qll7tczdw7t"
+endpoints:
+  - url: "https://github.com/"
+    credential:
+      placement: {kind: basic, user: x-access-token}
+      env: GITHUB_TOKEN
+  - url: "https://api.github.com/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+      env: GITHUB_TOKEN

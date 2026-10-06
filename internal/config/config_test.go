@@ -15,7 +15,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/policy"
 )
 
-const minimal = "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: pypi.org\n"
+const minimal = "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://pypi.org/\n"
 
 func TestParseAppliesDefaults(t *testing.T) {
 	t.Parallel()
@@ -44,7 +44,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 		// and the cache size. A document cannot ask for port 0.
 		{"endpoint port", cfg.Endpoints[0].Port, 443},
 		{"endpoint path_prefix", cfg.Endpoints[0].PathPrefix, "/"},
-		{"endpoint resource", cfg.Endpoints[0].Resource, "https://pypi.org/"},
+		{"endpoint resource", cfg.Endpoints[0].Resource, "https://pypi.org"},
 		{"identity absent", cfg.Identity == nil, true},
 	}
 	for _, check := range checks {
@@ -68,7 +68,6 @@ func TestParseNormalizesTheEndpointHost(t *testing.T) {
 		{name: "as written", host: "pypi.org", wantHost: "pypi.org"},
 		{name: "with the root label", host: "pypi.org.", wantHost: "pypi.org"},
 		{name: "in mixed case", host: "PyPI.ORG", wantHost: "pypi.org"},
-		{name: "padded", host: " pypi.org. ", wantHost: "pypi.org"},
 		// One trailing dot is the root label. A second one is an empty
 		// label, which a name cannot hold. Normalization drops a single dot,
 		// so the host still holds the empty label when it is validated.
@@ -78,7 +77,7 @@ func TestParseNormalizesTheEndpointHost(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: \"" + tc.host + "\"\n"
+			doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: \"https://" + tc.host + "/\"\n"
 			cfg, err := config.Parse([]byte(doc), config.Overrides{})
 			if tc.wantErr != "" {
 				require.Error(t, err, "Parse")
@@ -87,9 +86,9 @@ func TestParseNormalizesTheEndpointHost(t *testing.T) {
 			}
 			require.NoError(t, err, "Parse")
 			assert.Equal(t, tc.wantHost, cfg.Endpoints[0].Host, "host")
-			// The default resource is built from the normalized host, so two
+			// The resource is built from the normalized host, so two
 			// spellings of one name produce one resource.
-			assert.Equal(t, "https://"+tc.wantHost+"/", cfg.Endpoints[0].Resource, "resource")
+			assert.Equal(t, "https://"+tc.wantHost, cfg.Endpoints[0].Resource, "resource")
 		})
 	}
 }
@@ -99,7 +98,7 @@ func TestDigestIsOverTheDocumentAsWritten(t *testing.T) {
 	yamlForm, err := config.Parse([]byte(minimal), config.Overrides{})
 	require.NoError(t, err)
 	// The same document as JSON, keys in another order, extra whitespace.
-	jsonForm, err := config.Parse([]byte(`{"endpoints": [{"host": "pypi.org"}],
+	jsonForm, err := config.Parse([]byte(`{"endpoints": [{"url": "https://pypi.org/"}],
 	  "sandbox": {"id": "sbx-1"}, "version": 1}`), config.Overrides{})
 	require.NoError(t, err)
 	assert.Equal(t, yamlForm.Digest, jsonForm.Digest, "the YAML and JSON forms of one document")
@@ -130,7 +129,7 @@ const transparentDoc = "listen:\n  transparent_port: 1015\n"
 // twoEndpointsReversed lists the endpoints of minimal plus
 // files.pythonhosted.org in the opposite document order.
 const twoEndpointsReversed = "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n" +
-	"  - host: files.pythonhosted.org\n  - host: pypi.org\n"
+	"  - url: https://files.pythonhosted.org/\n  - url: https://pypi.org/\n"
 
 // TestConfigDigestCoversTheEffectiveSettings pins the property the audit
 // record needs. Two processes that answer every request alike share a config
@@ -193,7 +192,7 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 		},
 		{
 			name:    "the same two endpoints in either order",
-			doc:     minimal + "  - host: files.pythonhosted.org\n" + identityDoc,
+			doc:     minimal + "  - url: https://files.pythonhosted.org/\n" + identityDoc,
 			against: twoEndpointsReversed + identityDoc,
 			// Compile sorts each host's prefixes and refuses a repeated
 			// host and prefix pair, so document order decides nothing.
@@ -201,11 +200,11 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 		},
 		{
 			name: "the same two prefixes on one host in either order",
-			doc: strings.Replace(minimal, "- host: pypi.org",
-				"- host: pypi.org\n    path_prefix: /simple/\n  - host: pypi.org\n    path_prefix: /pypi/", 1) +
+			doc: strings.Replace(minimal, "- url: https://pypi.org/",
+				"- url: https://pypi.org/simple/\n  - url: https://pypi.org/pypi/", 1) +
 				identityDoc,
-			against: strings.Replace(minimal, "- host: pypi.org",
-				"- host: pypi.org\n    path_prefix: /pypi/\n  - host: pypi.org\n    path_prefix: /simple/", 1) +
+			against: strings.Replace(minimal, "- url: https://pypi.org/",
+				"- url: https://pypi.org/pypi/\n  - url: https://pypi.org/simple/", 1) +
 				identityDoc,
 			wantSame: true,
 		},
@@ -274,17 +273,17 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 		},
 		{
 			name:     "the default port written out explicitly",
-			doc:      strings.Replace(minimal, "- host: pypi.org", "- host: pypi.org\n    port: 443", 1) + identityDoc,
+			doc:      strings.Replace(minimal, "- url: https://pypi.org/", "- url: https://pypi.org:443/", 1) + identityDoc,
 			wantSame: true,
 		},
 		{
 			name: "another port on the same host",
-			doc:  strings.Replace(minimal, "- host: pypi.org", "- host: pypi.org\n    port: 8443", 1) + identityDoc,
+			doc:  strings.Replace(minimal, "- url: https://pypi.org/", "- url: https://pypi.org:8443/", 1) + identityDoc,
 		},
-		{name: "another endpoint", doc: minimal + "  - host: files.pythonhosted.org\n" + identityDoc},
+		{name: "another endpoint", doc: minimal + "  - url: https://files.pythonhosted.org/\n" + identityDoc},
 		{
 			name: "another path prefix",
-			doc: strings.Replace(minimal, "- host: pypi.org", "- host: pypi.org\n    path_prefix: /simple/", 1) +
+			doc: strings.Replace(minimal, "- url: https://pypi.org/", "- url: https://pypi.org/simple/", 1) +
 				identityDoc,
 		},
 		{
@@ -379,7 +378,7 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 		},
 		{
 			name: "a host normalized the way the endpoint list holds it",
-			doc:  strings.Replace(minimal, "- host: pypi.org", "- host: PyPI.ORG", 1),
+			doc:  strings.Replace(minimal, "- url: https://pypi.org/", "- url: https://PyPI.ORG/", 1),
 			want: []string{"pypi.org"},
 		},
 	}
@@ -443,7 +442,7 @@ func TestParseAcceptsSeparatorLikeText(t *testing.T) {
 		{name: "a trailing document end marker", doc: minimal + "...\n"},
 		{
 			name: "a separator inside a scalar",
-			doc: "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: pypi.org\n" +
+			doc: "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://pypi.org/\n" +
 				"    credential:\n      env: TOKEN\n      placement:\n        kind: header\n" +
 				"        name: Authorization\n        template: \"--- {credential}\"\n",
 		},
@@ -593,8 +592,8 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 	})
 }
 
-// TestParseRefusesInvalidEndpoints covers the host forms, ports and path
-// prefixes an endpoint can name. A host must be a DNS name, so every
+// TestParseRefusesInvalidEndpoints covers the URL forms, hosts, ports and
+// paths an endpoint can name. A host must be a DNS name, so every
 // spelling of an address is refused here.
 func TestParseRefusesInvalidEndpoints(t *testing.T) {
 	t.Parallel()
@@ -602,93 +601,172 @@ func TestParseRefusesInvalidEndpoints(t *testing.T) {
 		return "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - " + fields + "\n"
 	}
 	runParseRefusals(t, []parseRefusal{
-		{name: "endpoint without host", doc: endpoint("path_prefix: /"), wantErr: "host is empty"},
-		{name: "endpoint host with port", doc: endpoint("host: pypi.org:443"), wantErr: "must be a DNS name"},
-		{name: "endpoint host with scheme", doc: endpoint("host: https://pypi.org"), wantErr: "must be a DNS name"},
-		{name: "endpoint wildcard", doc: endpoint("host: \"*.pypi.org\""), wantErr: "must be a DNS name"},
-		{name: "endpoint IP literal", doc: endpoint("host: 93.184.216.34"), wantErr: "is an IP literal"},
+		{name: "endpoint without url", doc: endpoint(`url: ""`), wantErr: "must be an absolute http or https URL"},
+		{name: "endpoint url without a scheme", doc: endpoint("url: pypi.org"), wantErr: "must be an absolute http"},
+		{name: "endpoint url over ftp", doc: endpoint("url: ftp://pypi.org/"), wantErr: "must be an absolute http"},
+		{
+			name: "a credential on an http endpoint",
+			doc: endpoint("url: http://pypi.org/\n    credential:\n      env: T\n" +
+				"      placement: {kind: header, name: X, template: \"{credential}\"}"),
+			wantErr: `url "http://pypi.org/" is http, and the proxy forwards nothing cleartext`,
+		},
+		{name: "endpoint wildcard", doc: endpoint(`url: "https://*.pypi.org/"`), wantErr: "must be a DNS name"},
+		{name: "endpoint IP literal", doc: endpoint("url: https://93.184.216.34/"), wantErr: "is an IP literal"},
+		{name: "endpoint IPv6 literal", doc: endpoint(`url: "https://[::1]/"`), wantErr: "is an IP literal"},
 		{
 			name:    "endpoint port above the range",
-			doc:     endpoint("host: a.example\n    port: 70000"),
-			wantErr: "port 70000 must be between",
+			doc:     endpoint("url: https://a.example:70000/"),
+			wantErr: `must name a port between 1 and 65535, not "70000"`,
 		},
-		{
-			name:    "endpoint negative port",
-			doc:     endpoint("host: a.example\n    port: -1"),
-			wantErr: "port -1 must be between",
-		},
-		{name: "endpoint IPv6 literal", doc: endpoint("host: \"::1\""), wantErr: "is an IP literal"},
+		{name: "endpoint port zero", doc: endpoint("url: https://a.example:0/"), wantErr: `not "0"`},
+		{name: "endpoint negative port", doc: endpoint("url: https://a.example:-1/"), wantErr: "is not a URL"},
+		{name: "endpoint url with no host", doc: endpoint("url: https://:8443/"), wantErr: "names no host"},
 		// An address netip does not read as one still resolves as an
 		// address. The deny list never sees these as addresses either, so
 		// the endpoint list is the only place to refuse them.
-		{name: "endpoint octal IPv4", doc: endpoint("host: 0177.0.0.1"), wantErr: "must be a DNS name"},
-		{name: "endpoint IPv4 with a leading zero", doc: endpoint("host: 010.0.0.1"), wantErr: "must be a DNS name"},
+		{name: "endpoint octal IPv4", doc: endpoint("url: https://0177.0.0.1/"), wantErr: "must be a DNS name"},
 		{
-			name:    "endpoint IPv4 as one integer",
-			doc:     endpoint("host: \"2852039166\""),
+			name:    "endpoint IPv4 with a leading zero",
+			doc:     endpoint("url: https://010.0.0.1/"),
 			wantErr: "must be a DNS name",
 		},
-		{name: "endpoint host with an underscore", doc: endpoint("host: pypi_org"), wantErr: "must be a DNS name"},
-		// The matcher compares a prefix against the escaped path, so a
-		// prefix holding a character a client always escapes could never
-		// match.
+		{name: "endpoint IPv4 as one integer", doc: endpoint("url: https://2852039166/"), wantErr: "must be a DNS name"},
+		{name: "endpoint host with an underscore", doc: endpoint("url: https://pypi_org/"), wantErr: "must be a DNS name"},
 		{
-			name:    "path prefix with a space",
-			doc:     endpoint("host: a.example\n    path_prefix: \"/my files/\""),
-			wantErr: "path_prefix \"/my files/\" must be an absolute path",
+			name:    "endpoint host with a leading hyphen",
+			doc:     endpoint("url: https://-pypi.org/"),
+			wantErr: "must be a DNS name",
 		},
 		{
-			name:    "path prefix with a non-ASCII character",
-			doc:     endpoint("host: a.example\n    path_prefix: /caf\u00e9/"),
-			wantErr: "must be an absolute path",
+			name:    "endpoint host with a trailing hyphen",
+			doc:     endpoint("url: https://pypi-.org/"),
+			wantErr: "must be a DNS name",
 		},
 		{
-			// Nothing unescapes a prefix, so a malformed escape would
-			// prefix match by accident: "/a%" matches "/a%25b".
-			name:    "path prefix with a malformed escape",
-			doc:     endpoint("host: a.example\n    path_prefix: /a%zz"),
-			wantErr: "must be an absolute path",
+			name:    "endpoint host with an empty label",
+			doc:     endpoint("url: https://pypi..org/"),
+			wantErr: "must be a DNS name",
 		},
-		{
-			name:    "path prefix ending in a bare percent",
-			doc:     endpoint("host: a.example\n    path_prefix: /a%"),
-			wantErr: "must be an absolute path",
-		},
-		{name: "endpoint host with a leading hyphen", doc: endpoint("host: -pypi.org"), wantErr: "must be a DNS name"},
-		{name: "endpoint host with a trailing hyphen", doc: endpoint("host: pypi-.org"), wantErr: "must be a DNS name"},
-		{name: "endpoint host with an empty label", doc: endpoint("host: pypi..org"), wantErr: "must be a DNS name"},
 		// The SNI is ASCII, so a host holding non-ASCII characters never
 		// matches what arrives. The first character here is Cyrillic a,
 		// which reads as Latin a and would otherwise stand in for it.
-		{name: "endpoint host in Cyrillic", doc: endpoint("host: аpple.com"), wantErr: "must be a DNS name"},
+		{name: "endpoint host in Cyrillic", doc: endpoint("url: https://аpple.com/"), wantErr: "must be a DNS name"},
 		{
 			name:    "endpoint host with an ideographic full stop",
-			doc:     endpoint("host: pypi.org。"),
+			doc:     endpoint("url: https://pypi.org。/"),
 			wantErr: "must be a DNS name",
 		},
 		{
 			name:    "endpoint host label over 63 characters",
-			doc:     endpoint("host: " + strings.Repeat("a", 64) + ".org"),
+			doc:     endpoint("url: https://" + strings.Repeat("a", 64) + ".org/"),
 			wantErr: "must be a DNS name",
 		},
-		{name: "relative prefix", doc: endpoint("host: pypi.org\n    path_prefix: simple/"), wantErr: "path_prefix"},
+		// The matcher compares a prefix against the escaped path, so a
+		// prefix holding a character a client always escapes could never
+		// match.
 		{
-			name:    "prefix with dot segments",
-			doc:     endpoint("host: pypi.org\n    path_prefix: /a/../b"),
-			wantErr: "path_prefix",
-		},
-		{name: "prefix with a query", doc: endpoint("host: pypi.org\n    path_prefix: /a?x"), wantErr: "path_prefix"},
-		{
-			name:    "http resource",
-			doc:     endpoint("host: pypi.org\n    resource: http://pypi.org/"),
-			wantErr: "absolute https URL",
+			name:    "url path with a space",
+			doc:     endpoint(`url: "https://a.example/my files/"`),
+			wantErr: `url path "/my files/" must be an absolute path`,
 		},
 		{
-			name:    "resource with userinfo",
-			doc:     endpoint("host: pypi.org\n    resource: https://u@pypi.org/"),
-			wantErr: "must not hold userinfo",
+			name:    "url path with a non-ASCII character",
+			doc:     endpoint("url: https://a.example/caf\u00e9/"),
+			wantErr: "must be an absolute path",
+		},
+		// Nothing unescapes a prefix, so a malformed escape would prefix
+		// match by accident: "/a%" matches "/a%25b".
+		{name: "url path with a malformed escape", doc: endpoint("url: https://a.example/a%zz"), wantErr: "is not a URL"},
+		{name: "url path ending in a bare percent", doc: endpoint("url: https://a.example/a%"), wantErr: "is not a URL"},
+		{name: "url path with dot segments", doc: endpoint("url: https://pypi.org/a/../b"), wantErr: "url path"},
+		{name: "url path with an empty segment", doc: endpoint("url: https://pypi.org//a"), wantErr: "url path"},
+		{name: "url with a query", doc: endpoint("url: https://pypi.org/a?x"), wantErr: "must not hold userinfo"},
+		{name: "url with an empty query", doc: endpoint("url: https://pypi.org/a?"), wantErr: "must not hold userinfo"},
+		{name: "url with a fragment", doc: endpoint("url: https://pypi.org/a#x"), wantErr: "must not hold userinfo"},
+		{name: "url with userinfo", doc: endpoint("url: https://u@pypi.org/"), wantErr: "must not hold userinfo"},
+		{name: "endpoint naming a host", doc: endpoint("host: pypi.org"), wantErr: `unknown field "host"`},
+		{
+			name:    "endpoint naming a resource",
+			doc:     endpoint("url: https://github.com/\n    resource: https://api.github.com/"),
+			wantErr: `unknown field "resource"`,
 		},
 	})
+}
+
+// TestParseReadsTheEndpointURL pins what an endpoint URL names: the host the
+// policy matches, the port, the path prefix, and the canonical resource the
+// exchange sends. Two spellings of one endpoint produce one resource.
+func TestParseReadsTheEndpointURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, url    string
+		host         string
+		port         int
+		prefix       string
+		wantResource string
+	}{
+		{
+			name: "no path", url: "https://github.com",
+			host: "github.com", port: 443, prefix: "/", wantResource: "https://github.com",
+		},
+		{
+			name: "another case and a trailing dot", url: "https://GitHub.com./",
+			host: "github.com", port: 443, prefix: "/", wantResource: "https://github.com",
+		},
+		{
+			name: "an upper-case scheme", url: "HTTPS://pypi.org/",
+			host: "pypi.org", port: 443, prefix: "/", wantResource: "https://pypi.org",
+		},
+		{
+			name: "padded", url: " https://pypi.org/ ",
+			host: "pypi.org", port: 443, prefix: "/", wantResource: "https://pypi.org",
+		},
+		{
+			name: "a path", url: "https://openrouter.ai/api/v1",
+			host: "openrouter.ai", port: 443, prefix: "/api/v1", wantResource: "https://openrouter.ai/api/v1",
+		},
+		{
+			name: "a path with a trailing slash", url: "https://a.example/api/",
+			host: "a.example", port: 443, prefix: "/api/", wantResource: "https://a.example/api/",
+		},
+		{
+			name: "a port", url: "https://localhost:8443/header/",
+			host: "localhost", port: 8443, prefix: "/header/", wantResource: "https://localhost:8443/header/",
+		},
+		{
+			name: "the default port written out", url: "https://pypi.org:443/simple/",
+			host: "pypi.org", port: 443, prefix: "/simple/", wantResource: "https://pypi.org/simple/",
+		},
+		{
+			name: "http takes port 80", url: "http://upstream.test/allowed/",
+			host: "upstream.test", port: 80, prefix: "/allowed/", wantResource: "http://upstream.test/allowed/",
+		},
+		{
+			name: "http with port 80 written out", url: "http://upstream.test:80/",
+			host: "upstream.test", port: 80, prefix: "/", wantResource: "http://upstream.test",
+		},
+		{
+			name: "https on port 80", url: "https://upstream.test:80/",
+			host: "upstream.test", port: 80, prefix: "/", wantResource: "https://upstream.test:80",
+		},
+		{
+			name: "http on port 443", url: "HTTP://upstream.test:443/",
+			host: "upstream.test", port: 443, prefix: "/", wantResource: "http://upstream.test:443",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: \"" + tc.url + "\"\n"
+			cfg, err := config.Parse([]byte(doc), config.Overrides{})
+			require.NoError(t, err, "Parse")
+			endpoint := cfg.Endpoints[0]
+			assert.Equal(t, tc.host, endpoint.Host, "host")
+			assert.Equal(t, tc.port, endpoint.Port, "port")
+			assert.Equal(t, tc.prefix, endpoint.PathPrefix, "path prefix")
+			assert.Equal(t, tc.wantResource, endpoint.Resource, "resource")
+		})
+	}
 }
 
 // TestParseEndpointIdentity pins what makes two entries one endpoint. The
@@ -712,27 +790,27 @@ func TestParseEndpointIdentity(t *testing.T) {
 	}{
 		{
 			name:    "same host and prefix on the default port",
-			doc:     doc("  - host: pypi.org\n  - host: PYPI.ORG.\n"),
-			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/" repeats endpoints[0]`,
+			doc:     doc("  - url: https://pypi.org/\n  - url: https://PYPI.ORG./\n"),
+			wantErr: `endpoints[1]: url "https://PYPI.ORG./" names the same endpoint as endpoints[0]`,
 		},
 		{
 			name: "same host, port and prefix written out",
-			doc: doc("  - host: pypi.org\n    port: 8443\n    path_prefix: /simple/\n" +
-				"  - host: pypi.org\n    port: 8443\n    path_prefix: /simple/\n"),
-			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/simple/" repeats endpoints[0]`,
+			doc: doc("  - url: https://pypi.org:8443/simple/\n" +
+				"  - url: https://pypi.org:8443/simple/\n"),
+			wantErr: `names the same endpoint as endpoints[0]`,
 		},
 		{
 			// The default fills the omitted port, so both entries name the
 			// same endpoint.
 			name: "one entry naming the default port and one leaving it out",
-			doc: doc("  - host: pypi.org\n    path_prefix: /simple/\n" +
-				"  - host: pypi.org\n    port: 443\n    path_prefix: /simple/\n"),
-			wantErr: `endpoints[1]: host "pypi.org" with path_prefix "/simple/" repeats endpoints[0]`,
+			doc: doc("  - url: https://pypi.org/simple/\n" +
+				"  - url: https://pypi.org:443/simple/\n"),
+			wantErr: `names the same endpoint as endpoints[0]`,
 		},
 		{
 			name: "same host and prefix on two ports",
-			doc: doc("  - host: upstream.test\n    path_prefix: /allowed/\n" +
-				"  - host: upstream.test\n    port: 80\n    path_prefix: /allowed/\n"),
+			doc: doc("  - url: https://upstream.test/allowed/\n" +
+				"  - url: http://upstream.test/allowed/\n"),
 			want: []key{
 				{host: "upstream.test", port: 443, prefix: "/allowed/"},
 				{host: "upstream.test", port: 80, prefix: "/allowed/"},
@@ -740,8 +818,8 @@ func TestParseEndpointIdentity(t *testing.T) {
 		},
 		{
 			name: "same host and port on two prefixes",
-			doc: doc("  - host: upstream.test\n    path_prefix: /allowed/\n" +
-				"  - host: upstream.test\n    path_prefix: /other/\n"),
+			doc: doc("  - url: https://upstream.test/allowed/\n" +
+				"  - url: https://upstream.test/other/\n"),
 			want: []key{
 				{host: "upstream.test", port: 443, prefix: "/allowed/"},
 				{host: "upstream.test", port: 443, prefix: "/other/"},
@@ -783,43 +861,59 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 		{
 			name: "credential without env",
 			doc: endpoint(
-				"host: a.example\n    credential:\n      placement: {kind: header, name: X, template: \"{credential}\"}",
+				"url: https://a.example/\n    credential:\n      placement: {kind: header, name: X, template: \"{credential}\"}",
 			),
 			wantErr: "credential.env",
 		},
 		{
 			name: "credential env not a name",
-			doc: endpoint("host: a.example\n    credential:\n      env: 1TOKEN\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: 1TOKEN\n" +
 				"      placement: {kind: header, name: X, template: \"{credential}\"}"),
 			wantErr: `credential.env "1TOKEN"`,
 		},
 		{
 			name: "header placement without the token",
 			doc: endpoint(
-				"host: a.example\n    credential:\n      env: T\n      placement: {kind: header, name: X, template: Bearer}",
+				"url: https://a.example/\n    credential:\n      env: T\n" +
+					"      placement: {kind: header, name: X, template: Bearer}",
 			),
 			wantErr: "must contain {credential}",
 		},
 		{
 			name: "header placement without a name",
 			doc: endpoint(
-				"host: a.example\n    credential:\n      env: T\n      placement: {kind: header, template: \"{credential}\"}",
+				"url: https://a.example/\n    credential:\n      env: T\n" +
+					"      placement: {kind: header, template: \"{credential}\"}",
 			),
 			wantErr: "header placement needs a name",
 		},
 		{
 			name:    "query placement without a name",
-			doc:     endpoint("host: a.example\n    credential:\n      env: T\n      placement: {kind: query}"),
+			doc:     endpoint("url: https://a.example/\n    credential:\n      env: T\n      placement: {kind: query}"),
 			wantErr: "query placement needs a name",
 		},
 		{
 			name:    "basic placement without a user",
-			doc:     endpoint("host: a.example\n    credential:\n      env: T\n      placement: {kind: basic}"),
+			doc:     endpoint("url: https://a.example/\n    credential:\n      env: T\n      placement: {kind: basic}"),
 			wantErr: "basic placement needs a user",
 		},
 		{
-			name:    "unknown placement kind",
-			doc:     endpoint("host: a.example\n    credential:\n      env: T\n      placement: {kind: cookie, name: x}"),
+			name: "basic placement whose user holds a colon",
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+				"      placement: {kind: basic, user: \"alice:hunter2\"}"),
+			wantErr: "a basic placement user must not contain a colon or a control character",
+		},
+		{
+			name: "basic placement whose user would split the request head",
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+				"      placement: {kind: basic, user: \"alice\\r\\nX-Injected: 1\"}"),
+			wantErr: "a basic placement user must not contain a colon or a control character",
+		},
+		{
+			name: "unknown placement kind",
+			doc: endpoint(
+				"url: https://a.example/\n    credential:\n      env: T\n      placement: {kind: cookie, name: x}",
+			),
 			wantErr: `placement.kind "cookie"`,
 		},
 		{
@@ -834,32 +928,32 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 		},
 		{
 			name: "a header placement naming Host",
-			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
 				"      placement: {kind: header, name: host, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name host, " +
 				"a header the connection, the proxy or the upstream's trust depends on",
 		},
 		{
 			name: "a header placement naming a hop-by-hop header",
-			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
 				"      placement: {kind: header, name: Connection, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name Connection, ",
 		},
 		{
 			name: "a header placement naming a body framing header",
-			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
 				"      placement: {kind: header, name: Content-Length, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name Content-Length, ",
 		},
 		{
 			name: "a header placement in the x-forwarded- family",
-			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
 				"      placement: {kind: header, name: X-Forwarded-For, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name X-Forwarded-For, ",
 		},
 		{
 			name: "a header placement in the sec- family",
-			doc: endpoint("host: a.example\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
 				"      placement: {kind: header, name: Sec-Fetch-Site, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name Sec-Fetch-Site, ",
 		},
@@ -869,7 +963,7 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 // TestParseAcceptsAnAuthorizationPlacement keeps the common placement allowed.
 func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
 	t.Parallel()
-	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - host: a.example\n    credential:\n" +
+	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://a.example/\n    credential:\n" +
 		"      env: GITHUB_TOKEN\n" +
 		"      placement: {kind: header, name: Authorization, template: \"Bearer {credential}\"}\n"
 	cfg, err := config.Parse([]byte(doc), config.Overrides{})
@@ -877,6 +971,21 @@ func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
 	require.Len(t, cfg.Endpoints, 1, "the document names one endpoint")
 	require.NotNil(t, cfg.Endpoints[0].Credential, "the endpoint names a credential")
 	assert.Equal(t, "Authorization", cfg.Endpoints[0].Credential.Placement.Name, "placement.name")
+}
+
+// TestParseAcceptsABasicPlacement checks that a basic placement parses and
+// that the endpoint keeps its user.
+func TestParseAcceptsABasicPlacement(t *testing.T) {
+	t.Parallel()
+	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://github.com/\n    credential:\n" +
+		"      env: GITHUB_TOKEN\n      placement: {kind: basic, user: x-access-token}\n"
+	cfg, err := config.Parse([]byte(doc), config.Overrides{})
+	require.NoError(t, err, "Parse:\n%s", doc)
+	require.Len(t, cfg.Endpoints, 1, "the document names one endpoint")
+	require.NotNil(t, cfg.Endpoints[0].Credential, "the endpoint names a credential")
+	assert.Equal(t, credential.KindBasic, cfg.Endpoints[0].Credential.Placement.Kind, "placement.kind")
+	assert.Equal(t, "x-access-token", cfg.Endpoints[0].Credential.Placement.User, "placement.user")
+	assert.Empty(t, cfg.Endpoints[0].Credential.Placement.Name, "placement.name")
 }
 
 // TestParseRefusesInvalidIdentity covers the exchange settings.
@@ -956,9 +1065,9 @@ func TestCredentialSourceNamesTheSourceInForce(t *testing.T) {
 
 func TestParseReportsEveryProblem(t *testing.T) {
 	t.Parallel()
-	_, err := config.Parse([]byte("version: 2\nsandbox:\n  id: \"\"\nendpoints:\n  - host: \"\"\n"), config.Overrides{})
+	_, err := config.Parse([]byte("version: 2\nsandbox:\n  id: \"\"\nendpoints:\n  - url: \"\"\n"), config.Overrides{})
 	require.Error(t, err, "a document with three problems is refused")
-	for _, want := range []string{"version is 2", "sandbox.id", "host is empty"} {
+	for _, want := range []string{"version is 2", "sandbox.id", "must be an absolute http or https URL"} {
 		assert.ErrorContains(t, err, want, "one run names every problem")
 	}
 }
@@ -966,14 +1075,14 @@ func TestParseReportsEveryProblem(t *testing.T) {
 func TestPolicyEndpoints(t *testing.T) {
 	t.Parallel()
 	cfg, err := config.Parse([]byte(minimal+
-		"  - host: A.Example.\n    path_prefix: /api\n    credential:\n      env: T\n"+
+		"  - url: https://A.Example./api\n    credential:\n      env: T\n"+
 		"      placement: {kind: header, name: X, template: \"{credential}\"}\n"), config.Overrides{})
 	require.NoError(t, err)
 	endpoints := cfg.PolicyEndpoints()
 	require.Len(t, endpoints, 2)
 	assert.Equal(t, policy.Endpoint{
 		Host: "a.example", Port: config.DefaultEndpointPort, PathPrefix: "/api",
-		Resource:   "https://a.example/",
+		Resource:   "https://a.example/api",
 		Credential: &credential.Placement{Kind: credential.KindHeader, Name: "X", Template: credential.Token},
 	}, endpoints[1], "the second endpoint, normalized and defaulted")
 	assert.Nil(t, endpoints[0].Credential, "pypi.org names no credential")

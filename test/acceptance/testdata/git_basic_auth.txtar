@@ -1,0 +1,161 @@
+# git clones and pushes over HTTPS with the built binary in front of it.
+# The endpoint names a basic placement, so the proxy writes
+# Authorization: Basic base64(user:credential) into every request git makes
+# and the workload needs no credential helper.
+#
+# The git server answers 401 to any other Authorization, so a request that
+# sends the clone URL's credentials fails. Three clone URLs drive the cases:
+# no userinfo, a user, and a user with a password.
+
+[!exec:git] skip 'git is not installed'
+
+gitserver gitsrv x-access-token ghs-sekrit
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+
+# A mounted emptyDir arrives at mode 0777, and the proxy binds the admin
+# socket in it.
+chmod 0777 $ADMIN_DIR
+
+# The loader refuses a credential file that anyone but its owner can read.
+chmod 0600 credentials.yaml
+
+# The git server binds a port the script cannot know in advance. The
+# endpoint URLs and the credential resource name it.
+expand config.yaml
+expand credentials.yaml
+
+# NEVER let a git run in a test reach the developer's credential store.
+# Apple's git sets credential.helper=osxkeychain in the system gitconfig, so
+# GIT_CONFIG_NOSYSTEM=1 skips that file and an empty credential.helper resets
+# the list. HOME, XDG_CONFIG_HOME and GIT_CONFIG_GLOBAL point inside $WORK,
+# and a prompt fails rather than blocking.
+mkdir home
+env HOME=$WORK/home
+env XDG_CONFIG_HOME=$WORK/home/config
+env GIT_CONFIG_GLOBAL=$WORK/home/gitconfig
+env GIT_CONFIG_NOSYSTEM=1
+env GIT_CONFIG_COUNT=1
+env GIT_CONFIG_KEY_0=credential.helper
+env GIT_CONFIG_VALUE_0=
+env GIT_TERMINAL_PROMPT=0
+env GIT_ASKPASS=true
+env SSH_ASKPASS=true
+env GIT_AUTHOR_NAME=acceptance
+env GIT_AUTHOR_EMAIL=acceptance@example.invalid
+env GIT_COMMITTER_NAME=acceptance
+env GIT_COMMITTER_EMAIL=acceptance@example.invalid
+
+# Two bare repositories, written on disk before the proxy starts.
+# git-http-backend serves receive-pack only where the repository says it
+# may.
+exec git init --bare --initial-branch=main gitsrv/repos/repo.git
+exec git -C gitsrv/repos/repo.git config http.receivepack true
+exec git init --bare --initial-branch=main gitsrv/repos/nocred.git
+exec git init --initial-branch=main seed
+cp README seed/README
+exec git -C seed add README
+exec git -C seed commit -m seed
+exec git -C seed push $WORK/gitsrv/repos/repo.git main
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=git-basic-auth
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/gitsrv/ca.crt
+env EGRESS_PROXY_CREDENTIAL_STATIC_FILE=$WORK/credentials.yaml
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env GIT_SSL_CAINFO=$WORK/shared-ca/ca.crt
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# A clone URL with no userinfo.
+exec git clone https://localhost:$UPSTREAM_PORT/repo.git clone-none
+exists clone-none/README
+cp pushed clone-none/NEW
+exec git -C clone-none add NEW
+exec git -C clone-none commit -m 'from the clone with no userinfo'
+exec git -C clone-none push origin HEAD:refs/heads/none
+
+# A clone URL naming a user. The placement names the user the server
+# expects, so the name in the URL has no effect.
+exec git clone https://alice@localhost:$UPSTREAM_PORT/repo.git clone-user
+cp pushed clone-user/NEW
+exec git -C clone-user add NEW
+exec git -C clone-user commit -m 'from the clone with a user'
+exec git -C clone-user push origin HEAD:refs/heads/user
+
+# A clone URL naming a user and a password.
+exec git clone https://alice:hunter2@localhost:$UPSTREAM_PORT/repo.git clone-userpass
+cp pushed clone-userpass/NEW
+exec git -C clone-userpass add NEW
+exec git -C clone-userpass commit -m 'from the clone with a user and a password'
+exec git -C clone-userpass push origin HEAD:refs/heads/userpass
+
+# Three branches arrived, so each push reached the server.
+exec git -C gitsrv/repos/repo.git branch --list
+stdout none
+stdout user
+stdout userpass
+
+# Must fail: an endpoint whose resource the source does not hold. Nothing
+# is dialed and the proxy answers 403 inside the tunnel.
+! exec git ls-remote https://localhost:$UPSTREAM_PORT/nocred.git
+stderr 'egress-proxy: credential_unavailable'
+stderr 'returned error: 403'
+
+# Every request the server answered arrived with the credentials the
+# placement writes, and none with what a clone URL said.
+grep 'authorization="Basic eC1hY2Nlc3MtdG9rZW46Z2hzLXNla3JpdA=="' gitsrv/requests.log
+! grep 'authorization="Basic YWxpY2U6' gitsrv/requests.log
+! grep 'authorization=""' gitsrv/requests.log
+! grep 'nocred.git' gitsrv/requests.log
+
+# The upload-pack and receive-pack posts are the halves of a clone and a
+# push, so both directions crossed the proxy.
+grep 'request POST /repo.git/git-upload-pack ' gitsrv/requests.log
+grep 'request POST /repo.git/git-receive-pack ' gitsrv/requests.log
+
+sigterm
+wait proxy
+
+# Every record on stdout comes from this run, so the assertions below cover
+# the whole audit stream.
+audit -all stdout sandbox_id=git-basic-auth
+audit stdout scope=request request.path=/repo.git/info/refs decision.reason=endpoint_allowed decision.endpoint=localhost:$UPSTREAM_PORT/repo.git/ outcome.status=200
+audit stdout scope=request request.path=/repo.git/git-upload-pack decision.reason=endpoint_allowed outcome.status=200
+audit stdout scope=request request.path=/repo.git/git-receive-pack decision.reason=endpoint_allowed outcome.status=200
+audit stdout scope=request request.path=/nocred.git/info/refs decision.verdict=deny decision.reason=credential_unavailable decision.endpoint=localhost:$UPSTREAM_PORT/nocred.git/
+
+# No record and no log line holds the credential, in the bytes the source
+# gave it or in the base64 the placement puts on the wire.
+! stdout 'ghs-sekrit'
+! stdout 'eC1hY2Nlc3MtdG9rZW46Z2hzLXNla3JpdA'
+! stderr 'ghs-sekrit'
+! stderr 'eC1hY2Nlc3MtdG9rZW46Z2hzLXNla3JpdA'
+
+-- README --
+seed
+-- pushed --
+pushed through the proxy
+-- config.yaml --
+version: 1
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/repo.git/
+    credential:
+      placement: {kind: basic, user: x-access-token}
+      env: GIT_TOKEN
+  - url: https://localhost:$UPSTREAM_PORT/nocred.git/
+    credential:
+      placement: {kind: basic, user: x-access-token}
+      env: GIT_TOKEN
+-- credentials.yaml --
+version: 1
+credentials:
+  - resource: "https://localhost:$UPSTREAM_PORT/repo.git/"
+    value: "ghs-sekrit"

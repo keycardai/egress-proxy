@@ -112,12 +112,12 @@ func TestCompileRefusals(t *testing.T) {
 		{
 			name:      "an empty path prefix",
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443}},
-			wantErr:   `path_prefix "" must be an absolute path`,
+			wantErr:   `path prefix "" must be an absolute path`,
 		},
 		{
 			name:      "a relative path prefix",
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "repos"}},
-			wantErr:   `path_prefix "repos" must be an absolute path`,
+			wantErr:   `path prefix "repos" must be an absolute path`,
 		},
 		{
 			name:      "a path prefix with dot segments",

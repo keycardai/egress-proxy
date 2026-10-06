@@ -79,4 +79,4 @@ stderr 'probe: readyz on .*admin\.sock'
 -- config.yaml --
 version: 1
 endpoints:
-  - host: example.com
+  - url: https://example.com/

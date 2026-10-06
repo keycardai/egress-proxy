@@ -57,9 +57,12 @@ const (
 	// descriptors with the frontends and the audit writer.
 	DefaultMaxDNSConnections = 128
 	DefaultIdleTimeout       = 5 * time.Minute
-	// DefaultEndpointPort is the port an endpoint covers when it names none.
-	// Endpoints name HTTPS destinations.
+	// DefaultEndpointPort is the port an https endpoint covers when it
+	// names none.
 	DefaultEndpointPort = 443
+	// cleartextEndpointPort is the port an http endpoint covers when it
+	// names none.
+	cleartextEndpointPort = 80
 	// DefaultResponseHeaderTimeout bounds the wait for an upstream response
 	// head. It does not bound a body, so a streamed response is unaffected.
 	DefaultResponseHeaderTimeout = 30 * time.Second
@@ -308,13 +311,124 @@ type Policy struct {
 
 // Endpoint is one destination the sandbox can reach.
 type Endpoint struct {
-	Host string `json:"host"`
-	// Port is the port this endpoint covers on that host. It defaults to
-	// 443. A host reachable on two ports is two endpoints.
-	Port       int         `json:"port"`
-	PathPrefix string      `json:"path_prefix"`
-	Resource   string      `json:"resource"`
+	// URL names the endpoint as scheme://host[:port][/path], with scheme
+	// https or http. The host, the port and the path prefix are read from
+	// it, and its canonical form is the resource the exchange asks the zone
+	// for. One string decides both where a request goes and which credential
+	// it gets.
+	URL        string      `json:"url"`
 	Credential *Credential `json:"credential,omitempty"`
+
+	// Host, Port, PathPrefix and Resource are read from URL. They are not
+	// document keys.
+	Host string `json:"-"`
+	// Port is the port this endpoint covers on that host. When the URL names
+	// none, it is the scheme's port: 443 for https and 80 for http. A host
+	// reachable on two ports is two endpoints.
+	Port       int    `json:"-"`
+	PathPrefix string `json:"-"`
+	// Resource is the canonical URL: lowercase scheme and host, no trailing
+	// dot, no port when it is the scheme's own, no root path, and any other
+	// path as written.
+	Resource string `json:"-"`
+}
+
+// endpointURL is what an endpoint URL names.
+type endpointURL struct {
+	scheme string
+	host   string
+	port   int
+	path   string
+}
+
+// The reasons an endpoint URL is refused before its parts are checked.
+var (
+	errEndpointNotHTTPS = errors.New("must be an absolute http or https URL")
+	errEndpointExtras   = errors.New("must not hold userinfo, a query or a fragment")
+	errEndpointPort     = errors.New("must name a port between 1 and 65535")
+)
+
+// parseEndpointURL reads the host, port and path of an endpoint URL. The
+// path is returned exactly as written, so normalizedPrefix judges the bytes
+// the matcher compares. The host is normalized.
+func parseEndpointURL(raw string) (endpointURL, error) {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return endpointURL{}, fmt.Errorf("is not a URL: %w", err)
+	}
+	if err = endpointURLShape(parsed); err != nil {
+		return endpointURL{}, err
+	}
+	port, err := endpointPort(parsed.Scheme, parsed.Port())
+	if err != nil {
+		return endpointURL{}, err
+	}
+	// The authority follows "scheme://", so the path is whatever comes after
+	// the first "/" past both.
+	rest := raw[len(parsed.Scheme)+len("://"):]
+	path := "/"
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		path = rest[i:]
+	}
+	return endpointURL{
+		scheme: parsed.Scheme, host: policy.NormalizeHost(parsed.Hostname()), port: port, path: path,
+	}, nil
+}
+
+// endpointURLShape refuses a URL that is not absolute http or https, or that
+// holds userinfo, a query or a fragment.
+func endpointURLShape(parsed *url.URL) error {
+	switch {
+	case schemePort(parsed.Scheme) == 0 || parsed.Host == "" || parsed.Opaque != "":
+		return errEndpointNotHTTPS
+	case parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "":
+		return errEndpointExtras
+	default:
+		return nil
+	}
+}
+
+// schemePort is the port a scheme implies, zero for a scheme an endpoint
+// cannot name.
+func schemePort(scheme string) int {
+	switch scheme {
+	case "https":
+		return DefaultEndpointPort
+	case "http":
+		return cleartextEndpointPort
+	default:
+		return 0
+	}
+}
+
+// endpointPort reads the port a URL names, the scheme's port when it names
+// none.
+func endpointPort(scheme, text string) (int, error) {
+	if text == "" {
+		return schemePort(scheme), nil
+	}
+	port, err := strconv.Atoi(text)
+	if err != nil || port < 1 || port > maxPort {
+		return 0, fmt.Errorf("%w, not %q", errEndpointPort, text)
+	}
+	return port, nil
+}
+
+// canonicalResource is the resource an endpoint sends to the zone. The root
+// path is left out, so https://api.github.com/ sends https://api.github.com,
+// the identifier a catalog install registers. Any other path is kept as
+// written, because /api and /api/ cover different paths.
+func canonicalResource(parsed endpointURL) string {
+	authority := parsed.host
+	if parsed.port != schemePort(parsed.scheme) {
+		authority = net.JoinHostPort(parsed.host, strconv.Itoa(parsed.port))
+	}
+	path := parsed.path
+	if path == "/" {
+		path = ""
+	}
+	return parsed.scheme + "://" + authority + path
 }
 
 // Credential says where a credential goes and which placeholder the
@@ -481,7 +595,7 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // holds rather than a document. Two binaries that deny different
 // destinations must not share a digest.
 type decisionInputs struct {
-	Endpoints          []Endpoint       `json:"endpoints"`
+	Endpoints          []digestEndpoint `json:"endpoints"`
 	ClusterCIDRs       []string         `json:"cluster_cidrs"`
 	DenyListExceptions []string         `json:"deny_list_exceptions"`
 	Identity           *Identity        `json:"identity,omitempty"`
@@ -492,6 +606,17 @@ type decisionInputs struct {
 	// a port read as cleartext where the same port read as TLS uses its server
 	// name. It is empty with no transparent frontend, where nothing is captured.
 	CleartextPorts []int `json:"cleartext_ports,omitempty"`
+}
+
+// digestEndpoint is what an endpoint contributes to the digest: the values
+// read from its URL, not the URL as written. Two spellings of one endpoint
+// digest the same.
+type digestEndpoint struct {
+	Host       string      `json:"host"`
+	Port       int         `json:"port"`
+	PathPrefix string      `json:"path_prefix"`
+	Resource   string      `json:"resource"`
+	Credential *Credential `json:"credential,omitempty"`
 }
 
 // credentialSource names the configured source.
@@ -523,8 +648,14 @@ func canonicalPrefixes(prefixes []netip.Prefix) []string {
 // canonicalEndpoints orders endpoints by host, port, and path prefix. The
 // matcher sorts prefixes by length, and validation rejects duplicates, so
 // document order changes neither the answer nor the digest.
-func canonicalEndpoints(endpoints []Endpoint) []Endpoint {
-	out := append([]Endpoint(nil), endpoints...)
+func canonicalEndpoints(endpoints []Endpoint) []digestEndpoint {
+	out := make([]digestEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		out = append(out, digestEndpoint{
+			Host: endpoint.Host, Port: endpoint.Port, PathPrefix: endpoint.PathPrefix,
+			Resource: endpoint.Resource, Credential: endpoint.Credential,
+		})
+	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Host != out[j].Host {
 			return out[i].Host < out[j].Host
@@ -698,20 +829,16 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// applyEndpointDefaults normalizes the host and fills the settings the entry
-// leaves out. Zero means the document named no port, as it does for the
-// limits and the cache size, so a document cannot ask for port 0.
+// applyEndpointDefaults reads the host, port, path prefix and resource out
+// of the endpoint URL. A URL that does not parse leaves them empty, and
+// validate reports why.
 func applyEndpointDefaults(endpoint *Endpoint) {
-	endpoint.Host = policy.NormalizeHost(endpoint.Host)
-	if endpoint.Port == 0 {
-		endpoint.Port = DefaultEndpointPort
+	parsed, err := parseEndpointURL(endpoint.URL)
+	if err != nil {
+		return
 	}
-	if endpoint.PathPrefix == "" {
-		endpoint.PathPrefix = "/"
-	}
-	if endpoint.Resource == "" && endpoint.Host != "" {
-		endpoint.Resource = "https://" + endpoint.Host + "/"
-	}
+	endpoint.Host, endpoint.Port, endpoint.PathPrefix = parsed.host, parsed.port, parsed.path
+	endpoint.Resource = canonicalResource(parsed)
 }
 
 func defaultString(field *string, value string) {
@@ -806,9 +933,9 @@ func (c *Config) validate() error {
 		// An endpoint identifies a service by host, port, and prefix. Compile
 		// uses the same identity, so both checks reject the same duplicate.
 		key := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)) + endpoint.PathPrefix
-		if previous, ok := seen[key]; ok {
-			found.addf("endpoints[%d]: host %q with path_prefix %q repeats endpoints[%d]",
-				i, endpoint.Host, endpoint.PathPrefix, previous)
+		if previous, ok := seen[key]; ok && endpoint.Host != "" {
+			found.addf("endpoints[%d]: url %q names the same endpoint as endpoints[%d]",
+				i, endpoint.URL, previous)
 		}
 		seen[key] = i
 	}
@@ -932,22 +1059,29 @@ func (id *Identity) validateClientAuth(found *problems) {
 }
 
 func (e Endpoint) validate(i int, found *problems) {
+	parsed, err := parseEndpointURL(e.URL)
+	if err != nil {
+		found.addf("endpoints[%d]: url %q %v", i, e.URL, err)
+		return
+	}
+	// The proxy forwards nothing cleartext, so a credential on an http
+	// endpoint would never be sent.
+	if parsed.scheme == "http" && e.Credential != nil {
+		found.addf("endpoints[%d]: url %q is http, and the proxy forwards nothing cleartext, "+
+			"so it cannot hold a credential", i, e.URL)
+	}
 	switch {
 	case e.Host == "":
-		found.addf("endpoints[%d]: host is empty", i)
+		found.addf("endpoints[%d]: url %q names no host", i, e.URL)
 	case isIPLiteral(e.Host):
 		found.addf("endpoints[%d]: host %q is an IP literal; a TLS client sends no SNI for one", i, e.Host)
 	case !validDNSName(e.Host):
 		found.addf("endpoints[%d]: host %q must be a DNS name of ASCII labels, "+
-			"with no scheme, port, path or wildcard", i, e.Host)
-	}
-	if e.Port < 1 || e.Port > maxPort {
-		found.addf("endpoints[%d]: port %d must be between 1 and %d", i, e.Port, maxPort)
+			"with no wildcard", i, e.Host)
 	}
 	if !normalizedPrefix(e.PathPrefix) {
-		found.addf("endpoints[%d]: path_prefix %q must be an absolute path in its shortest form", i, e.PathPrefix)
+		found.addf("endpoints[%d]: url path %q must be an absolute path in its shortest form", i, e.PathPrefix)
 	}
-	e.validateResource(i, found)
 	if e.Credential != nil {
 		e.Credential.validate(i, found)
 	}
@@ -1011,18 +1145,6 @@ func normalizedPrefix(prefix string) bool {
 	return cleaned == prefix || cleaned+"/" == prefix
 }
 
-func (e Endpoint) validateResource(i int, found *problems) {
-	resource, err := url.Parse(e.Resource)
-	switch {
-	case err != nil:
-		found.addf("endpoints[%d]: resource %q is not a URL: %v", i, e.Resource, err)
-	case resource.Scheme != "https" || resource.Host == "":
-		found.addf("endpoints[%d]: resource %q must be an absolute https URL", i, e.Resource)
-	case resource.User != nil || resource.RawQuery != "" || resource.Fragment != "":
-		found.addf("endpoints[%d]: resource %q must not hold userinfo, a query or a fragment", i, e.Resource)
-	}
-}
-
 func (c Credential) validate(i int, found *problems) {
 	if !envNameRE.MatchString(c.Env) {
 		found.addf("endpoints[%d]: credential.env %q is not an environment variable name", i, c.Env)
@@ -1033,23 +1155,30 @@ func (c Credential) validate(i int, found *problems) {
 func validatePlacement(placement Placement, i int, found *problems) {
 	switch placement.Kind {
 	case PlacementHeader:
-		requireOnly(i, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
-		if !strings.Contains(placement.Template, credential.Token) {
-			found.addf("endpoints[%d]: a header placement template must contain %s", i, credential.Token)
-		}
-		if credential.BannedHeaderName(placement.Name) {
-			found.addf("endpoints[%d]: a header placement cannot name %s, "+
-				"a header the connection, the proxy or the upstream's trust depends on", i, placement.Name)
-		}
+		validateHeaderPlacement(placement, i, found)
 	case PlacementQuery:
 		requireOnly(i, found, "query", placement.Name != "", "needs a name",
 			placement.Template == "" && placement.User == "", "takes no template or user")
 	case PlacementBasic:
 		requireOnly(i, found, "basic", placement.User != "", "needs a user",
 			placement.Name == "" && placement.Template == "", "takes no name or template")
+		if placement.User != "" && !credential.ValidBasicUser(placement.User) {
+			found.addf("endpoints[%d]: a basic placement user must not contain a colon or a control character", i)
+		}
 	default:
 		found.addf("endpoints[%d]: placement.kind %q must be %s, %s or %s",
 			i, placement.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
+	}
+}
+
+func validateHeaderPlacement(placement Placement, i int, found *problems) {
+	requireOnly(i, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
+	if !strings.Contains(placement.Template, credential.Token) {
+		found.addf("endpoints[%d]: a header placement template must contain %s", i, credential.Token)
+	}
+	if credential.BannedHeaderName(placement.Name) {
+		found.addf("endpoints[%d]: a header placement cannot name %s, "+
+			"a header the connection, the proxy or the upstream's trust depends on", i, placement.Name)
 	}
 }
 

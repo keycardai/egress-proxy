@@ -1,7 +1,9 @@
 package proxy_test
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +32,7 @@ const (
 	headerSecret   = "header-sekrit"
 	queryResource  = "https://maps.example/"
 	querySecret    = "query-sekrit"
+	basicUser      = "x-access-token"
 )
 
 // queryPlacement puts the credential in the "key" parameter.
@@ -37,9 +40,21 @@ var queryPlacement = credential.Placement{ //nolint:gochecknoglobals // a fixtur
 	Kind: credential.KindQuery, Name: "key",
 }
 
+// basicPlacement puts the credential in Authorization as the password of
+// basicUser, which is the user name a minted GitHub token arrives under.
+var basicPlacement = credential.Placement{ //nolint:gochecknoglobals // a fixture the tests share
+	Kind: credential.KindBasic, User: basicUser,
+}
+
+// basicAuthorization is the Authorization value basicPlacement writes for
+// the credential the source holds for headerResource.
+func basicAuthorization() string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(basicUser+":"+headerSecret))
+}
+
 // credentialEndpoints is one endpoint per case the tests cover: each
-// placement, an endpoint with no credential, a placement this build cannot
-// write, and a resource the source does not hold.
+// placement, an endpoint with no credential, a placement the writer
+// refuses, and a resource the source does not hold.
 func credentialEndpoints(port int) []policy.Endpoint {
 	return []policy.Endpoint{
 		{
@@ -53,7 +68,11 @@ func credentialEndpoints(port int) []policy.Endpoint {
 		{Host: upstreamHost, Port: port, PathPrefix: "/anything/plain/", Resource: headerResource},
 		{
 			Host: upstreamHost, Port: port, PathPrefix: "/anything/basic/", Resource: headerResource,
-			Credential: &credential.Placement{Kind: credential.KindBasic, User: "x-access-token"},
+			Credential: &basicPlacement,
+		},
+		{
+			Host: upstreamHost, Port: port, PathPrefix: "/anything/nouser/", Resource: headerResource,
+			Credential: &credential.Placement{Kind: credential.KindBasic},
 		},
 		{
 			Host: upstreamHost, Port: port, PathPrefix: "/anything/unknown/",
@@ -199,6 +218,31 @@ func TestCredentialInjection(t *testing.T) {
 			wantPrefix: "/anything/query/",
 		},
 		{
+			name: "a basic placement the workload sent nothing for", path: "/anything/basic/clone",
+			wantArgs: url.Values{}, wantAuthorization: []string{basicAuthorization()},
+			wantPrefix: "/anything/basic/",
+		},
+		{
+			name: "a basic placement over the credentials the workload sent", path: "/anything/basic/push",
+			header: http.Header{"Authorization": []string{
+				"Basic " + base64.StdEncoding.EncodeToString([]byte("alice:hunter2")),
+			}},
+			wantArgs: url.Values{}, wantAuthorization: []string{basicAuthorization()},
+			wantPrefix: "/anything/basic/",
+		},
+		{
+			name: "a basic placement over a bearer token the workload sent", path: "/anything/basic/bearer",
+			header:   placeholder,
+			wantArgs: url.Values{}, wantAuthorization: []string{basicAuthorization()},
+			wantPrefix: "/anything/basic/",
+		},
+		{
+			name: "a basic placement leaves the query alone", path: "/anything/basic/refs?service=git-upload-pack",
+			wantArgs:          url.Values{"service": {"git-upload-pack"}},
+			wantAuthorization: []string{basicAuthorization()},
+			wantPrefix:        "/anything/basic/",
+		},
+		{
 			name: "an endpoint naming no credential forwards what the workload sent",
 			path: "/anything/plain/pypi?q=here", header: placeholder,
 			wantArgs: url.Values{"q": {"here"}}, wantAuthorization: []string{"Bearer ${GITHUB_TOKEN}"},
@@ -249,8 +293,8 @@ func TestCredentialRefusals(t *testing.T) {
 			wantErr: "no credential source", prefix: "/anything/header/",
 		},
 		{
-			name: "a placement this build does not write", harness: withSource, path: "/anything/basic/repo.git",
-			wantErr: "does not write a basic placement", prefix: "/anything/basic/",
+			name: "a basic placement naming no user", harness: withSource, path: "/anything/nouser/repo.git",
+			wantErr: "the basic placement names no user", prefix: "/anything/nouser/",
 		},
 		{
 			name: "a resource the source does not hold", harness: withSource, path: "/anything/unknown/thing",
@@ -277,12 +321,15 @@ func TestCredentialRefusals(t *testing.T) {
 }
 
 // TestNoCredentialReachesARecordOrALogLine reads the whole record and the
-// whole log for three requests with a query placement: one the upstream
-// answers, one whose upstream never answers, and one the proxy refuses. It
-// proves that the record names the path without its query, that a failed
-// forward says why it failed, and that neither the records nor the log hold
-// the credential. The timeout text the stalled request produces names no
-// URL, so this case does not reach the redaction path.
+// whole log for four requests: one with a query placement that the upstream
+// answers, one with a basic placement that the upstream answers, one whose
+// upstream never answers, and one the proxy refuses. It proves that the
+// record names the path without its query, that a failed forward says why it
+// failed, and that neither the records nor the log hold the credential in
+// any form the placement puts on the wire. A basic placement sends base64 of
+// the user, a colon and the credential, so the scan covers that form too.
+// The timeout text of the stalled request does not include a URL, so that
+// case does not reach the redaction path.
 func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	t.Parallel()
 	h := start(t, harnessOptions{
@@ -293,6 +340,12 @@ func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	require.Equal(t, http.StatusOK, answer.status, "the allowed request")
 	allowed := h.sink.find(t, "the allowed request", byPath("/anything/query/geocode"))
 	assert.Equal(t, "/anything/query/geocode", allowed.Request.Path, "the record names the path without its query")
+
+	basicAnswer := fetch(t, h, h.upstreamURL("/anything/basic/repo.git/info/refs?service=git-upload-pack"), nil)
+	require.Equal(t, http.StatusOK, basicAnswer.status, "the basic placement request")
+	basic := h.sink.find(t, "the basic placement request", byPath("/anything/basic/repo.git/info/refs"))
+	assert.Equal(t, "/anything/basic/repo.git/info/refs", basic.Request.Path,
+		"the record names the path without its query")
 
 	stalled := fetch(t, h, h.upstreamURL("/stall/forever?q=here"), nil)
 	require.Equal(t, http.StatusBadGateway, stalled.status, "the stalled request")
@@ -305,13 +358,21 @@ func TestNoCredentialReachesARecordOrALogLine(t *testing.T) {
 	refused := fetch(t, h, h.upstreamURL("/anything/unknown/thing"), nil)
 	require.Equal(t, http.StatusForbidden, refused.status, "the refused request")
 
-	for _, record := range []audit.Record{allowed, failed} {
+	// basicWire is the base64 the basic placement puts on the wire. The raw
+	// credential does not appear in it, so a scan for headerSecret alone
+	// would miss it.
+	basicWire := base64.StdEncoding.EncodeToString([]byte(basicUser + ":" + headerSecret))
+	for _, record := range []audit.Record{allowed, basic, failed} {
 		line, err := json.Marshal(record)
 		require.NoError(t, err, "marshal the record")
-		assert.NotContains(t, string(line), querySecret, "an audit record holds the credential")
+		assert.NotContains(t, string(line), querySecret, "an audit record holds the query credential")
+		assert.NotContains(t, string(line), headerSecret, "an audit record holds the basic credential")
+		assert.NotContains(t, string(line), basicWire, "an audit record holds the base64 the basic placement writes")
 	}
 	logged := h.logs.String()
-	assert.NotContains(t, logged, querySecret, "a log line holds the credential")
+	assert.NotContains(t, logged, querySecret, "a log line holds the query credential")
+	assert.NotContains(t, logged, headerSecret, "a log line holds the basic credential")
+	assert.NotContains(t, logged, basicWire, "a log line holds the base64 the basic placement writes")
 	assert.Contains(t, logged, "refused a request", "the proxy logged nothing, so the assertion above proves nothing")
 }
 
@@ -370,6 +431,60 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 			assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
 			assert.Equal(t, tc.wantReason, record.Decision.Reason, "record reason")
 			assert.Zero(t, h.upstream.connections.Load(), "a request without its credential reached the upstream")
+		})
+	}
+}
+
+// TestUserinfoInTheRequestLineNeverReachesTheUpstream drives an
+// absolute-form request line with userinfo in it, which is the only shape
+// that can put userinfo in front of the proxy. The outbound request line is
+// origin form, so no placement forwards the userinfo. The test checks the
+// URL and the Authorization header the upstream received, and the path in
+// the record.
+func TestUserinfoInTheRequestLineNeverReachesTheUpstream(t *testing.T) {
+	t.Parallel()
+	h := start(t, harnessOptions{
+		upstream: httpbinUpstream(), endpoints: credentialEndpoints, credentials: staticSource(t),
+	})
+	tests := []struct {
+		name              string
+		path              string
+		userinfo          string
+		wantAuthorization []string
+	}{
+		{
+			name: "a basic placement and a user", path: "/anything/basic/user",
+			userinfo: "alice@", wantAuthorization: []string{basicAuthorization()},
+		},
+		{
+			name: "a basic placement, a user and a password", path: "/anything/basic/userpass",
+			userinfo: "alice:hunter2@", wantAuthorization: []string{basicAuthorization()},
+		},
+		{
+			name: "a header placement, a user and a password", path: "/anything/header/userpass",
+			userinfo: "alice:hunter2@", wantAuthorization: []string{"Bearer " + headerSecret},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn, err := h.tlsTunnel(t, upstreamHost)
+			require.NoError(t, err, "open a tunnel")
+			authority := h.upstreamAuthority()
+			answer := h.roundTrip(t, conn, bufio.NewReader(conn),
+				"GET https://"+tc.userinfo+authority+tc.path+" HTTP/1.1\r\nHost: "+authority+
+					"\r\nConnection: close\r\n\r\n")
+			require.Equal(t, http.StatusOK, answer.status, "response status, body %s", answer.body)
+			var got arrived
+			require.NoError(t, json.Unmarshal([]byte(answer.body), &got), "decode %s", answer.body)
+			assert.Equal(t, tc.wantAuthorization, got.Headers.Values("Authorization"),
+				"the Authorization header the upstream received")
+			assert.Contains(t, got.URL, tc.path, "the URL the upstream reports")
+			assert.NotContains(t, got.URL, "alice", "the user the workload put in the request line")
+			assert.NotContains(t, got.URL, "hunter2", "the password the workload put in the request line")
+			record := h.sink.find(t, tc.name, byPath(tc.path))
+			assert.Equal(t, policy.VerdictAllow, record.Decision.Verdict, "record verdict")
+			assert.NotContains(t, record.Request.Path, "alice", "the record holds the userinfo")
 		})
 	}
 }

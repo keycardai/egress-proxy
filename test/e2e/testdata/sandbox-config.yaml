@@ -26,11 +26,8 @@ policy:
   # proxy dial them, and the process announces them at every start.
   deny_list_exceptions: {{ .DenyListExceptions }}
 endpoints:
-  - host: {{ .UpstreamHost }}
-    path_prefix: /status/
-  - host: {{ .UpstreamHost }}
-    path_prefix: /headers
-    resource: "{{ .GrantedResource }}"
+  - url: https://{{ .UpstreamHost }}/status/
+  - url: {{ .GrantedResource }}
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: UPSTREAM_TOKEN

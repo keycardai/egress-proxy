@@ -62,9 +62,11 @@ These apply to every task in this repository.
    the tree outlives the plan that produced it. CI runs every scenario on
    every commit. Acceptance and gate code is Go; there are no shell scripts
    to maintain beyond the gate wrappers under `scripts/`.
-4. Configuration is additive. The config schema grows fields and never
-   renames or repurposes one. `internal/config/testdata/compat/` holds every
-   earlier example document and a test parses all of them.
+4. Configuration is additive from the first release. From then on, the
+   config schema grows fields and never renames or repurposes one, and
+   `internal/config/testdata/compat/` holds every earlier example document
+   that a test parses. Until that release, a change may break the schema and
+   edit the compat documents, and its PR says what broke.
 5. Fail closed. Any error in decision, exchange or substitution denies, and
    the test asserts which reason.
 6. **NEVER import `github.com/keycardlabs/`.** This repository ships to

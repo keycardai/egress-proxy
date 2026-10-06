@@ -26,25 +26,21 @@ policy:
   cluster_cidrs: ["10.42.0.0/16", "10.43.0.0/16"]
   deny_list_exceptions: []
 endpoints:
-  - host: "api.github.com"
-    resource: "https://api.github.com/"
+  - url: "https://api.github.com/"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: GITHUB_TOKEN
-  - host: "github.com"
-    resource: "https://api.github.com/"
+  - url: "https://github.com/"
     credential:
       placement: {kind: basic, user: x-access-token}
       env: GITHUB_TOKEN
-  - host: "openrouter.ai"
-    path_prefix: "/api/v1/"
-    resource: "https://openrouter.ai/api/v1"
+  - url: "https://openrouter.ai/api/v1"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
       env: OPENROUTER_API_KEY
-  - host: "maps.example"
+  - url: "https://maps.example/"
     credential:
       placement: {kind: query, name: key}
       env: MAPS_API_KEY
-  - host: "pypi.org"
-  - host: "files.pythonhosted.org"
+  - url: "https://pypi.org/"
+  - url: "https://files.pythonhosted.org/"

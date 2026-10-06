@@ -132,7 +132,7 @@ func TestTransparentPortOverrides(t *testing.T) {
 			cmd := command(io.Discard, io.Discard, func(_ context.Context, opts flags) error {
 				var err error
 				cfg, err = config.Parse([]byte("version: 1\nsandbox:\n  id: test\nlisten:\n  transparent_port: 1015\n"+
-					"endpoints:\n  - host: example.com\n"), opts.overrides())
+					"endpoints:\n  - url: https://example.com/\n"), opts.overrides())
 				require.NoError(t, err, "parse the document")
 				return nil
 			})
@@ -369,13 +369,13 @@ func startingProcess(t *testing.T, connectAddr string, transparentPort int, fami
 // bindDocument is the smallest document that starts, with the CONNECT
 // frontend on a port the kernel picks.
 const bindDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
-	"listen:\n  connect: 127.0.0.1:0\nendpoints:\n  - host: example.com\n"
+	"listen:\n  connect: 127.0.0.1:0\nendpoints:\n  - url: https://example.com/\n"
 
 // resolverDocument runs the allowlist resolver and no transparent
 // frontend, which is the posture the rules still have to feed.
 const resolverDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 	"listen:\n  connect: 127.0.0.1:0\n  dns: 127.0.0.1:53\n" +
-	"dns:\n  forward_to: [\"10.43.0.10\"]\nendpoints:\n  - host: example.com\n"
+	"dns:\n  forward_to: [\"10.43.0.10\"]\nendpoints:\n  - url: https://example.com/\n"
 
 // TestTheReceiptIsReadForEverySurfaceTheRulesFeed pins which postures read
 // the netsetup receipt. The rules deliver the captured connections and the
