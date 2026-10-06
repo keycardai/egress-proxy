@@ -127,7 +127,7 @@ const (
 	filterKey  = "filter EGRESS_PROXY_FILTER_OUTPUT"
 	natKey     = "nat EGRESS_PROXY_NAT_OUTPUT"
 	filterJump = "-A OUTPUT -j EGRESS_PROXY_FILTER_OUTPUT"
-	natJump    = "-A OUTPUT -p tcp -j EGRESS_PROXY_NAT_OUTPUT"
+	natJump    = "-A OUTPUT -j EGRESS_PROXY_NAT_OUTPUT"
 	drop       = "-A EGRESS_PROXY_FILTER_OUTPUT -j DROP"
 	// Rules of the kind Docker's embedded resolver puts in a container's
 	// OUTPUT chains.
@@ -366,6 +366,16 @@ func TestVerifyProblems(t *testing.T) {
 				`the first rule in the OUTPUT chain in the filter table is not "` + filterJump + `"`,
 				"Those rules are:\n    -A OUTPUT -o eth1 -j EGRESS_PROXY_FILTER_OUTPUT\n    -A OUTPUT -j ACCEPT",
 			},
+		},
+		{
+			// Conntrack does not tell sockets apart, so an accept in both
+			// directions passes a workload packet sent on the proxy's tuple.
+			name: "an ESTABLISHED accept in both directions in place of the reply-only accept",
+			edit: func(rules map[string][]string) {
+				rules[filterKey][0] = "-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT"
+			},
+			want: []string{"not in the tables: -t filter -A EGRESS_PROXY_FILTER_OUTPUT -m conntrack " +
+				"--ctstate ESTABLISHED --ctdir REPLY -j ACCEPT"},
 		},
 		{
 			name: "a rule the ruleset installs that is not in the tables",

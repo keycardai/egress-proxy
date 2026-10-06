@@ -49,6 +49,11 @@ const (
 	// below 1024, the default net.ipv4.ip_unprivileged_port_start, so a
 	// workload without NET_BIND_SERVICE cannot bind it.
 	DefaultRedirectPort = 1015
+	// DefaultDNSPort is the port the sidecar's allowlist resolver listens
+	// on, on the pod loopback. Outbound DNS is redirected to it. It is
+	// below 1024, so an unprivileged workload cannot bind it during a
+	// sidecar restart and answer its own lookups.
+	DefaultDNSPort = 53
 	// DefaultReceiptPath is where the init container writes what it
 	// programmed and where the sidecar reads it. It is on an emptyDir with
 	// medium Memory that the two containers share and the workload does not
@@ -88,12 +93,17 @@ type Config struct {
 	// unmediated.
 	PodCIDRs     []netip.Prefix
 	ServiceCIDRs []netip.Prefix
-	// DNSServers are the resolvers outbound DNS is accepted to. DNS is
-	// accepted by destination and to nowhere else: an accept with no
-	// destination match is a tunnel, because any protocol to port 53 on any
-	// host would then leave the pod without passing the proxy. At least one
-	// server is required.
+	// DNSServers are the cluster resolvers. The rules do not send anything
+	// to them. The redirect sends every query the workload makes to the
+	// sidecar's allowlist resolver, and the receipt tells the sidecar which
+	// resolvers to forward an allowed name to. At least one is required,
+	// because without one the resolver cannot answer any name.
 	DNSServers []netip.Addr
+	// DNSPort is the port the sidecar's allowlist resolver listens on. UDP
+	// and TCP port 53 are redirected to it, whatever resolver the client
+	// named. Zero disables the DNS redirect. The filter DROP then refuses
+	// every query the workload sends anywhere but loopback.
+	DNSPort int
 	// IPv6 says what the ip6tables ruleset does.
 	IPv6 IPv6Mode
 }
@@ -144,6 +154,7 @@ func DefaultConfig() Config {
 		ProxyUID:     DefaultProxyUID,
 		RedirectPort: DefaultRedirectPort,
 		CapturePorts: []int{80, 443},
+		DNSPort:      DefaultDNSPort,
 		IPv6:         IPv6Proxy,
 	}
 }
@@ -172,6 +183,7 @@ func (c Config) Validate() error {
 		found.addf("redirect port %d is out of range 1-%d", c.RedirectPort, maxPort)
 	}
 	found.add(c.capturePortProblems()...)
+	found.add(c.dnsPortProblems()...)
 	found.add(prefixProblems("pod CIDR", c.PodCIDRs)...)
 	found.add(prefixProblems("service CIDR", c.ServiceCIDRs)...)
 	found.add(c.resolverProblems()...)
@@ -210,10 +222,25 @@ func (c Config) capturePortProblems() []string {
 	return found
 }
 
+// dnsPortProblems refuses a DNS redirect that would send queries at the
+// wrong listener.
+func (c Config) dnsPortProblems() []string {
+	var found problems
+	if c.DNSPort < 0 || c.DNSPort > maxPort {
+		found.addf("dns port %d is out of range 0-%d", c.DNSPort, maxPort)
+	}
+	if c.DNSPort != 0 && c.DNSPort == c.RedirectPort {
+		found.addf("dns port %d is the redirect port, so every lookup would arrive on the transparent "+
+			"frontend, which decides connections and answers no query", c.DNSPort)
+	}
+	return found
+}
+
 func (c Config) resolverProblems() []string {
 	var found problems
 	if len(c.DNSServers) == 0 {
-		found.addf("no DNS servers: the filter table would drop every resolution. Name the resolvers")
+		found.addf("no DNS servers: the sidecar's resolver would have nowhere to forward an allowed name. " +
+			"Name the resolvers")
 	}
 	for _, server := range c.DNSServers {
 		switch {

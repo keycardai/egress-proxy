@@ -21,6 +21,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/keycardai/go-sdk v0.23.2
 	github.com/mccutchen/go-httpbin/v2 v2.25.0
+	github.com/miekg/dns v1.1.73
 	github.com/moby/buildkit v0.33.1
 	github.com/moby/sys/capability v0.4.0
 	github.com/rogpeppe/go-internal v1.16.0

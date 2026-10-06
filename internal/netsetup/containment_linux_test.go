@@ -36,6 +36,7 @@ func TestContainmentReadsThisProcess(t *testing.T) {
 	got, err := netsetup.Containment(netsetup.ContainmentRequest{
 		Path:            path,
 		TransparentPort: netsetup.DefaultRedirectPort,
+		DNSPort:         netsetup.DefaultDNSPort,
 		UID:             uid,
 		Now:             now,
 	})

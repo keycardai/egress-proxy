@@ -49,6 +49,7 @@ func main() {
 type settings struct {
 	proxyUID       int
 	redirectPort   int
+	dnsPort        int
 	capturePorts   []string
 	podCIDRs       []string
 	serviceCIDRs   []string
@@ -192,7 +193,7 @@ type ipv6Probe func() (bool, error)
 
 // config turns the flags into a validated ruleset input.
 func (s settings) config(out io.Writer, hasIPv6 ipv6Probe) (netsetup.Config, error) {
-	cfg := netsetup.Config{ProxyUID: s.proxyUID, RedirectPort: s.redirectPort}
+	cfg := netsetup.Config{ProxyUID: s.proxyUID, RedirectPort: s.redirectPort, DNSPort: s.dnsPort}
 	var err error
 	if cfg.CapturePorts, err = parsePorts(s.capturePorts); err != nil {
 		return cfg, fmt.Errorf("--capture-ports: %w", err)
@@ -479,6 +480,11 @@ func flagSet(opts *settings) []cli.Flag {
 			Name: "capture-ports", Value: portStrings(defaults.CapturePorts), Destination: &opts.capturePorts,
 			Usage: "outbound TCP destination ports to redirect",
 		},
+		&cli.IntFlag{
+			Name: "dns-port", Value: defaults.DNSPort, Destination: &opts.dnsPort,
+			Usage: "port of the sidecar's allowlist resolver, which UDP and TCP port 53 are redirected to; " +
+				"0 redirects no DNS",
+		},
 		&cli.StringSliceFlag{
 			Name: "pod-cidrs", Destination: &opts.podCIDRs,
 			Usage: "pod CIDRs; traffic to them is not redirected and the filter DROP still covers it",
@@ -489,7 +495,8 @@ func flagSet(opts *settings) []cli.Flag {
 		},
 		&cli.StringSliceFlag{
 			Name: "dns-servers", Destination: &opts.dnsServers,
-			Usage: "resolvers outbound DNS may reach; empty reads them from --resolv-conf",
+			Usage: "cluster resolvers the sidecar forwards an allowed name to, recorded in the receipt; " +
+				"empty reads them from --resolv-conf",
 		},
 		&cli.StringFlag{
 			Name: "resolv-conf", Value: "/etc/resolv.conf", Destination: &opts.resolvConf,

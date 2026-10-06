@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/admin"
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/proxy"
 	"github.com/keycardai/egress-proxy/internal/transparent"
 )
@@ -37,6 +39,8 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		"IMPERSONATE_USER":        "env-user",
 		"CONNECT":                 "127.0.0.1:1",
 		"TRANSPARENT_PORT":        "1015",
+		"DNS":                     "127.0.0.1:53",
+		"DNS_FORWARD_TO":          "10.43.0.10,fd00::a",
 		"ADMIN":                   "/env/admin.sock",
 		"NETSETUP_RECEIPT":        "/env/netsetup.json",
 		"CA_OUT_DIR":              "/env/ca",
@@ -47,6 +51,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		"CACHE_SIZE":              "5",
 		"UPSTREAM_CA_FILES":       "/env/a.pem,/env/b.pem",
 		"MAX_CONNECTIONS":         "9",
+		"MAX_DNS_CONNECTIONS":     "11",
 		"IDLE_TIMEOUT":            "90s",
 		"RESPONSE_HEADER_TIMEOUT": "45s",
 		"EXCHANGE_TIMEOUT":        "7s",
@@ -65,12 +70,14 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		SandboxID: "sbx-env", ZoneURL: "https://env.example", ClientID: "env-client",
 		WorkloadTokenFile: "/env/token", ImpersonateUser: "env-user",
 		// The flag wins over EGRESS_PROXY_CONNECT.
-		Connect: "127.0.0.1:2", TransparentPort: 1015, TransparentPortSet: true, Admin: "/env/admin.sock",
+		Connect: "127.0.0.1:2", TransparentPort: 1015, TransparentPortSet: true, DNS: "127.0.0.1:53",
+		DNSForwardTo: []string{"10.43.0.10", "fd00::a"}, Admin: "/env/admin.sock",
 		NetsetupReceipt: "/env/netsetup.json", CAOutDir: "/env/ca", CAStateDir: "/env/state",
 		ClientSecretFile:     "/env/client-secret",
 		CredentialStaticFile: "/env/credentials.yaml",
 		LeafTTL:              2 * time.Hour, CacheSize: 5, UpstreamCAFiles: []string{"/env/a.pem", "/env/b.pem"},
-		MaxConnections: 9, IdleTimeout: 90 * time.Second, ResponseHeaderTimeout: 45 * time.Second,
+		MaxConnections: 9, MaxDNSConnections: 11,
+		IdleTimeout: 90 * time.Second, ResponseHeaderTimeout: 45 * time.Second,
 		ExchangeTimeout: 7 * time.Second,
 	}
 	assert.Equal(t, "/env/config.yaml", got.configPath, "the config path comes from the variable")
@@ -199,7 +206,7 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 			proc.listenCapture = tc.listen
 			require.ErrorIs(t, proc.ready(), errNotReady, "readiness before bind")
 
-			listener, captured, err := proc.bind(t.Context())
+			listener, captured, resolver, err := proc.bind(t.Context())
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr, "bind")
 				require.ErrorIs(t, err, errCapture, "every refusal here is the transparent frontend's")
@@ -222,6 +229,7 @@ func TestBindReportsReadyOnlyOnceEveryListenerIsBound(t *testing.T) {
 			}
 			require.NoError(t, err, "bind")
 			t.Cleanup(func() { _ = listener.Close() })
+			t.Cleanup(func() { _ = resolver.Close() })
 			for _, capture := range captured {
 				t.Cleanup(func() { _ = capture.Close() })
 			}
@@ -249,7 +257,7 @@ func listenIPv4Only(ctx context.Context, port int) ([]net.Listener, error) {
 func TestReadinessNeedsTheCertificate(t *testing.T) {
 	t.Parallel()
 	proc := startingProcess(t, freeAddress(t), 0, nil)
-	listener, _, err := proc.bind(t.Context())
+	listener, _, _, err := proc.bind(t.Context())
 	require.NoError(t, err, "bind")
 	t.Cleanup(func() { _ = listener.Close() })
 	require.NoError(t, proc.ready(), "readiness with the listener bound and the certificate on disk")
@@ -362,6 +370,52 @@ func startingProcess(t *testing.T, connectAddr string, transparentPort int, fami
 // frontend on a port the kernel picks.
 const bindDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 	"listen:\n  connect: 127.0.0.1:0\nendpoints:\n  - host: example.com\n"
+
+// resolverDocument runs the allowlist resolver and no transparent
+// frontend, which is the posture the rules still have to feed.
+const resolverDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
+	"listen:\n  connect: 127.0.0.1:0\n  dns: 127.0.0.1:53\n" +
+	"dns:\n  forward_to: [\"10.43.0.10\"]\nendpoints:\n  - host: example.com\n"
+
+// TestTheReceiptIsReadForEverySurfaceTheRulesFeed pins which postures read
+// the netsetup receipt. The rules deliver the captured connections and the
+// redirected lookups, so a process that serves either one refuses to start
+// without a receipt that agrees with it.
+func TestTheReceiptIsReadForEverySurfaceTheRulesFeed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// document is what the sidecar was given.
+		document string
+		// wantErr is a substring of the refusal, empty where the posture
+		// reads no receipt.
+		wantErr string
+	}{
+		{name: "no capture and no resolver reads no receipt", document: bindDocument},
+		{
+			name:     "a resolver with no capture reads the receipt",
+			document: resolverDocument,
+			wantErr:  "no netsetup receipt",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(tc.document), config.Overrides{})
+			require.NoError(t, err, "config.Parse:\n%s", tc.document)
+			cfg.Netsetup.Receipt = filepath.Join(t.TempDir(), "netsetup.json")
+
+			receipt, err := containment(cfg, netsetup.ContainmentRequest{})
+			if tc.wantErr == "" {
+				require.NoError(t, err, "a posture behind no rules starts")
+				assert.Nil(t, receipt, "no receipt is read")
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr, "the refusal names what is missing")
+			assert.Nil(t, receipt, "a refused start reads no receipt")
+		})
+	}
+}
 
 // TestCaptureFamiliesFollowTheSocketsThatBound reads the families off real
 // listeners, because that is what the receipt is compared against.

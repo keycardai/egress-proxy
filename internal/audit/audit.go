@@ -24,6 +24,10 @@ type Scope string
 const (
 	ScopeConnection Scope = "connection"
 	ScopeRequest    Scope = "request"
+	// ScopeDNS is one name lookup answered by the allowlist resolver. The
+	// record names the question and the response code, and the destination
+	// host is the name that was asked for.
+	ScopeDNS Scope = "dns"
 )
 
 // Record is one audited decision.
@@ -44,8 +48,10 @@ type Record struct {
 	Scope        Scope       `json:"scope"`
 	Destination  Destination `json:"destination"`
 	// Request is absent on a connection-scoped record.
-	Request  *RequestInfo `json:"request,omitempty"`
-	Decision Decision     `json:"decision"`
+	Request *RequestInfo `json:"request,omitempty"`
+	// Query is the DNS question, present on a record with scope dns.
+	Query    *QueryInfo `json:"query,omitempty"`
+	Decision Decision   `json:"decision"`
 	// Outcome is what came of an allowed request.
 	Outcome *Outcome `json:"outcome,omitempty"`
 }
@@ -87,6 +93,22 @@ type RequestInfo struct {
 	// Host is the Host header as the workload sent it. The request decision
 	// compares it with the SNI.
 	Host string `json:"host,omitempty"`
+}
+
+// QueryInfo is the DNS question a record covers. The name itself is
+// Destination.Host.
+type QueryInfo struct {
+	// Type is the query type, such as A or AAAA. It is the numeric type
+	// for one this build has no name for.
+	Type string `json:"type"`
+	// Class is the query class. Only IN resolves.
+	Class string `json:"class"`
+	// Protocol is udp or tcp. A resolver falls back to TCP for an answer
+	// that does not fit in a datagram, RFC 7766 section 5.
+	Protocol string `json:"protocol"`
+	// Rcode is the response code the resolver sent, such as NOERROR,
+	// NXDOMAIN or SERVFAIL.
+	Rcode string `json:"rcode"`
 }
 
 // Decision is the verdict and why.

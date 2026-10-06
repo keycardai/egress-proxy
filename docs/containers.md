@@ -55,10 +55,10 @@ program rules or read another process.
         drop: ["ALL"]
         add: ["NET_BIND_SERVICE"]
 
-The capability lets the proxy bind `listen.transparent_port` below 1024.
-The redirect port the init container programs is 1015, and a port below
-1024 is one an unprivileged workload cannot bind during a sidecar restart
-to stand in for the proxy.
+The capability lets the proxy bind `listen.transparent_port` and
+`listen.dns`, both below 1024. The default redirect port is 1015 and the
+resolver port is 53. An unprivileged workload cannot bind a port below
+1024, so it cannot take over either port during a sidecar restart.
 
 This needs both the image and the pod. The image has
 `cap_net_bind_service=+ep` on `/ko-app/egress-proxy`, so the kernel puts the
@@ -93,7 +93,7 @@ container before `main` runs, even when `listen.transparent_port` is unset.
 | `/shared-ca/out` | `ca.out_dir` | Where the proxy writes `ca.crt`. The workload reads the same volume and trusts that file. It holds the certificate and nothing else. |
 | the CA state directory | `ca.state_dir` | Where the CA key is held across restarts. It must be memory-backed, and the proxy refuses to start when it is not. NEVER mount it into another container, and NEVER place it under `ca.out_dir`. |
 | `/run/egress/admin/admin.sock` | `listen.admin` | The admin socket. The proxy sets its directory to mode 0700 on every start and refuses to start when the directory does not end up at that mode. |
-| `/run/egress/netsetup/netsetup.json` | `netsetup.receipt` | What the init container recorded. The proxy reads it and refuses to serve a transparent frontend without it. |
+| `/run/egress/netsetup/netsetup.json` | `netsetup.receipt` | What the init container recorded: the ruleset, the ports it redirects and the cluster resolvers. The proxy reads it and refuses to serve a transparent frontend without it. |
 | the projected token | `identity.workload_token_file` | The ServiceAccount token the exchange authenticates with, when the document names workload identity. |
 | the client secret | `identity.client_secret_file` | The application credential secret, when the document names one. It must be readable by its owner alone. |
 
@@ -150,9 +150,36 @@ and a receipt or directory owned by a uid other than root and its own.
 **Settings.** `egress-netsetup` reads only flags, not environment
 variables. The defaults a pod has to agree with are in
 `egress-proxy settings` under `netsetup`: the proxy uid, the redirect port,
-the captured ports and the receipt path. `--proxy-uid` and the proxy
-container's `runAsUser` name the same uid, and `--redirect-port` and
-`listen.transparent_port` name the same port.
+the captured ports, the DNS port and the receipt path. `--proxy-uid` and
+the proxy container's `runAsUser` name the same uid, `--redirect-port` and
+`listen.transparent_port` name the same port, and `--dns-port` and `listen.dns`
+name the same port. The proxy refuses to start when any of the three
+disagree.
+
+## Name resolution
+
+The init container redirects UDP and TCP port 53 to `listen.dns`. The
+filter chain does not accept DNS to any resolver. Every lookup the workload
+makes reaches the sidecar's resolver, whatever resolver the client named.
+A query the redirect missed reaches the terminal DROP.
+The resolver answers `NXDOMAIN` for a name that is not an endpoint host or
+the zone host and forwards the rest to the cluster resolvers.
+
+**Leave the pod's resolver configuration alone.** Use the default
+`dnsPolicy: ClusterFirst`. The redirect already sends every query to the
+resolver. A pod that sets `dnsPolicy: None` with
+`nameservers: [127.0.0.1]` points every container at the loopback
+listener, the init container included. The init container then records
+the loopback address as the cluster resolver, and the proxy refuses to
+start, because it would forward every allowed name to itself.
+
+**The resolvers the sidecar forwards to** come from the receipt, which
+holds what the init container read from `/etc/resolv.conf`. To name them
+another way, set `dns.forward_to` on the proxy. To run without a resolver,
+leave `listen.dns` unset and run the init container with `--dns-port 0`.
+
+A name in `/etc/hosts` does not need a resolver. Debian
+resolves `files` before `dns`, so a `hostAliases` entry still works.
 
 ## The sandbox-base image
 
@@ -228,14 +255,20 @@ inside the container.
 
 - **The netsetup receipt.** With `listen.transparent_port` set, the proxy reads
   the receipt before it serves. It refuses a receipt that says the rules
-  were not read back, one whose proxy uid or redirect port disagrees with
-  its own, one that does not name an address family, one that says
-  `CAP_NET_ADMIN` was kept, and one that any other uid can write. It also
+  were not read back, one whose proxy uid, redirect port or DNS port
+  disagrees with its own, one that does not name an address family, one
+  that says `CAP_NET_ADMIN` was kept, and one that any other uid can write. It also
   refuses to serve while this process holds `CAP_NET_ADMIN`.
-- **`net.ipv4.ip_unprivileged_port_start`.** The redirect target is below
-  1024 so the workload cannot bind it. That rests on the sysctl, so the
-  proxy reads it at start-up rather than trusting the manifest and refuses
-  to start when it is at or below the redirect port. containerd sets the
+- **The resolver's forward targets.** The proxy refuses a `dns.forward_to`
+  entry that names its own listen address, which would forward every
+  allowed name to itself, and one that is a name rather than an address.
+  With `listen.dns` set and no resolver named anywhere, it refuses to
+  start.
+- **`net.ipv4.ip_unprivileged_port_start`.** The redirect target and the
+  resolver port are below 1024 so the workload cannot bind either. That
+  rests on the sysctl, so the proxy reads it at start-up rather than
+  trusting the manifest and refuses to start when it is at or below the
+  higher of the two. containerd sets the
   sysctl to 0 in a pod sandbox, and Docker sets it to 0 too, so the refusal
   fires on every pod that has not set it. A pod that wants this mitigation
   sets it itself:

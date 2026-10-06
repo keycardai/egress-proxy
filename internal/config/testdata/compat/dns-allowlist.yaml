@@ -1,0 +1,18 @@
+# A sidecar that answers the sandbox's name lookups. listen.dns is the
+# loopback address the netsetup rules redirect port 53 to, and
+# dns.forward_to names the cluster resolvers an allowed name goes to. Only
+# the endpoint hosts and the zone host resolve.
+version: 1
+sandbox:
+  id: sbx-dns
+listen:
+  connect: "127.0.0.1:3128"
+  transparent_port: 1015
+  dns: "127.0.0.1:53"
+  admin: "/run/egress/admin.sock"
+netsetup:
+  receipt: "/run/egress/netsetup.json"
+dns:
+  forward_to: ["10.43.0.10", "fd00::a"]
+endpoints:
+  - host: api.github.com

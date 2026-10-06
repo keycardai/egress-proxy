@@ -51,7 +51,12 @@ const (
 	DefaultLeafTTL        = 24 * time.Hour
 	DefaultCacheSize      = 1024
 	DefaultMaxConnections = 1024
-	DefaultIdleTimeout    = 5 * time.Minute
+	// DefaultMaxDNSConnections caps the TCP connections the allowlist
+	// resolver holds. It is well below DefaultMaxConnections: a lookup is
+	// one short exchange, and the resolver shares the process's file
+	// descriptors with the frontends and the audit writer.
+	DefaultMaxDNSConnections = 128
+	DefaultIdleTimeout       = 5 * time.Minute
 	// DefaultEndpointPort is the port an endpoint covers when it names none.
 	// Endpoints name HTTPS destinations.
 	DefaultEndpointPort = 443
@@ -113,7 +118,9 @@ type Document struct {
 	Credentials Credentials `json:"credentials"`
 	// Netsetup describes what the init container programmed into network
 	// firewall rules. The proxy reads it before serving a transparent frontend.
-	Netsetup  Netsetup   `json:"netsetup"`
+	Netsetup Netsetup `json:"netsetup"`
+	// DNS is where the allowlist resolver forwards a name it answers.
+	DNS       DNS        `json:"dns"`
 	Policy    Policy     `json:"policy"`
 	Endpoints []Endpoint `json:"endpoints"`
 }
@@ -194,6 +201,14 @@ type Listen struct {
 	// a sidecar restart and stand in for the proxy. The proxy holds
 	// NET_BIND_SERVICE and no other capability.
 	TransparentPort int `json:"transparent_port"`
+	// DNS is the address the allowlist resolver binds, host:port. An empty
+	// value runs no resolver. A host that is empty or unspecified binds
+	// each family's loopback address, which is where the nat REDIRECT
+	// sends a query.
+	//
+	// The port is below 1024, so an unprivileged workload cannot bind it
+	// during a sidecar restart and answer its own lookups.
+	DNS string `json:"dns"`
 	// CleartextPorts lists captured destination ports to read as cleartext
 	// HTTP. The destination comes from the Host header. Empty means port 80.
 	// Every other captured port is read as TLS.
@@ -206,6 +221,22 @@ type Listen struct {
 // serving a transparent frontend and refuses a mismatched uid or port.
 type Netsetup struct {
 	Receipt string `json:"receipt"`
+}
+
+// DNS is where the allowlist resolver forwards a name it answers.
+//
+// There is no setting for which names resolve. The resolver answers only
+// the endpoint hosts and the zone host, which are the hosts the proxy
+// connects to. A setting that added names would be a policy rule with no
+// endpoint behind it.
+//
+// NEVER add a setting that changes which names resolve. It would have to go
+// in the decision inputs that config.digest covers.
+type DNS struct {
+	// ForwardTo are the cluster resolvers, each an address with an
+	// optional port. When it is empty, the proxy reads them from the
+	// netsetup receipt.
+	ForwardTo []string `json:"forward_to"`
 }
 
 // CA configures the certificate authority that the proxy terminates the
@@ -232,8 +263,14 @@ type TLS struct {
 
 // Limits bound every listener and the upstream leg.
 type Limits struct {
-	MaxConnections int      `json:"max_connections"`
-	IdleTimeout    Duration `json:"idle_timeout"`
+	MaxConnections int `json:"max_connections"`
+	// MaxDNSConnections caps the TCP connections the allowlist resolver
+	// accepts on each of its listeners. It is separate from
+	// MaxConnections: a lookup is one short exchange, and a workload that
+	// filled the frontend's budget with lookups would starve the frontends
+	// and the audit writer of the file descriptors they share.
+	MaxDNSConnections int      `json:"max_dns_connections"`
+	IdleTimeout       Duration `json:"idle_timeout"`
 	// ResponseHeaderTimeout is how long an upstream has to send a response
 	// head once the request is written. It does not bound the body, so a
 	// streamed response runs as long as it stays active.
@@ -241,6 +278,26 @@ type Limits struct {
 	// ExchangeTimeout limits one token exchange, including discovery. A
 	// request that exceeds it returns exchange_failed.
 	ExchangeTimeout Duration `json:"exchange_timeout"`
+}
+
+// validate reports every limit that would leave a listener or the upstream
+// leg unbounded.
+func (l *Limits) validate(found *problems) {
+	if l.MaxConnections < 1 {
+		found.addf("limits.max_connections must be at least 1")
+	}
+	if l.MaxDNSConnections < 1 {
+		found.addf("limits.max_dns_connections must be at least 1")
+	}
+	if l.IdleTimeout <= 0 {
+		found.addf("limits.idle_timeout must be positive")
+	}
+	if l.ResponseHeaderTimeout <= 0 {
+		found.addf("limits.response_header_timeout must be positive")
+	}
+	if l.ExchangeTimeout <= 0 {
+		found.addf("limits.exchange_timeout must be positive")
+	}
 }
 
 // Policy is what joins and what leaves the platform deny list.
@@ -344,6 +401,8 @@ type Overrides struct {
 	Connect               string
 	TransparentPort       int
 	TransparentPortSet    bool
+	DNS                   string
+	DNSForwardTo          []string
 	Admin                 string
 	NetsetupReceipt       string
 	CAOutDir              string
@@ -354,6 +413,7 @@ type Overrides struct {
 	CacheSize             int
 	UpstreamCAFiles       []string
 	MaxConnections        int
+	MaxDNSConnections     int
 	IdleTimeout           time.Duration
 	ResponseHeaderTimeout time.Duration
 	ExchangeTimeout       time.Duration
@@ -533,6 +593,47 @@ func (c *Config) UpstreamRoots() (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// port is the port a listen address names, zero for an address that names
+// none or does not parse.
+func port(address string) int {
+	if address == "" {
+		return 0
+	}
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return 0
+	}
+	value, err := strconv.Atoi(portText)
+	if err != nil || value < 1 || value > maxPort {
+		return 0
+	}
+	return value
+}
+
+// DNSPort is the port the allowlist resolver binds, zero when listen.dns
+// is unset. The containment check compares it with the port
+// the netsetup rules redirect DNS to.
+func (c *Config) DNSPort() int {
+	return port(c.Listen.DNS)
+}
+
+// DNSHosts are the names the allowlist resolver answers for: every
+// endpoint host and the zone host. It is derived from the document and
+// nothing configures it.
+func (c *Config) DNSHosts() []string {
+	hosts := make([]string, 0, len(c.Endpoints)+1)
+	for _, endpoint := range c.Endpoints {
+		hosts = append(hosts, endpoint.Host)
+	}
+	if c.Identity != nil {
+		if zone, err := url.Parse(c.Identity.ZoneURL); err == nil && zone.Hostname() != "" {
+			hosts = append(hosts, zone.Hostname())
+		}
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
 // digestDecisionInputs canonicalizes the decision inputs and hashes them.
 //
 // The digest is one way and this package exposes no reader for the input, so
@@ -579,6 +680,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Limits.MaxConnections == 0 {
 		c.Limits.MaxConnections = DefaultMaxConnections
+	}
+	if c.Limits.MaxDNSConnections == 0 {
+		c.Limits.MaxDNSConnections = DefaultMaxDNSConnections
 	}
 	if c.Limits.IdleTimeout == 0 {
 		c.Limits.IdleTimeout = Duration(DefaultIdleTimeout)
@@ -641,6 +745,9 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("listen.connect", overrides.Connect != "", func() { c.Listen.Connect = overrides.Connect })
 	override("listen.transparent_port", overrides.TransparentPortSet || overrides.TransparentPort != 0,
 		func() { c.Listen.TransparentPort = overrides.TransparentPort })
+	override("listen.dns", overrides.DNS != "", func() { c.Listen.DNS = overrides.DNS })
+	override("dns.forward_to", len(overrides.DNSForwardTo) > 0,
+		func() { c.DNS.ForwardTo = append([]string(nil), overrides.DNSForwardTo...) })
 	override("listen.admin", overrides.Admin != "", func() { c.Listen.Admin = overrides.Admin })
 	override("netsetup.receipt", overrides.NetsetupReceipt != "",
 		func() { c.Netsetup.Receipt = overrides.NetsetupReceipt })
@@ -652,27 +759,24 @@ func (c *Config) applyOverrides(overrides Overrides) {
 		func() { c.TLS.UpstreamCAFiles = append([]string(nil), overrides.UpstreamCAFiles...) })
 	override("credentials.static_file", overrides.CredentialStaticFile != "",
 		func() { c.Credentials.StaticFile = overrides.CredentialStaticFile })
-	override(
-		"limits.max_connections",
-		overrides.MaxConnections != 0,
-		func() { c.Limits.MaxConnections = overrides.MaxConnections },
-	)
-	override(
-		"limits.idle_timeout",
-		overrides.IdleTimeout != 0,
-		func() { c.Limits.IdleTimeout = Duration(overrides.IdleTimeout) },
-	)
-	override(
-		"limits.response_header_timeout",
-		overrides.ResponseHeaderTimeout != 0,
-		func() { c.Limits.ResponseHeaderTimeout = Duration(overrides.ResponseHeaderTimeout) },
-	)
-	override(
-		"limits.exchange_timeout",
-		overrides.ExchangeTimeout != 0,
-		func() { c.Limits.ExchangeTimeout = Duration(overrides.ExchangeTimeout) },
-	)
+	c.Limits.applyOverrides(overrides, override)
 	sort.Strings(c.Overridden)
+}
+
+// applyOverrides replaces each limit an override names. record is what
+// applyOverrides passes down, so an overridden limit reaches
+// Config.Overridden the way every other setting does.
+func (l *Limits) applyOverrides(overrides Overrides, record func(key string, set bool, assign func())) {
+	record("limits.max_connections", overrides.MaxConnections != 0,
+		func() { l.MaxConnections = overrides.MaxConnections })
+	record("limits.max_dns_connections", overrides.MaxDNSConnections != 0,
+		func() { l.MaxDNSConnections = overrides.MaxDNSConnections })
+	record("limits.idle_timeout", overrides.IdleTimeout != 0,
+		func() { l.IdleTimeout = Duration(overrides.IdleTimeout) })
+	record("limits.response_header_timeout", overrides.ResponseHeaderTimeout != 0,
+		func() { l.ResponseHeaderTimeout = Duration(overrides.ResponseHeaderTimeout) })
+	record("limits.exchange_timeout", overrides.ExchangeTimeout != 0,
+		func() { l.ExchangeTimeout = Duration(overrides.ExchangeTimeout) })
 }
 
 // problems collects validation findings so one run reports all of them.
@@ -722,6 +826,7 @@ func (c *Config) validateProcess(found *problems) {
 		found.addf("listen.admin %q must be an absolute path; the admin surface is a Unix socket", c.Listen.Admin)
 	}
 	c.validateTransparent(found)
+	c.validateDNS(found)
 	c.CA.validate(found)
 	for i, file := range c.TLS.UpstreamCAFiles {
 		if strings.TrimSpace(file) == "" {
@@ -732,18 +837,7 @@ func (c *Config) validateProcess(found *problems) {
 			found.addf("tls.upstream_ca_files[%d] %q must be an absolute path", i, file)
 		}
 	}
-	if c.Limits.MaxConnections < 1 {
-		found.addf("limits.max_connections must be at least 1")
-	}
-	if c.Limits.IdleTimeout <= 0 {
-		found.addf("limits.idle_timeout must be positive")
-	}
-	if c.Limits.ResponseHeaderTimeout <= 0 {
-		found.addf("limits.response_header_timeout must be positive")
-	}
-	if c.Limits.ExchangeTimeout <= 0 {
-		found.addf("limits.exchange_timeout must be positive")
-	}
+	c.Limits.validate(found)
 }
 
 func (c CA) validate(found *problems) {
@@ -990,6 +1084,30 @@ func (c *Config) validateTransparent(found *problems) {
 	if !filepath.IsAbs(c.Netsetup.Receipt) {
 		found.addf("netsetup.receipt %q must be an absolute path. The transparent frontend starts only after "+
 			"the receipt shows the rules redirect to it", c.Netsetup.Receipt)
+	}
+}
+
+// validateDNS checks the resolver's address and its forward targets. A
+// resolver is optional. It refuses forward targets without listen.dns,
+// because nothing would read them.
+func (c *Config) validateDNS(found *problems) {
+	for i, target := range c.DNS.ForwardTo {
+		if _, err := netip.ParseAddr(strings.TrimSpace(target)); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddrPort(strings.TrimSpace(target)); err != nil {
+			found.addf("dns.forward_to[%d] %q must be an IP address or address:port. A hostname would need "+
+				"a resolver to look it up", i, target)
+		}
+	}
+	if c.Listen.DNS == "" {
+		if len(c.DNS.ForwardTo) > 0 {
+			found.addf("dns.forward_to names resolvers and listen.dns is unset, so nothing reads them")
+		}
+		return
+	}
+	if port(c.Listen.DNS) == 0 {
+		found.addf("listen.dns %q is not host:port with a port in 1-%d", c.Listen.DNS, maxPort)
 	}
 }
 

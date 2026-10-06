@@ -9,6 +9,11 @@ identity:
     user: "{{ .ImpersonateUser }}"
 listen:
   transparent_port: {{ .RedirectPort }}
+  # The loopback resolver the netsetup rules redirect port 53 to. It
+  # answers only the endpoint hosts and the zone host. It forwards to the
+  # resolvers the receipt names, which the init container read out of the
+  # pod's /etc/resolv.conf.
+  dns: "127.0.0.1:{{ .DNSPort }}"
 netsetup:
   receipt: "/run/egress/netsetup/netsetup.json"
 ca:

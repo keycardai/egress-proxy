@@ -76,9 +76,23 @@ func TestValidate(t *testing.T) {
 			want: []string{"is the redirect port"},
 		},
 		{
-			name: "no resolver, so the filter table would drop every resolution",
+			name: "no resolver, so the sidecar's resolver would have nowhere to forward",
 			edit: func(c *netsetup.Config) { c.DNSServers = nil },
 			want: []string{"no DNS servers"},
+		},
+		{
+			name: "no DNS redirect, which is a pod whose sidecar runs no resolver",
+			edit: func(c *netsetup.Config) { c.DNSPort = 0 },
+		},
+		{
+			name: "a DNS port outside 0-65535",
+			edit: func(c *netsetup.Config) { c.DNSPort = 70000 },
+			want: []string{"dns port 70000 is out of range 0-65535"},
+		},
+		{
+			name: "the DNS port on the transparent frontend, which answers no query",
+			edit: func(c *netsetup.Config) { c.DNSPort = c.RedirectPort },
+			want: []string{"is the redirect port", "answers no query"},
 		},
 		{
 			name: "a resolver written as IPv4-in-IPv6, which would go in the wrong family's ruleset",
