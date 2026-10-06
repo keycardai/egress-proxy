@@ -156,6 +156,34 @@ stdout '^upstream 9000$'
 exec docker exec $LAB-upstream netfixture dial [$LAB_WORKLOAD6]:9000
 stdout '^upstream 9000$'
 
+# Must fail: a workload socket that sends from the tuple the proxy uid just
+# used. Conntrack keys a flow on its addresses and ports, not on the socket,
+# so the datagram finds the proxy's entry and the nat redirect does not run.
+# The ESTABLISHED accept matches replies only, so the DROP takes it. The
+# proxy uid's send from the same tuple shows the upstream answers on it.
+exec docker exec -u 1337 $LAB-workload netfixture udp -sport 40053 $LAB_UPSTREAM4:53
+stdout '^udp REPLY upstream 53$'
+exec docker exec -u 1000 $LAB-workload netfixture udp -sport 40053 $LAB_UPSTREAM4:53
+stdout '^udp EPERM$'
+exec docker exec -u 1337 $LAB-workload netfixture udp -sport 40053 [$LAB_UPSTREAM6]:53
+stdout '^udp REPLY upstream 53$'
+exec docker exec -u 1000 $LAB-workload netfixture udp -sport 40053 [$LAB_UPSTREAM6]:53
+stdout '^udp EPERM$'
+
+# A connection the proxy uid closes first finishes its close. The ACK for
+# the upstream's FIN leaves from a socket no process owns, which the owner
+# accept does not match, so the upstream would otherwise wait in LAST_ACK.
+exec docker exec $LAB-upstream netfixture lastack 9100 &lastack4&
+exec docker exec -u 1337 $LAB-workload netfixture hangup $LAB_UPSTREAM4:9100
+stdout '^hangup closed$'
+wait lastack4
+stdout '^lastack ACKED$'
+exec docker exec $LAB-upstream netfixture lastack 9100 &lastack6&
+exec docker exec -u 1337 $LAB-workload netfixture hangup [$LAB_UPSTREAM6]:9100
+stdout '^hangup closed$'
+wait lastack6
+stdout '^lastack ACKED$'
+
 # A re-run over the live ruleset installs no second jump and leaves the
 # ruleset in force.
 exec docker exec $LAB-workload egress-netsetup --dns-servers $LAB_UPSTREAM4

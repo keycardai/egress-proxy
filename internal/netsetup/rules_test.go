@@ -31,12 +31,15 @@ func build(t *testing.T, cfg netsetup.Config, family netsetup.Family) netsetup.P
 // address is inside the service range, and a RETURN there would leave the
 // query for the DROP instead of the sidecar's resolver. The filter chain
 // does not accept DNS to any resolver. The nat jump does not match on
-// protocol, so UDP reaches the redirect.
+// protocol, so UDP reaches the redirect. The ESTABLISHED accept matches the
+// reply direction, so a workload packet on a tuple the proxy uid used
+// reaches the DROP.
 const (
 	wantIPv4 = `# ipv4 ruleset
 *filter
 :EGRESS_PROXY_FILTER_OUTPUT - [0:0]
--A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -m owner ! --uid-owner 0-4294967294 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -d 127.0.0.0/8 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
@@ -59,7 +62,8 @@ COMMIT
 	wantIPv6 = `# ipv6 ruleset
 *filter
 :EGRESS_PROXY_FILTER_OUTPUT - [0:0]
--A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -m owner ! --uid-owner 0-4294967294 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -d ::1/128 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
@@ -90,7 +94,8 @@ COMMIT
 	wantIPv4NoDNS = `# ipv4 ruleset
 *filter
 :EGRESS_PROXY_FILTER_OUTPUT - [0:0]
--A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -m owner ! --uid-owner 0-4294967294 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -d 127.0.0.0/8 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -m owner --uid-owner 1337 -j ACCEPT
@@ -113,7 +118,8 @@ COMMIT
 	wantIPv6Deny = `# ipv6 ruleset
 *filter
 :EGRESS_PROXY_FILTER_OUTPUT - [0:0]
--A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j ACCEPT
+-A EGRESS_PROXY_FILTER_OUTPUT -m conntrack --ctstate ESTABLISHED -m owner ! --uid-owner 0-4294967294 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -o lo -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -d ::1/128 -j ACCEPT
 -A EGRESS_PROXY_FILTER_OUTPUT -p ipv6-icmp -m owner ! --uid-owner 0-4294967294 -m icmp6 --icmpv6-type 130 -j ACCEPT

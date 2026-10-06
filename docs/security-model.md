@@ -156,7 +156,8 @@ nothing about whether the port was checked.
 |---|---|---|
 | A workload calls `setuid` to the proxy uid. The nat chain returns early for that uid and the filter chain accepts it, so the workload's own traffic would be neither redirected nor dropped. This bypass is published against Istio (https://pulsesecurity.co.nz/advisories/istio-egress-bypass), and Istio states the same limit (https://istio.io/latest/docs/ops/best-practices/security/#understand-traffic-capture-limitations). | Traffic capture is not a boundary on its own. The workload securityContext is: run as a uid that is not the proxy's, `allowPrivilegeEscalation` false, `capabilities.drop` ALL. Without CAP_SETUID the call fails, and `no_new_privs` keeps an execve from granting it. The ruleset excludes the proxy uid and no other. The proxy uid may not be 0, which would exempt every root process in the pod. | `TestProgramRules`, `TestValidate` |
 | A workload binds the redirect port before the sidecar starts or while it restarts. | The workload holds no NET_BIND_SERVICE. Before it programs or verifies the rules, netsetup refuses a redirect port at or above `net.ipv4.ip_unprivileged_port_start`, and fails when it cannot read that value. `allow-unprotected` skips this check and the receipt records it. | `TestCheckRedirectPort`, `TestPortCheckPrecedesTableAccess`, `netsetup_ruleset.txtar` |
-| A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies conntrack knows, loopback, the proxy's own uid, and the ICMPv6 Neighbour Discovery the kernel sends. There is no accept for DNS to a resolver: the nat chain redirects every query to the sidecar's resolver on loopback. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
+| A workload leaves over UDP: QUIC or HTTP/3 on port 443, or any other datagram protocol. The redirect covers TCP alone. | The filter chain's terminal DROP covers every protocol. The only accepts above it are the replies on connections opened into the pod, the packets on established flows that no process socket sends, loopback, the proxy's own uid, and the ICMPv6 Neighbour Discovery the kernel sends. There is no accept for DNS to a resolver: the nat chain redirects every query to the sidecar's resolver on loopback. | `TestProgramRules`, `TestTheTerminalDropIsLast`, `netsetup_ruleset.txtar` |
+| A workload sends from a source port the proxy uid just used, to the same peer. Conntrack keys a flow on its addresses, ports and protocol, not on the socket, so the packet joins the proxy's flow. The nat table is consulted only for a packet that creates a new connection (iptables(8)), so the redirect does not run. A UDP entry lasts 30 seconds after its last packet (`nf_conntrack_udp_timeout`), and a DNS query sent this way would reach the cluster resolver unread and unrecorded. | The ESTABLISHED accept matches the reply direction only (`--ctdir REPLY`). A packet the pod sends in the original direction of a flow must pass the loopback or proxy uid accept, so the workload's packet reaches the DROP. A second ESTABLISHED accept matches only packets from no process socket: `-m owner ! --uid-owner 0-4294967294`. These are the unsent data and retransmits of a TCP socket its process has closed (linux `include/net/sock.h`, `sock_orphan`) and the kernel's answers for a TIME_WAIT socket. Without it an upstream the proxy closed first waits in LAST_ACK. | `TestProgramRules`, `TestVerifyProblems`, `netsetup_ruleset.txtar` (the datagram from port 40053, `lastack`) |
 | A process with CAP_NET_RAW sends ICMPv6 of a neighbour discovery type, with any payload, to any IPv6 address. The ip6tables filter chain must accept neighbour discovery, because the kernel needs it to reach any IPv6 neighbour. | The ICMPv6 accepts match only packets from the kernel's own sockets: `-m owner ! --uid-owner 0-4294967294`. xt_owner matches a process's socket by its uid, and a kernel socket only when every uid condition is negated (linux `net/netfilter/xt_owner.c`, `owner_mt`). No process can send ICMPv6 past the DROP, whatever its uid. | `TestProgramRules`, `netsetup_ruleset.txtar` |
 | A workload leaves over IPv6, on a kernel whose ip6tables rules were never programmed. | Both address families are programmed. `--ipv6 auto` follows the kernel, `--ipv6 on` requires IPv6, and `--ipv6 off` programs an ip6tables ruleset that drops every IPv6 packet the pod sends. A probe that cannot tell whether the kernel has IPv6 fails the run. | `TestProgramRules`, `TestIPv6Modes`, `TestKernelHasIPv6`, `netsetup_ruleset.txtar` |
 | A rule another component put in OUTPUT decides the packet ahead of the ruleset, or a rule is added to a chain this package owns. | Each OUTPUT jump is inserted at position 1. After applying, the init container reads every rule back with `-C`, counts each chain it owns and checks that the first rule in each OUTPUT chain is exactly the jump. The nat chain must end with the REDIRECT and then an unconditional RETURN, so every exemption comes before the REDIRECT. The IPv6 deny nat chain holds only the RETURN. An extra rule, a misplaced jump or a reordered nat rule fails verification. | `TestApply`, `TestVerifyProblems`, `netsetup_ruleset.txtar` |
@@ -392,13 +393,26 @@ pushes an image.
   the captured connections and the queries. A pod runs the proxy and the
   workload and nothing else on that interface.
 - `ESTABLISHED` in OUTPUT is an open channel to any peer that opens a
-  connection into the pod. It is the first accept in the filter chain of both
-  families. An outbound flow reaches ESTABLISHED only after its own first
-  packet was accepted, so it widens nothing the workload initiates. INPUT is
-  untouched and its policy is ACCEPT, so a peer that connects into the pod
-  creates a conntrack entry. The workload then has an unrestricted two-way
-  channel to that peer on that tuple, over TCP or UDP. A NetworkPolicy on
-  ingress closes it.
+  connection into the pod. The accept matches the reply direction only, so
+  it passes nothing on a flow the pod opened. INPUT is untouched and its
+  policy is ACCEPT, so a peer that connects into the pod creates a conntrack
+  entry. The workload then has an unrestricted two-way channel to that peer
+  on that tuple, over TCP or UDP. A NetworkPolicy on ingress closes it.
+- The sidecar's DNS forwards and the workload's queries share one conntrack
+  zone and one source port range. A UDP entry lasts 30 seconds after its
+  last packet (`nf_conntrack_udp_timeout`). A forward sent from a tuple a
+  workload query used inside that window joins the workload's flow, and its
+  redirect sends the forward back to the sidecar's resolver. The resolver
+  writes another `endpoint_allowed` record and forwards again, so one
+  lookup can write several records. A workload that sends from every port
+  in the range makes its own allowed lookups fail with `SERVFAIL`. The
+  reverse also happens: a workload query sent from a tuple a forward used
+  reaches the DROP, and the send fails with EPERM. Neither case sends a
+  name the allowlist refuses. The chance for one send is about the number
+  of tuples the other side used in the last 30 seconds, divided by the
+  28,232 ports of the default `net.ipv4.ip_local_port_range`, 32768 to
+  60999. A separate conntrack zone for the proxy uid's DNS flows removes
+  both.
 - The pod sends no ICMP error about inbound traffic. The filter chain accepts
   `ESTABLISHED` and not `RELATED`, and an ICMP error is `RELATED`. A peer
   sending UDP to a closed port in the pod gets no port unreachable and waits
