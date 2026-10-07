@@ -64,15 +64,12 @@ endpoints:
   - url: "https://api.github.com/"                # host, port and path; also the exchange's resource
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GITHUB_TOKEN
   - url: "https://github.com/"                    # git over HTTPS
     credential:
       placement: {kind: basic, user: x-access-token}
-      env: GITHUB_TOKEN
   - url: "https://openrouter.ai/api/v1"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: OPENROUTER_API_KEY
   - url: "https://pypi.org/"                      # allowed, no credential
   - url: "https://files.pythonhosted.org/"
   - url: "https://registry.internal:5000/v2/"   # a second port is a second endpoint

@@ -34,10 +34,10 @@ ARG SHARED_CA_FILE=/shared-ca/out/ca.crt
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# openssl provides the x509 parse the entrypoint validates the certificate
-# with, and ca-certificates provides update-ca-certificates. curl, python3,
-# nodejs and git are the clients a sandbox reaches an endpoint with. An
-# agent clones and pushes over HTTPS, so git is one of them.
+# The entrypoint checks the certificate with openssl. ca-certificates
+# provides update-ca-certificates. curl, python3 with requests, nodejs and
+# git are the HTTPS clients the image ships. git is one of them because an
+# agent clones and pushes over HTTPS.
 RUN apt-get update \
 	&& apt-get install --yes --no-install-recommends \
 		ca-certificates \
@@ -45,6 +45,7 @@ RUN apt-get update \
 		curl \
 		git \
 		python3 \
+		python3-requests \
 		nodejs \
 	&& rm -rf /var/lib/apt/lists/*
 

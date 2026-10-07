@@ -225,13 +225,15 @@ func answerDatagrams(conn net.PacketConn, reply string) error {
 }
 
 // serveHTTPS answers each request with its path, so the client output shows
-// which request reached the upstream.
+// which request reached the upstream. It logs each request's Authorization
+// header to stderr, so a scenario can check what a placement wrote.
 func serveHTTPS(address, certFile, keyFile string) error {
 	server := &http.Server{
 		Addr:              address,
 		ReadHeaderTimeout: readHeaderTimeout,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(os.Stderr, "request %s %s host=%s\n", r.Method, r.URL.RequestURI(), r.Host)
+			fmt.Fprintf(os.Stderr, "request %s %s host=%s authorization=%q\n",
+				r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("Authorization"))
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			//nolint:gosec // G705: this fixture echoes text as text/plain
 			fmt.Fprintf(w, "hello from upstream %s\n", r.URL.Path)

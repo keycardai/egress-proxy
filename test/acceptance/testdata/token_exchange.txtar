@@ -3,8 +3,8 @@
 # exchange_denied, records incomplete exchanges as exchange_failed, and skips
 # the exchange for a request that the endpoint list denies.
 #
-# The zone here is the fixture in test/fakeas. The real zone is exercised by
-# the cluster lane.
+# The zone here is the fixture in test/fakeas. The e2e tests under test/e2e
+# run the same fixture in a cluster, with real service account tokens.
 
 [!exec:curl] skip 'curl is not installed'
 
@@ -130,11 +130,9 @@ endpoints:
   - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GRANTED_TOKEN
   - url: https://localhost:$UPSTREAM_PORT/refused/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: REFUSED_TOKEN
 -- dead-zone.yaml --
 version: 1
 identity:
@@ -151,6 +149,5 @@ endpoints:
   - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GRANTED_TOKEN
 -- client-secret --
 acceptance-client-secret

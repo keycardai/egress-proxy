@@ -15,8 +15,6 @@ endpoints:
   - url: "https://github.com/"
     credential:
       placement: {kind: basic, user: x-access-token}
-      env: GITHUB_TOKEN
   - url: "https://api.github.com/"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GITHUB_TOKEN

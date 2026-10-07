@@ -1,0 +1,178 @@
+# Every client in the sandbox base image reaches an endpoint through the
+# proxy without a proxy address, a CA path or a token.
+#
+# The agent container runs the image `make image-sandbox-base` builds,
+# unmodified, through its own entrypoint. It joins the sidecar container's
+# network namespace as a pod's containers do, so the init container's
+# capture rules route every connection it makes. The sidecar runs a lab
+# image with this module's binaries. The e2e tests under test/e2e run the
+# three shipped images together on a cluster.
+#
+# Docker refuses --add-host on a container that joins another container's
+# network, so the agent mounts the hosts file below in place of a pod's
+# hostAliases.
+
+[!docker] skip 'the Docker daemon is not available'
+
+dockerlab
+sandboximage
+linuxbin bin
+tlscert tls upstream.test
+expand hosts
+
+# The proxy writes its audit stream and log to out and ca.crt to shared-ca.
+# Both are writable by every uid, like a pod's emptyDir volumes, because the
+# proxy runs as uid 1337.
+mkdir out
+chmod 0777 out
+mkdir shared-ca
+chmod 0777 shared-ca
+
+# The agent runs the Go client from the bind-mounted bin as uid 1000. On
+# Linux the mount keeps the host modes, and linuxbin creates bin as 0750.
+chmod 0755 bin
+
+exec docker build -q -t $LAB_IMAGE --build-arg DEBIAN_IMAGE=$DEBIAN_IMAGE -f Dockerfile $WORK
+
+# The upstream answers HTTPS for upstream.test and logs each request.
+exec docker run -d --name $LAB-upstream --network $LAB --ip $LAB_UPSTREAM4 --ip6 $LAB_UPSTREAM6 -v $WORK/tls:/tls:ro $LAB_IMAGE netfixture https :443 /tls/leaf.crt /tls/leaf.key
+
+# One container runs netsetup and then the proxy, in place of the init
+# container and the sidecar. ca.out_dir keeps its default, /shared-ca/out.
+exec docker run -d --name $LAB-pod --network $LAB --ip $LAB_WORKLOAD4 --ip6 $LAB_WORKLOAD6 --add-host upstream.test:$LAB_UPSTREAM4 --cap-add NET_ADMIN --cap-add SETPCAP --sysctl net.ipv4.ip_unprivileged_port_start=1024 -v $WORK:/work:ro -v $WORK/out:/out -v $WORK/shared-ca:/shared-ca $LAB_IMAGE sleep 900
+
+exec docker exec $LAB-pod egress-netsetup --receipt /run/egress/netsetup.json --dns-port 0
+stdout '^-A EGRESS_PROXY_NAT_OUTPUT -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 1015$'
+stdout '# ipv4 verified: '
+
+exec docker exec -d -u 1337 $LAB-pod sh -c '/usr/local/bin/egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt >/out/audit.jsonl 2>/out/proxy.log'
+waitgrep out/proxy.log 'capturing redirected connections'
+
+# The proxy writes ca.crt to its default path. Nothing sets
+# KEYCARD_CA_FILE, so the agent finds the file only if the proxy's default
+# and the image's default agree.
+waitfile shared-ca/out/ca.crt
+
+# Five clients reach the upstream: curl, Python requests, Node fetch, a Go
+# client and git. Each verifies the proxy's leaf against the store the
+# entrypoint rebuilt. No proxy variable is set, so the capture routes each
+# one.
+exec docker run --rm --name $LAB-agent-curl --network container:$LAB-pod --user 1000:1000 --cap-drop ALL -e HOME=/home/agent -v $WORK/shared-ca:/shared-ca:ro -v $WORK/hosts:/etc/hosts:ro $SANDBOX_IMAGE curl -sS https://upstream.test/allowed/curl
+stdout '^hello from upstream /allowed/curl$'
+
+exec docker run --rm --name $LAB-agent-python --network container:$LAB-pod --user 1000:1000 --cap-drop ALL -e HOME=/home/agent -v $WORK/shared-ca:/shared-ca:ro -v $WORK/hosts:/etc/hosts:ro -v $WORK/probes:/probes:ro $SANDBOX_IMAGE python3 /probes/get.py https://upstream.test/allowed/python
+stdout '^200 hello from upstream /allowed/python$'
+
+exec docker run --rm --name $LAB-agent-node --network container:$LAB-pod --user 1000:1000 --cap-drop ALL -e HOME=/home/agent -v $WORK/shared-ca:/shared-ca:ro -v $WORK/hosts:/etc/hosts:ro -v $WORK/probes:/probes:ro $SANDBOX_IMAGE node /probes/get.js https://upstream.test/allowed/node
+stdout '^200 hello from upstream /allowed/node$'
+
+exec docker run --rm --name $LAB-agent-go --network container:$LAB-pod --user 1000:1000 --cap-drop ALL -e HOME=/home/agent -v $WORK/shared-ca:/shared-ca:ro -v $WORK/hosts:/etc/hosts:ro -v $WORK/bin:/bin-fixture:ro $SANDBOX_IMAGE /bin-fixture/netfixture get https://upstream.test/allowed/go
+stdout '^200 hello from upstream /allowed/go$'
+
+# The upstream is not a git server, so git fails. Its error quotes the
+# upstream's answer, which shows the TLS handshake and the request went
+# through the proxy. NEVER let git reach a credential store. The empty
+# credential.helper clears the helper list, and the prompt settings make a
+# prompt fail.
+! exec docker run --rm --name $LAB-agent-git --network container:$LAB-pod --user 1000:1000 --cap-drop ALL -e HOME=/home/agent -e GIT_CONFIG_NOSYSTEM=1 -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=credential.helper -e GIT_CONFIG_VALUE_0= -e GIT_TERMINAL_PROMPT=0 -e GIT_ASKPASS=true -e SSH_ASKPASS=true -v $WORK/shared-ca:/shared-ca:ro -v $WORK/hosts:/etc/hosts:ro $SANDBOX_IMAGE git ls-remote https://upstream.test/allowed/git.git
+stderr 'not valid: is this a git repository'
+
+# The credentialed endpoint. The agent sends its own Authorization value,
+# and the placement replaces it.
+exec docker run --rm --name $LAB-agent-token --network container:$LAB-pod --user 1000:1000 --cap-drop ALL -e HOME=/home/agent -v $WORK/shared-ca:/shared-ca:ro -v $WORK/hosts:/etc/hosts:ro $SANDBOX_IMAGE curl -sS -H 'Authorization: Bearer agent-chosen' https://upstream.test/token/repos
+stdout '^hello from upstream /token/repos$'
+
+# The upstream log shows the credential at the placement and not the
+# agent's value.
+exec docker logs $LAB-upstream
+stderr 'request GET /token/repos host=upstream.test authorization="Bearer token-sekrit"'
+stderr 'request GET /allowed/curl host=upstream.test authorization=""'
+! stderr 'agent-chosen'
+
+# Each decision has an audit record with the destination before the
+# redirect. No audit record or log line holds the credential.
+audit -all out/audit.jsonl sandbox_id=base-image-trust
+audit out/audit.jsonl scope=connection destination.host=upstream.test destination.port=443 destination.original_address=$LAB_UPSTREAM4:443 decision.verdict=allow decision.reason=endpoint_allowed
+audit out/audit.jsonl scope=request request.path=/allowed/curl decision.reason=endpoint_allowed decision.endpoint=upstream.test:443/allowed/ outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/python decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/node decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/go decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/allowed/git.git/info/refs decision.reason=endpoint_allowed outcome.status=200
+audit out/audit.jsonl scope=request request.path=/token/repos decision.reason=endpoint_allowed decision.endpoint=upstream.test:443/token/ outcome.status=200
+! grep 'token-sekrit' out/audit.jsonl
+! grep 'token-sekrit' out/proxy.log
+
+-- hosts --
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+$LAB_UPSTREAM4	upstream.test
+
+-- Dockerfile --
+ARG DEBIAN_IMAGE
+FROM ${DEBIAN_IMAGE}
+RUN apt-get -qq update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -qq install --no-install-recommends -y \
+      iptables ca-certificates libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+COPY bin/ /usr/local/bin/
+# The proxy gets CAP_NET_BIND_SERVICE and no other capability. It binds
+# the redirect port below 1024 as uid 1337.
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/egress-proxy \
+ && mkdir -p /shared-ca /run/egress-admin \
+ && chown 1337:1337 /shared-ca /run/egress-admin
+# The static credential file. The loader refuses it unless only its owner
+# can read it. A bind mount cannot set the owner inside the container, so
+# the image copies the file in.
+COPY credentials.yaml /etc/keycard/credentials.yaml
+RUN chown 1337:1337 /etc/keycard/credentials.yaml && chmod 0600 /etc/keycard/credentials.yaml
+
+-- credentials.yaml --
+version: 1
+credentials:
+  - resource: "https://upstream.test/token/"
+    value: "token-sekrit"
+
+-- config.yaml --
+version: 1
+sandbox:
+  id: base-image-trust
+listen:
+  connect: "127.0.0.1:3128"
+  transparent_port: 1015
+  admin: "/run/egress-admin/admin.sock"
+netsetup:
+  receipt: "/run/egress/netsetup.json"
+credentials:
+  static_file: "/etc/keycard/credentials.yaml"
+policy:
+  # The lab network uses private addresses, which the platform deny list
+  # blocks. Each run picks its subnets from these two ranges.
+  deny_list_exceptions: ["192.168.0.0/16", "fd00:e9::/32"]
+endpoints:
+  - url: https://upstream.test/allowed/
+  - url: https://upstream.test/token/
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+
+-- probes/get.py --
+# One request with Python requests. It verifies against
+# REQUESTS_CA_BUNDLE, the bundle the entrypoint rebuilt.
+import sys
+
+import requests
+
+response = requests.get(sys.argv[1], timeout=30)
+print(response.status_code, response.text, end="")
+
+-- probes/get.js --
+// One request with Node's built-in fetch. Nothing sets a proxy variable,
+// so the capture is the only route to the proxy.
+const url = process.argv[2];
+fetch(url)
+  .then((response) => response.text().then((body) => {
+    process.stdout.write(`${response.status} ${body}`);
+  }))
+  .catch((err) => {
+    process.stdout.write(`fetch failed: ${err.cause ? err.cause.code : err.message}\n`);
+    process.exitCode = 1;
+  });

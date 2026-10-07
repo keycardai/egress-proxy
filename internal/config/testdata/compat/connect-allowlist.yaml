@@ -29,18 +29,14 @@ endpoints:
   - url: "https://api.github.com/"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GITHUB_TOKEN
   - url: "https://github.com/"
     credential:
       placement: {kind: basic, user: x-access-token}
-      env: GITHUB_TOKEN
   - url: "https://openrouter.ai/api/v1"
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: OPENROUTER_API_KEY
   - url: "https://maps.example/"
     credential:
       placement: {kind: query, name: key}
-      env: MAPS_API_KEY
   - url: "https://pypi.org/"
   - url: "https://files.pythonhosted.org/"

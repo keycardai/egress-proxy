@@ -18,7 +18,7 @@ repository enforces it, the text says so and names the enforcer.
 |---|---|---|
 | proxy | `make image-proxy`, ko from `images/proxy/.ko.yaml` and then `images/proxy/Dockerfile` | `gcr.io/distroless/static-debian13:nonroot`, the `egress-proxy` binary with `cap_net_bind_service=+ep` on it, and the public root certificates it verifies upstreams and the zone against. No shell and no package manager. |
 | netsetup | `make image-netsetup`, `images/netsetup/Dockerfile` with the repository root as its build context | Debian trixie-slim, the `egress-netsetup` binary, the legacy `iptables` and `ip6tables` binaries with their xtables extension libraries, and a shell. |
-| sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian trixie-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
+| sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian trixie-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3` with `python3-requests`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
 
 `make images` builds all three locally and checks each one in a container,
 under `test/images`. Nothing in this repository pushes an image. Publishing is a
@@ -204,6 +204,8 @@ set this up:
 A variable is set only for a client the image installs. The image does not
 install an AWS client, so it does not set `AWS_CA_BUNDLE`. An image built
 on this one that adds a client sets that client's variable itself.
+`test/images` reads `Config.Env` from the built image and checks that
+every variable naming a trust store belongs to a client the image installs.
 
 `KEYCARD_CA_FILE` and `NODE_EXTRA_CA_CERTS` default to
 `/shared-ca/out/ca.crt`, which is `ca.out_dir` above with `ca.crt` under

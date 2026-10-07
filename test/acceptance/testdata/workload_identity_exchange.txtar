@@ -139,7 +139,6 @@ endpoints:
   - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GRANTED_TOKEN
 -- wrong-user.yaml --
 version: 1
 identity:
@@ -154,4 +153,3 @@ endpoints:
   - url: https://localhost:$UPSTREAM_PORT/granted/
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: GRANTED_TOKEN

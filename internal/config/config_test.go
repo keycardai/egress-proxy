@@ -443,7 +443,7 @@ func TestParseAcceptsSeparatorLikeText(t *testing.T) {
 		{
 			name: "a separator inside a scalar",
 			doc: "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://pypi.org/\n" +
-				"    credential:\n      env: TOKEN\n      placement:\n        kind: header\n" +
+				"    credential:\n      placement:\n        kind: header\n" +
 				"        name: Authorization\n        template: \"--- {credential}\"\n",
 		},
 	}
@@ -606,7 +606,7 @@ func TestParseRefusesInvalidEndpoints(t *testing.T) {
 		{name: "endpoint url over ftp", doc: endpoint("url: ftp://pypi.org/"), wantErr: "must be an absolute http"},
 		{
 			name: "a credential on an http endpoint",
-			doc: endpoint("url: http://pypi.org/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: http://pypi.org/\n    credential:\n" +
 				"      placement: {kind: header, name: X, template: \"{credential}\"}"),
 			wantErr: `url "http://pypi.org/" is http, and the proxy forwards nothing cleartext`,
 		},
@@ -859,22 +859,9 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 	}
 	runParseRefusals(t, []parseRefusal{
 		{
-			name: "credential without env",
-			doc: endpoint(
-				"url: https://a.example/\n    credential:\n      placement: {kind: header, name: X, template: \"{credential}\"}",
-			),
-			wantErr: "credential.env",
-		},
-		{
-			name: "credential env not a name",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: 1TOKEN\n" +
-				"      placement: {kind: header, name: X, template: \"{credential}\"}"),
-			wantErr: `credential.env "1TOKEN"`,
-		},
-		{
 			name: "header placement without the token",
 			doc: endpoint(
-				"url: https://a.example/\n    credential:\n      env: T\n" +
+				"url: https://a.example/\n    credential:\n" +
 					"      placement: {kind: header, name: X, template: Bearer}",
 			),
 			wantErr: "must contain {credential}",
@@ -882,37 +869,37 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 		{
 			name: "header placement without a name",
 			doc: endpoint(
-				"url: https://a.example/\n    credential:\n      env: T\n" +
+				"url: https://a.example/\n    credential:\n" +
 					"      placement: {kind: header, template: \"{credential}\"}",
 			),
 			wantErr: "header placement needs a name",
 		},
 		{
 			name:    "query placement without a name",
-			doc:     endpoint("url: https://a.example/\n    credential:\n      env: T\n      placement: {kind: query}"),
+			doc:     endpoint("url: https://a.example/\n    credential:\n      placement: {kind: query}"),
 			wantErr: "query placement needs a name",
 		},
 		{
 			name:    "basic placement without a user",
-			doc:     endpoint("url: https://a.example/\n    credential:\n      env: T\n      placement: {kind: basic}"),
+			doc:     endpoint("url: https://a.example/\n    credential:\n      placement: {kind: basic}"),
 			wantErr: "basic placement needs a user",
 		},
 		{
 			name: "basic placement whose user holds a colon",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: basic, user: \"alice:hunter2\"}"),
 			wantErr: "a basic placement user must not contain a colon or a control character",
 		},
 		{
 			name: "basic placement whose user would split the request head",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: basic, user: \"alice\\r\\nX-Injected: 1\"}"),
 			wantErr: "a basic placement user must not contain a colon or a control character",
 		},
 		{
 			name: "unknown placement kind",
 			doc: endpoint(
-				"url: https://a.example/\n    credential:\n      env: T\n      placement: {kind: cookie, name: x}",
+				"url: https://a.example/\n    credential:\n      placement: {kind: cookie, name: x}",
 			),
 			wantErr: `placement.kind "cookie"`,
 		},
@@ -928,32 +915,32 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 		},
 		{
 			name: "a header placement naming Host",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: header, name: host, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name host, " +
 				"a header the connection, the proxy or the upstream's trust depends on",
 		},
 		{
 			name: "a header placement naming a hop-by-hop header",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: header, name: Connection, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name Connection, ",
 		},
 		{
 			name: "a header placement naming a body framing header",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: header, name: Content-Length, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name Content-Length, ",
 		},
 		{
 			name: "a header placement in the x-forwarded- family",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: header, name: X-Forwarded-For, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name X-Forwarded-For, ",
 		},
 		{
 			name: "a header placement in the sec- family",
-			doc: endpoint("url: https://a.example/\n    credential:\n      env: T\n" +
+			doc: endpoint("url: https://a.example/\n    credential:\n" +
 				"      placement: {kind: header, name: Sec-Fetch-Site, template: \"{credential}\"}"),
 			wantErr: "endpoints[0]: a header placement cannot name Sec-Fetch-Site, ",
 		},
@@ -964,7 +951,6 @@ func TestParseRefusesInvalidCredentials(t *testing.T) {
 func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
 	t.Parallel()
 	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://a.example/\n    credential:\n" +
-		"      env: GITHUB_TOKEN\n" +
 		"      placement: {kind: header, name: Authorization, template: \"Bearer {credential}\"}\n"
 	cfg, err := config.Parse([]byte(doc), config.Overrides{})
 	require.NoError(t, err, "Parse:\n%s", doc)
@@ -978,7 +964,7 @@ func TestParseAcceptsAnAuthorizationPlacement(t *testing.T) {
 func TestParseAcceptsABasicPlacement(t *testing.T) {
 	t.Parallel()
 	doc := "version: 1\nsandbox:\n  id: sbx-1\nendpoints:\n  - url: https://github.com/\n    credential:\n" +
-		"      env: GITHUB_TOKEN\n      placement: {kind: basic, user: x-access-token}\n"
+		"      placement: {kind: basic, user: x-access-token}\n"
 	cfg, err := config.Parse([]byte(doc), config.Overrides{})
 	require.NoError(t, err, "Parse:\n%s", doc)
 	require.Len(t, cfg.Endpoints, 1, "the document names one endpoint")
@@ -1075,7 +1061,7 @@ func TestParseReportsEveryProblem(t *testing.T) {
 func TestPolicyEndpoints(t *testing.T) {
 	t.Parallel()
 	cfg, err := config.Parse([]byte(minimal+
-		"  - url: https://A.Example./api\n    credential:\n      env: T\n"+
+		"  - url: https://A.Example./api\n    credential:\n"+
 		"      placement: {kind: header, name: X, template: \"{credential}\"}\n"), config.Overrides{})
 	require.NoError(t, err)
 	endpoints := cfg.PolicyEndpoints()

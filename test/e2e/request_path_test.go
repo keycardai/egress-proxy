@@ -272,11 +272,9 @@ func curlInsecure(url string) []string {
 	return append(curl(url), "-k")
 }
 
-// curlWithPlaceholder fetches a URL with the placeholder the workload
-// holds in the Authorization header, and writes what came back. The shell
-// expands UPSTREAM_TOKEN, the variable the document's credential.env
-// names, so the request reaches the proxy with the value the placement has
-// to replace.
+// curlWithPlaceholder fetches a URL with $UPSTREAM_TOKEN in the
+// Authorization header and prints the response. The pod manifest sets
+// UPSTREAM_TOKEN to the placeholder, which the placement replaces.
 func curlWithPlaceholder(url string) []string {
 	return []string{"sh", "-c", `curl -sS -H "Authorization: Bearer $UPSTREAM_TOKEN" ` + url}
 }

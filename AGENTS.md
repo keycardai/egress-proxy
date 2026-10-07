@@ -29,7 +29,7 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   test key in the unit and acceptance tests, and against the cluster's
   service account keys in the e2e tests,
   `test/gates/` for the gate self-tests,
-  `test/images/` the image lane, Go behind the `images` build tag, which
+  `test/images/` the image tests, Go behind the `images` build tag, which
   builds the three images locally and checks each one in a container,
   `scripts/` for the gate scripts,
   `images/` for image definitions.
@@ -253,7 +253,7 @@ The gates and what each enforces:
   also runs daily on a schedule, because a vulnerability can be published
   against a dependency that has not changed.
 - **Images** (`make images`): the three images under `images/`, built
-  locally with `ko build --local` and `docker build`. The lane skips when no
+  locally with `ko build --local` and `docker build`. The tests skip when no
   Docker daemon answers. Nothing in this repository pushes an image.
 - **Cluster** (`make e2e`): the e2e tests under `test/e2e`. It builds the images,
   creates a k3d cluster, imports them, applies a sandbox pod and asserts the

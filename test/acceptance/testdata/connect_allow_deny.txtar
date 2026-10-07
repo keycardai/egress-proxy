@@ -136,5 +136,4 @@ endpoints:
   - url: https://localhost:$UPSTREAM_PORT/hello
   - url: https://localhost:$UPSTREAM_PORT/needs-credential
     credential:
-      env: UPSTREAM_TOKEN
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
