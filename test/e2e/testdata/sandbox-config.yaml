@@ -30,4 +30,3 @@ endpoints:
   - url: {{ .GrantedResource }}
     credential:
       placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
-      env: UPSTREAM_TOKEN

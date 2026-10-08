@@ -39,7 +39,7 @@ var errProbe = errors.New("probe")
 // probeCommand dials the admin Unix socket, prints the answer and exits
 // non-zero on anything but a 200.
 //
-// This is how the kubelet, an operator and the cluster lane reach the admin
+// This is how the kubelet, an operator and the e2e tests reach the admin
 // surface. That surface is a socket in the proxy's mount namespace and
 // never a port, so an httpGet probe has nothing to dial, and the image has
 // no shell and no curl to dial it with.

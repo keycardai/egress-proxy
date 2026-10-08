@@ -97,8 +97,8 @@ PROXY_KO_IMAGE = ko.local:$(IMAGE_TAG)-ko
 
 # Two steps. ko compiles the binary and builds the distroless image, then
 # images/proxy/Dockerfile puts cap_net_bind_service=+ep on the binary,
-# which ko has no step for. test/images runs this target, so the lane
-# drives the image the release builds.
+# which ko has no step for. test/images runs this target, so the image
+# tests check the image the release builds.
 #
 # SOURCE_DATE_EPOCH keeps the created timestamp of the final image at the
 # epoch, which is the timestamp ko gives the image it loads. The file
@@ -126,7 +126,7 @@ image-netsetup:
 image-sandbox-base:
 	docker build -t sandbox-base:$(IMAGE_TAG) images/sandbox-base
 
-# The image lane builds all three and checks each one in a container: the
+# The image tests build all three and checks each one in a container: the
 # proxy image answers `probe`, the netsetup image resolves the legacy
 # iptables binaries, and the base image entrypoint installs a certificate
 # from a fake /shared-ca. It skips when no Docker daemon answers.

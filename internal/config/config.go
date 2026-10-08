@@ -92,8 +92,6 @@ var (
 	errInvalid = errors.New("invalid configuration")
 	errRoots   = errors.New("upstream roots")
 
-	envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 	// hostLabelRE is one DNS label. A document's host is normalized to
 	// lowercase before it is validated.
 	hostLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
@@ -431,11 +429,9 @@ func canonicalResource(parsed endpointURL) string {
 	return parsed.scheme + "://" + authority + path
 }
 
-// Credential says where a credential goes and which placeholder the
-// workload holds for it.
+// Credential says where in a request a credential goes.
 type Credential struct {
 	Placement Placement `json:"placement"`
-	Env       string    `json:"env"`
 }
 
 // Placement is where the proxy writes a credential into a request.
@@ -1146,9 +1142,6 @@ func normalizedPrefix(prefix string) bool {
 }
 
 func (c Credential) validate(i int, found *problems) {
-	if !envNameRE.MatchString(c.Env) {
-		found.addf("endpoints[%d]: credential.env %q is not an environment variable name", i, c.Env)
-	}
 	validatePlacement(c.Placement, i, found)
 }
 

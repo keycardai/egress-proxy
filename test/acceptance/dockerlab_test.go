@@ -68,9 +68,9 @@ const (
 //
 // It exports the Docker client settings, $LAB, a name unique to this run,
 // $LAB_IMAGE, and the addresses $LAB_UPSTREAM4, $LAB_UPSTREAM6,
-// $LAB_WORKLOAD4, $LAB_WORKLOAD6 and $LAB_GATEWAY4. The containers $LAB-upstream and $LAB-workload, the
-// network and the image are removed when the script ends, whether it passed
-// or failed.
+// $LAB_WORKLOAD4, $LAB_WORKLOAD6 and $LAB_GATEWAY4. When the script ends,
+// pass or fail, it removes the network, the image and every container whose
+// name starts with $LAB.
 func cmdDockerLab(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 0 {
 		ts.Fatalf("usage: dockerlab")
@@ -78,14 +78,16 @@ func cmdDockerLab(ts *testscript.TestScript, neg bool, args []string) {
 	suffix := strings.ToLower(rand.Text()[:8])
 	lab := "egress-lab-" + suffix
 	image := labImageRepo + ":" + suffix
-	sum := 0
-	for _, b := range []byte(suffix) {
-		sum += int(b)
-	}
-	octet := labOctetLow + sum%labOctetSpan
-	four := fmt.Sprintf("192.168.%d.", octet)
-	six := fmt.Sprintf("fd00:e9:%x::", octet)
 	dockerClientEnv(ts)
+	ts.Defer(func() {
+		removeLabContainers(lab)
+		_ = exec.CommandContext(context.Background(), "docker", "network", "rm", lab).Run()
+		_ = exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run()
+	})
+	four, six, err := createLabNetwork(suffix, lab)
+	if err != nil {
+		ts.Fatalf("%v", err)
+	}
 	for name, value := range map[string]string{
 		"LAB": lab, "LAB_IMAGE": image,
 		"LAB_UPSTREAM4": four + "10", "LAB_UPSTREAM6": six + "10",
@@ -94,18 +96,73 @@ func cmdDockerLab(ts *testscript.TestScript, neg bool, args []string) {
 	} {
 		ts.Setenv(name, value)
 	}
-	ts.Defer(func() {
-		for _, name := range []string{lab + "-workload", lab + "-upstream"} {
-			_ = exec.CommandContext(context.Background(), "docker", "rm", "-f", name).Run()
-		}
-		_ = exec.CommandContext(context.Background(), "docker", "network", "rm", lab).Run()
-		_ = exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run()
-	})
-	create := exec.CommandContext(context.Background(), "docker", "network", "create",
-		"--subnet", four+"0/24", "--gateway", four+"1", "--ipv6", "--subnet", six+"/64", lab)
-	if out, err := create.CombinedOutput(); err != nil {
-		ts.Fatalf("docker network create: %v: %s", err, out)
+}
+
+// createLabNetwork creates the network the lab containers share and
+// returns the IPv4 and IPv6 prefixes of its subnets. The run's random
+// suffix picks the first octet to try. Docker refuses a subnet that
+// overlaps another network, such as one a parallel scenario or a k3d
+// cluster holds. On any refusal it tries the next octet, up to
+// labOctetSpan attempts.
+func createLabNetwork(suffix, lab string) (string, string, error) {
+	sum := 0
+	for _, b := range []byte(suffix) {
+		sum += int(b)
 	}
+	var last error
+	for attempt := range labOctetSpan {
+		octet := labOctetLow + (sum+attempt)%labOctetSpan
+		four := fmt.Sprintf("192.168.%d.", octet)
+		six := fmt.Sprintf("fd00:e9:%x::", octet)
+		create := exec.CommandContext(context.Background(), "docker", "network", "create",
+			"--subnet", four+"0/24", "--gateway", four+"1", "--ipv6", "--subnet", six+"/64", lab)
+		out, err := create.CombinedOutput()
+		if err == nil {
+			return four, six, nil
+		}
+		last = fmt.Errorf("docker network create %s0/24: %w: %s", four, err, out)
+	}
+	return "", "", last
+}
+
+// removeLabContainers removes every container whose name starts with lab.
+// Docker does not remove a network while a container is attached to it, so
+// call this before removing the network.
+func removeLabContainers(lab string) {
+	list := exec.CommandContext(context.Background(), "docker", "ps", "-aq", "--filter", "name=^"+lab)
+	found, err := list.Output()
+	if err != nil {
+		return
+	}
+	for id := range strings.SplitSeq(strings.TrimSpace(string(found)), "\n") {
+		if id != "" {
+			_ = exec.CommandContext(context.Background(), "docker", "rm", "-f", id).Run()
+		}
+	}
+}
+
+// cmdSandboxImage builds the sandbox base image with
+// `make image-sandbox-base`, the target `make images` runs, and exports its
+// reference as $SANDBOX_IMAGE:
+//
+//	sandboximage
+//
+// The tag is unique to this run. The image is removed when the script ends.
+func cmdSandboxImage(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 0 {
+		ts.Fatalf("usage: sandboximage")
+	}
+	root, err := filepath.Abs("../..")
+	ts.Check(err)
+	tag := "egress-acceptance-" + strings.ToLower(rand.Text()[:8])
+	build := exec.CommandContext(context.Background(), "make", "image-sandbox-base", "IMAGE_TAG="+tag)
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		ts.Fatalf("make image-sandbox-base: %v:\n%s", err, out)
+	}
+	image := "sandbox-base:" + tag
+	ts.Setenv("SANDBOX_IMAGE", image)
+	ts.Defer(func() { _ = exec.CommandContext(context.Background(), "docker", "rmi", "-f", image).Run() })
 }
 
 // dockerClientEnv gives the script the Docker client settings of the

@@ -153,7 +153,7 @@ at mode 0700, so no other uid in the pod can reach the socket. Keep
 answer and exits non-zero on anything but a 200. It reads the same `--admin`
 and `EGRESS_PROXY_ADMIN` the serving process reads, because it runs in the
 same container. The proxy image has no shell and no curl, so this subcommand
-is how the kubelet's probes, an operator and the cluster lane reach the
+is how the kubelet's probes, an operator and the e2e tests reach the
 admin surface.
 
 `egress-proxy settings` prints the settings this binary accepts as JSON,
@@ -305,7 +305,7 @@ connections and requests.
 | Key | Default | Description |
 |---|---|---|
 | `url` | required | The endpoint, as `https://host[:port][/path]` or `http://host[:port][/path]`. The proxy reads the host, the port and the path prefix from it, and sends its canonical form to token exchange as the resource. It must not hold user information, a query or a fragment. |
-| `credential` | unset | Defines where the proxy puts a credential and which placeholder the workload holds. See `endpoints[].credential`. |
+| `credential` | unset | Defines where in a request the proxy puts a credential. See `endpoints[].credential`. |
 
 **Host.** A DNS name without a wildcard. Labels hold ASCII letters, digits and hyphens, and the last label is not all digits. The proxy matches the name case-insensitively against the SNI. It rejects an IP literal, because a TLS client sends no SNI for one, and it rejects an address written another way, such as `0177.0.0.1` or `2852039166`, which a resolver still reads as an address. Write an internationalized name as its A-label, the `xn--` punycode form. RFC 6066 section 3 requires the SNI to be ASCII, so a host holding non-ASCII characters never matches what a client sends.
 
@@ -334,7 +334,6 @@ so the request is refused with `cleartext_not_forwarded` instead of
 
 | Key | Description |
 |---|---|
-| `env` | The environment variable that holds the workload placeholder. Use a valid variable name. |
 | `placement.kind` | `header`, `query`, or `basic`. |
 | `placement.name` | For `header`, the header name. For `query`, the parameter name. |
 | `placement.template` | For `header`, the value with `{credential}` where the proxy puts the credential, such as `Bearer {credential}`. |
@@ -370,7 +369,8 @@ helper.
 A request that the credential source cannot answer is denied with
 `credential_unavailable`. If the writer cannot write a placement, the request
 is denied with the same reason before the proxy dials. The proxy never
-forwards the workload placeholder to a credentialed endpoint.
+forwards the value the workload sent at the placement to a credentialed
+endpoint.
 
 The proxy writes the credential after it removes the hop-by-hop headers that
 the workload named in `Connection`. A workload cannot name the placement

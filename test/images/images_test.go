@@ -5,8 +5,8 @@
 // so `go test ./...` never builds an image. `make images` runs it, and so
 // does the images job in CI.
 //
-// Nothing here pushes. Every build is local, and every image this lane
-// makes is removed when it ends.
+// Nothing here pushes. Every build is local, and every image these tests
+// build is removed when they end.
 package images_test
 
 import (
@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +42,7 @@ const buildTimeout = 20 * time.Minute
 // runTimeout bounds one container run.
 const runTimeout = 2 * time.Minute
 
-// tag is the tag this lane builds under. It is removed when the lane ends,
+// tag is the tag these tests build under. It is removed when they end,
 // so it never collides with an image an operator built by hand.
 const tag = "egress-proxy-images-test"
 
@@ -50,8 +51,8 @@ func TestMain(m *testing.M) {
 		log.Fatal("docker is not available")
 	}
 	code := m.Run()
-	// The proxy image is built once for the whole lane, so it is removed
-	// here rather than by one test's cleanup.
+	// The proxy image is built once for every test, so TestMain removes it
+	// after they all finish.
 	if err := exec.CommandContext(context.Background(), "docker", "rmi", "-f", proxyImageRef).Run(); err != nil {
 		log.Printf("failed to remove image %q: %v", proxyImageRef, err)
 	}
@@ -100,10 +101,9 @@ func docker(t *testing.T, timeout time.Duration, args ...string) string {
 // proxyImageRef is the reference `make image-proxy` leaves behind.
 const proxyImageRef = "egress-proxy:" + tag
 
-// buildProxyImage runs the target a release runs, so the lane drives the
-// image the Makefile produces rather than one it assembled itself. It runs
-// once for the whole lane.
-var buildProxyImage = sync.OnceValue(func() error { //nolint:gochecknoglobals // one build for the lane
+// buildProxyImage runs `make image-proxy`, so the tests check the image the
+// Makefile produces. It runs once for every test.
+var buildProxyImage = sync.OnceValue(func() error { //nolint:gochecknoglobals // one build for every test
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		return fmt.Errorf("resolve the repository root: %w", err)
@@ -155,7 +155,7 @@ func runStdout(t *testing.T, timeout time.Duration, env []string, name string, a
 	return string(out)
 }
 
-// removeImage drops an image the lane built, whether the test passed or
+// removeImage drops an image a test built, whether the test passed or
 // failed.
 func removeImage(t *testing.T, image string) {
 	t.Helper()
@@ -316,7 +316,7 @@ func privilegedBindConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	document := "version: 1\n" +
-		"sandbox:\n  id: images-lane\n" +
+		"sandbox:\n  id: images-test\n" +
 		"listen:\n  connect: \"0.0.0.0:" + strconv.Itoa(netsetup.DefaultRedirectPort) + "\"\n" +
 		"ca:\n  state_dir: \"/state/ca\"\n" +
 		"endpoints:\n  - url: https://upstream.test/\n"
@@ -387,7 +387,7 @@ func TestNetsetupImage(t *testing.T) {
 	version := docker(t, runTimeout, "run", "--rm", "--entrypoint", "/bin/sh",
 		image, "-c", "iptables-legacy --version && ip6tables-legacy --version")
 	assert.Contains(t, version, "(legacy)", "the image resolves the legacy backend, not nf_tables")
-	assert.NotContains(t, version, "nf_tables", "no binary the lane resolves uses the nf_tables backend")
+	assert.NotContains(t, version, "nf_tables", "no iptables binary in the image uses the nf_tables backend")
 
 	// A run with the init container's capabilities, in the container's own
 	// network namespace, loads both families through the image's restore
@@ -412,7 +412,7 @@ func TestNetsetupImage(t *testing.T) {
 	}
 }
 
-// sharedCAMount is where the lane mounts the certificate the sidecar
+// sharedCAMount is where the tests mount the certificate the sidecar
 // publishes. It is the proxy's own default for ca.out_dir, and no case
 // sets KEYCARD_CA_FILE. If the image default and the proxy default differ,
 // the entrypoint does not find the file and the test fails.
@@ -503,6 +503,57 @@ func TestSandboxBaseImage(t *testing.T) {
 		}
 	})
 
+	// The table lists every variable the image points at a trust store. A
+	// variable the image adds fails the test until it gets a row and a
+	// probe for the client that reads it.
+	t.Run("every trust variable names something the image installs", func(t *testing.T) {
+		const (
+			bundleFile = "/etc/ssl/certs/ca-certificates.crt"
+			certDir    = "/etc/ssl/certs"
+		)
+		sharedCert := sharedCAMount + "/ca.crt"
+		tests := []struct {
+			name string
+			// want is the path the variable names.
+			want string
+			// probe is a shell command that fails when the client that
+			// reads the variable is not installed.
+			probe string
+		}{
+			{name: "SSL_CERT_FILE", want: bundleFile, probe: "openssl version"},
+			{name: "SSL_CERT_DIR", want: certDir, probe: "openssl version"},
+			{name: "REQUESTS_CA_BUNDLE", want: bundleFile, probe: "python3 -c 'import requests'"},
+			{name: "CURL_CA_BUNDLE", want: bundleFile, probe: "curl --version"},
+			{name: "GIT_SSL_CAINFO", want: bundleFile, probe: "git --version"},
+			{name: "NODE_EXTRA_CA_CERTS", want: sharedCert, probe: "node --version"},
+			{name: "KEYCARD_CA_FILE", want: sharedCert, probe: "test -x /usr/local/bin/keycard-sandbox-entrypoint"},
+		}
+		env := imageEnv(t, image)
+		named := make([]string, 0, len(tests))
+		for name, value := range env {
+			if value == bundleFile || value == certDir || value == sharedCert {
+				named = append(named, name)
+			}
+		}
+		want := make([]string, 0, len(tests))
+		for _, tc := range tests {
+			want = append(want, tc.name)
+		}
+		slices.Sort(named)
+		slices.Sort(want)
+		require.Equal(t, want, named, "the variables the image points at a trust store")
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.Equal(t, tc.want, env[tc.name], "the path %s names", tc.name)
+				ctx, cancel := context.WithTimeout(t.Context(), runTimeout)
+				defer cancel()
+				out, err := exec.CommandContext(ctx, "docker", "run", "--rm",
+					"--entrypoint", "/bin/sh", image, "-c", tc.probe).CombinedOutput()
+				assert.NoError(t, err, "%s names a client the image does not install:\n%s", tc.name, out)
+			})
+		}
+	})
+
 	// No row mounts a certificate, so every row must refuse to start the
 	// agent. The rows differ in the timeout the entrypoint is given, which
 	// decides whether it waits and how it exits.
@@ -532,6 +583,23 @@ func TestSandboxBaseImage(t *testing.T) {
 			})
 		}
 	})
+}
+
+// imageEnv returns the image's Config.Env as a map from name to value.
+// Config.Env is the environment a container starts with, before the
+// entrypoint runs.
+func imageEnv(t *testing.T, image string) map[string]string {
+	t.Helper()
+	out := runStdout(t, runTimeout, nil, "docker", "image", "inspect", "--format", "{{json .Config.Env}}", image)
+	var entries []string
+	require.NoError(t, json.Unmarshal([]byte(out), &entries), "Config.Env of %s:\n%s", image, out)
+	env := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		name, value, found := strings.Cut(entry, "=")
+		require.True(t, found, "Config.Env holds %q, which is not NAME=value", entry)
+		env[name] = value
+	}
+	return env
 }
 
 // gitOverHTTPS serves a git repository over HTTPS inside the container,
@@ -601,7 +669,7 @@ func writeFile(t *testing.T, path string, data []byte) {
 // returns the directory the workload mounts and the authority itself.
 func sharedCA(t *testing.T) (string, *ca.Authority) {
 	t.Helper()
-	authority, err := ca.New(ca.Options{CommonName: "images lane CA"})
+	authority, err := ca.New(ca.Options{CommonName: "images test CA"})
 	require.NoError(t, err, "mint the authority the sidecar would write")
 	dir := t.TempDir()
 	_, err = authority.WriteCertificate(dir)

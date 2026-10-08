@@ -149,11 +149,9 @@ endpoints:
   - url: https://localhost:$UPSTREAM_PORT/repo.git/
     credential:
       placement: {kind: basic, user: x-access-token}
-      env: GIT_TOKEN
   - url: https://localhost:$UPSTREAM_PORT/nocred.git/
     credential:
       placement: {kind: basic, user: x-access-token}
-      env: GIT_TOKEN
 -- credentials.yaml --
 version: 1
 credentials:
