@@ -277,6 +277,10 @@ func dump(t *testing.T, run *test, name string) {
 		return
 	}
 	t.Logf("e2e: pod %s phase %s", name, pod.Status.Phase)
+	for _, condition := range pod.Status.Conditions {
+		t.Logf("e2e: pod %s condition %s=%s %s: %s",
+			name, condition.Type, condition.Status, condition.Reason, condition.Message)
+	}
 	for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
 		t.Logf("e2e: pod %s container %s ready=%t restarts=%d state=%+v",
 			name, status.Name, status.Ready, status.RestartCount, status.State)

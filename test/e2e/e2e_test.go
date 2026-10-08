@@ -27,6 +27,19 @@ const clusterName = "egress-proxy-e2e"
 // k3sImage pins the node image.
 const k3sImage = "rancher/k3s:v1.34.5-k3s1"
 
+// kubeletDiskArgs turn off the kubelet's disk-based eviction and image
+// garbage collection. The node shares the host's disk, so on a CI runner
+// with little free space the kubelet otherwise taints the node with
+// disk-pressure, leaving pods unscheduled, or deletes imported images that
+// no pod uses yet, leaving pods in ImagePullBackOff. Those images exist only
+// in the cluster's image store, so nothing can pull them back.
+var kubeletDiskArgs = []string{ //nolint:gochecknoglobals // one fixture value
+	"--k3s-arg=--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%@server:*",
+	"--k3s-arg=--kubelet-arg=eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%@server:*",
+	"--k3s-arg=--kubelet-arg=image-gc-high-threshold=100@server:*",
+	"--k3s-arg=--kubelet-arg=image-gc-low-threshold=99@server:*",
+}
+
 // imageTag is the tag this suite builds under. Images with this tag is removed
 // during cleanup.
 const imageTag = "egress-proxy-e2e"
@@ -126,8 +139,11 @@ func start(t *testing.T) *test {
 	defer cancel()
 	// The framework writes its own kubeconfig file, so k3d leaves the
 	// operator's default kubeconfig and current context alone.
-	kubeconfig, err := cluster.Create(ctx, "--image", k3sImage, "--wait",
-		"--kubeconfig-update-default=false", "--kubeconfig-switch-context=false")
+	args := append([]string{
+		"--image", k3sImage, "--wait",
+		"--kubeconfig-update-default=false", "--kubeconfig-switch-context=false",
+	}, kubeletDiskArgs...)
+	kubeconfig, err := cluster.Create(ctx, args...)
 	require.NoError(t, err, "create the k3d cluster %s", clusterName)
 	t.Logf("e2e: cluster %s is up, kubeconfig %s", clusterName, kubeconfig)
 
