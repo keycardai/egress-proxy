@@ -12,6 +12,8 @@ help:
 	@echo "acceptance      the acceptance tests under test/acceptance, which drive the built binary"
 	@echo "e2e             the e2e tests under test/e2e, on a k3d cluster"
 	@echo "images          build the three images locally and check each one"
+	@echo "publish         build the three images for every platform and push them, PUBLISH_TAGS required"
+	@echo "sign            sign the images publish pushed with cosign, by digest"
 	@echo "notice          regenerate NOTICE from the build list"
 	@echo "tidy            go mod tidy"
 	@echo "all             build, test, lint, checks, acceptance, in gate order"
@@ -82,8 +84,8 @@ e2e:
 
 # The three images, built locally. ko builds the proxy straight from the
 # module. The other two are Dockerfiles, and the netsetup one takes the
-# repository root as its build context. Nothing here pushes: publishing is
-# a release step.
+# repository root as its build context. Nothing here pushes: `publish`
+# below is the release step.
 IMAGE_TAG ?= dev
 
 # The reference the proxy image ends up under.
@@ -133,6 +135,72 @@ image-sandbox-base:
 .PHONY: images
 images:
 	$(GO) test -tags images -count=1 -timeout 30m ./test/images/...
+
+# Publishing. The release workflow runs `publish` and then `sign`. publish
+# builds the same three definitions for every platform in PLATFORMS and
+# pushes them under each tag in PUBLISH_TAGS, with an SBOM and a provenance
+# attestation in each image index. It needs a docker-container buildx
+# builder, and emulation for every platform that is not the host's.
+# It records each digest under PUBLISH_DIR, and sign reads them back, so
+# a signature names the digest that was pushed and never a tag.
+REGISTRY ?= ghcr.io/keycardai
+PUBLISH_TAGS ?=
+PLATFORMS ?= linux/amd64,linux/arm64
+PUBLISH_DIR ?= dist/publish
+IMAGE_SOURCE ?= https://github.com/keycardai/egress-proxy
+IMAGE_REVISION ?= $(shell git rev-parse HEAD)
+PUBLISHED_IMAGES = egress-proxy egress-netsetup sandbox-base
+
+# The buildx flags every published image takes. $(1) is the image name.
+# The annotations name the source repository, which links the package to
+# it on ghcr.io.
+publish_args = --platform $(PLATFORMS) --sbom=true --provenance=mode=max --push \
+	$(foreach t,$(PUBLISH_TAGS),--tag $(REGISTRY)/$(1):$(t)) \
+	--annotation "index,manifest:org.opencontainers.image.source=$(IMAGE_SOURCE)" \
+	--annotation "index,manifest:org.opencontainers.image.revision=$(IMAGE_REVISION)" \
+	--annotation "index,manifest:org.opencontainers.image.licenses=Apache-2.0" \
+	--metadata-file $(PUBLISH_DIR)/$(1).json
+
+.PHONY: publish
+publish: publish-proxy publish-netsetup publish-sandbox-base
+
+.PHONY: publish-dir
+publish-dir:
+	@[ -n "$(strip $(PUBLISH_TAGS))" ] || { echo "PUBLISH_TAGS must name at least one tag" >&2; exit 2; }
+	mkdir -p $(PUBLISH_DIR)
+
+# The same two steps as image-proxy. ko writes the multi-platform image to
+# an OCI layout instead of the daemon, and buildx reads it as the named
+# context egress-proxy-ko, so the intermediate image is never pushed.
+.PHONY: publish-proxy
+publish-proxy: publish-dir
+	rm -rf $(PUBLISH_DIR)/ko-layout
+	ko_ref=$$(KO_CONFIG_PATH=images/proxy KO_DOCKER_REPO=egress-proxy-ko $(GO) tool ko build --push=false --bare \
+		--sbom=none --oci-layout-path $(PUBLISH_DIR)/ko-layout --platform $(PLATFORMS) ./cmd/egress-proxy) || exit $$?; \
+	SOURCE_DATE_EPOCH=0 docker buildx build -f images/proxy/Dockerfile --build-arg KO_IMAGE=egress-proxy-ko \
+		--build-context egress-proxy-ko=oci-layout://$(abspath $(PUBLISH_DIR))/ko-layout@$${ko_ref##*@} \
+		$(call publish_args,egress-proxy) images/proxy
+
+.PHONY: publish-netsetup
+publish-netsetup: publish-dir
+	docker buildx build -f images/netsetup/Dockerfile $(call publish_args,egress-netsetup) .
+
+.PHONY: publish-sandbox-base
+publish-sandbox-base: publish-dir
+	docker buildx build $(call publish_args,sandbox-base) images/sandbox-base
+
+# Keyless signing: in the release workflow cosign takes the job's OIDC
+# token, so the certificate names the workflow that pushed the image.
+# --recursive also signs each platform manifest and attestation in the
+# index. The references signed go to $(PUBLISH_DIR)/digests.txt.
+.PHONY: sign
+sign:
+	: > $(PUBLISH_DIR)/digests.txt
+	for image in $(PUBLISHED_IMAGES); do \
+		digest=$$(jq -er '."containerimage.digest"' $(PUBLISH_DIR)/$$image.json) || exit $$?; \
+		$(GO) tool cosign sign --yes --recursive $(REGISTRY)/$$image@$$digest || exit $$?; \
+		echo "$(REGISTRY)/$$image@$$digest" >> $(PUBLISH_DIR)/digests.txt; \
+	done
 
 .PHONY: all
 all: build test lint checks acceptance

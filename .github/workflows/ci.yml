@@ -7,10 +7,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release job dispatches this workflow on the release PR branch.
+  workflow_dispatch:
 
+# A push to main is never cancelled, so every commit on main runs the
+# release job. Anything else gives way to a newer run on the same ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 permissions:
   contents: read
@@ -73,8 +77,8 @@ jobs:
       - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
       - run: make acceptance
 
-  # The three images, built locally. Nothing here pushes: publishing is a
-  # release step.
+  # The three images, built locally. Nothing here pushes: the release job
+  # publishes.
   images:
     runs-on: ubuntu-latest
     steps:
@@ -116,3 +120,21 @@ jobs:
       # Ensure all kernel modules needed by netsetup are loaded.
       - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
       - run: make e2e
+
+  # The release PR, and on a release the tag and the published images. It
+  # runs only after every gate above has passed on a push to main.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-test, lint, checks, acceptance, images, e2e]
+    # One release run at a time, so two pushes never race release-please or
+    # the `main` tag.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/release.yml

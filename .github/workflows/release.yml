@@ -1,0 +1,101 @@
+# The release, called by ci.yml once every gate has passed on a push to
+# main. Every action pin names a commit, and Dependabot moves the pins.
+#
+# release-please keeps one release PR open with the version and changelog
+# the conventional commits since the last release call for. Merging that PR
+# tags the release and creates the GitHub release. The tag is pushed with
+# the workflow token, which starts no workflow, so the images for a release
+# are published here rather than by a tag trigger.
+#
+# Every push to main also publishes the three images under the `main` tag.
+# A release adds its version tag to the same build.
+name: release
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # To dispatch ci.yml on the release PR branch.
+      actions: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      # A PR the workflow token opens or updates starts no pull_request
+      # workflow, so the gates are dispatched on its branch. The checks land
+      # on the PR's head commit.
+      - name: run the gates on the release PR
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+
+  publish:
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      # To upload the digests to the GitHub release.
+      contents: write
+      packages: write
+      # The OIDC token cosign signs with.
+      id-token: write
+    env:
+      RELEASE_CREATED: ${{ needs.release-please.outputs.release_created }}
+      TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      # A release builds the commit it tagged, which is this push unless a
+      # later push to main overtook it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.release_created && needs.release-please.outputs.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # Emulation for the arm64 RUN steps in the Debian images.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      # A docker-container builder, which multi-platform builds, SBOMs and
+      # provenance attestations need.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: publish
+        run: |
+          tags=main
+          if [ "$RELEASE_CREATED" = "true" ]; then
+            tags="$tags $TAG_NAME"
+          fi
+          make publish PUBLISH_TAGS="$tags" IMAGE_REVISION="$(git rev-parse HEAD)"
+      - run: make sign
+      - name: record the digests
+        run: |
+          {
+            echo '### Published images'
+            echo '```'
+            cat dist/publish/digests.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: attach the digests to the release
+        if: env.RELEASE_CREATED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG_NAME" dist/publish/digests.txt --repo "$GITHUB_REPOSITORY"

@@ -254,7 +254,8 @@ The gates and what each enforces:
   against a dependency that has not changed.
 - **Images** (`make images`): the three images under `images/`, built
   locally with `ko build --local` and `docker build`. The tests skip when no
-  Docker daemon answers. Nothing in this repository pushes an image.
+  Docker daemon answers. `make images` never pushes. The release job
+  publishes, see "Releases" below.
 - **Cluster** (`make e2e`): the e2e tests under `test/e2e`. It builds the images,
   creates a k3d cluster, imports them, applies a sandbox pod and asserts the
   request path from the proxy audit stream and the fake zone request log. It
@@ -268,6 +269,31 @@ of `make test`. A change to a gate changes its fixture or its test. The
 fixture modules pin old or copyleft versions on purpose; Dependabot scans
 only the directories `.github/dependabot.yml` lists, and that is not one of
 them, and `socket.yml` excludes the path from Socket's scan.
+
+## Releases
+
+A PR title is a conventional commit (`feat:`, `fix:`, `ci:`, `docs:`, with
+`!` for a breaking change), because the squash merge puts it on main and
+release-please reads it. `release-please-config.json` and
+`.release-please-manifest.json` configure it.
+
+On every push to main, after every gate passes, `ci.yml` calls
+`.github/workflows/release.yml`:
+
+- release-please opens or updates one release PR with the next version and
+  `CHANGELOG.md`. Merging that PR tags `vX.Y.Z` and creates the GitHub
+  release.
+- `make publish` builds the three images for linux/amd64 and linux/arm64
+  and pushes them to `ghcr.io/keycardai` under `main`, and under the version
+  tag when the push is a release. Each image index carries a BuildKit SBOM
+  and a provenance attestation.
+- `make sign` signs every pushed digest keylessly with cosign, which is a
+  `tool` directive in `go.mod`. A release attaches the signed references as
+  `digests.txt`. Reference an image by digest, never by tag.
+
+`docs/containers.md` says how to verify a signature. NEVER merge a release
+PR for a public release until the security model is complete, per working
+agreement 10.
 
 ## Dependencies
 
