@@ -117,6 +117,15 @@ jobs:
           sudo install -m 0755 k3d /usr/local/bin/k3d
           rm k3d
           k3d version
+      # The runner starts with its disk about 88% full. The image builds and
+      # the cluster take most of what is left, and below 5% free the kubelet
+      # evicts the test's pods and garbage-collects the images it imported.
+      # Removing toolchains this job never uses keeps it clear of that line.
+      - name: free disk for the cluster
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
       # Ensure all kernel modules needed by netsetup are loaded.
       - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
       - run: make e2e E2E_FLAGS=-v
