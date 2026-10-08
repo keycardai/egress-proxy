@@ -24,21 +24,11 @@ import (
 // clusterName is the cluster this suite creates and deletes.
 const clusterName = "egress-proxy-e2e"
 
+// nodeContainer is the docker container k3d runs the cluster's one node in.
+const nodeContainer = "k3d-" + clusterName + "-server-0"
+
 // k3sImage pins the node image.
 const k3sImage = "rancher/k3s:v1.34.5-k3s1"
-
-// kubeletDiskArgs turn off the kubelet's disk-based eviction and image
-// garbage collection. The node shares the host's disk, so on a CI runner
-// with little free space the kubelet otherwise taints the node with
-// disk-pressure, leaving pods unscheduled, or deletes imported images that
-// no pod uses yet, leaving pods in ImagePullBackOff. Those images exist only
-// in the cluster's image store, so nothing can pull them back.
-var kubeletDiskArgs = []string{ //nolint:gochecknoglobals // one fixture value
-	"--k3s-arg=--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%@server:*",
-	"--k3s-arg=--kubelet-arg=eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%@server:*",
-	"--k3s-arg=--kubelet-arg=image-gc-high-threshold=100@server:*",
-	"--k3s-arg=--kubelet-arg=image-gc-low-threshold=99@server:*",
-}
 
 // imageTag is the tag this suite builds under. Images with this tag is removed
 // during cleanup.
@@ -116,7 +106,9 @@ const (
 // cluster is deleted when the test ends, whether it passed or failed.
 func start(t *testing.T) *test {
 	t.Helper()
+	logHost("before the image builds")
 	images := buildImages(t)
+	logHost("after the image builds")
 
 	// NEVER let the framework install a provider. Cluster.Create runs
 	// `go install` for the k3d it pins when the binary it was given is not
@@ -139,13 +131,11 @@ func start(t *testing.T) *test {
 	defer cancel()
 	// The framework writes its own kubeconfig file, so k3d leaves the
 	// operator's default kubeconfig and current context alone.
-	args := append([]string{
-		"--image", k3sImage, "--wait",
-		"--kubeconfig-update-default=false", "--kubeconfig-switch-context=false",
-	}, kubeletDiskArgs...)
-	kubeconfig, err := cluster.Create(ctx, args...)
+	kubeconfig, err := cluster.Create(ctx, "--image", k3sImage, "--wait",
+		"--kubeconfig-update-default=false", "--kubeconfig-switch-context=false")
 	require.NoError(t, err, "create the k3d cluster %s", clusterName)
 	t.Logf("e2e: cluster %s is up, kubeconfig %s", clusterName, kubeconfig)
+	logHost("after the cluster is up")
 
 	for role, image := range images {
 		importCtx, importCancel := context.WithTimeout(context.Background(), importTimeout)
@@ -153,6 +143,8 @@ func start(t *testing.T) *test {
 		importCancel()
 		require.NoError(t, imported, "import the %s image %s", role, image)
 	}
+	logHost("after the images are imported")
+	fmt.Fprintln(os.Stderr, diagnostic("docker", "exec", nodeContainer, "crictl", "images"))
 
 	client, err := klient.New(cluster.KubernetesRestConfig())
 	require.NoError(t, err, "build the cluster client")
@@ -291,4 +283,28 @@ func runStdout(t *testing.T, timeout time.Duration, env []string, name string, a
 	out, err := cmd.Output()
 	require.NoError(t, err, "%s %s", name, strings.Join(args, " "))
 	return string(out)
+}
+
+// logHost writes the free space on the disk docker and the cluster node
+// share, and what docker holds on it, at one step of the test. It writes to
+// standard error rather than the test log, so a run that passes shows it
+// too.
+func logHost(step string) {
+	fmt.Fprintf(os.Stderr, "e2e: host disk %s\n", step)
+	for _, command := range [][]string{{"df", "-h", "/", "/tmp"}, {"docker", "system", "df"}} {
+		fmt.Fprintln(os.Stderr, diagnostic(command[0], command[1:]...))
+	}
+}
+
+// diagnostic runs a command that reports state and returns what it wrote.
+// A command that fails returns its error with its output, and never fails
+// the test.
+func diagnostic(name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("e2e: %s %s: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return fmt.Sprintf("e2e: %s %s:\n%s", name, strings.Join(args, " "), out)
 }

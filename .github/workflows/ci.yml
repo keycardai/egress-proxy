@@ -119,7 +119,7 @@ jobs:
           k3d version
       # Ensure all kernel modules needed by netsetup are loaded.
       - run: sudo modprobe -a iptable_filter iptable_nat ip6table_filter ip6table_nat
-      - run: make e2e
+      - run: make e2e E2E_FLAGS=-v
 
   # The release PR, and on a release the tag and the published images. It
   # runs only after every gate above has passed on a push to main.
