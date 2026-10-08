@@ -16,12 +16,16 @@
 # that set with capabilities.add NET_BIND_SERVICE. docs/containers.md
 # states why both halves are needed.
 #
+# The setcap stage runs on the build platform. setcap writes an extended
+# attribute and never runs the binary, so a multi-platform build sets the
+# capability on every target without emulation.
+#
 # The setcap base is pinned by tag and digest. Dependabot updates it.
 ARG KO_IMAGE
 
 FROM ${KO_IMAGE} AS ko
 
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS setcap
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS setcap
 RUN apt-get update \
 	&& apt-get install --yes --no-install-recommends libcap2-bin \
 	&& rm -rf /var/lib/apt/lists/*

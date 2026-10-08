@@ -7,13 +7,18 @@
 # with NET_ADMIN, NET_RAW and SETPCAP, and an operator debugging a ruleset
 # needs the iptables binaries and a shell to drive them with.
 # Base images are pinned by tag and digest. Dependabot updates them.
-FROM golang:1.27-trixie@sha256:433790e515d27dc6003e847e644cc0af956985cf315c1c58a3b73ee2dd305183 AS build
+#
+# The build stage runs on the build platform and cross-compiles for the
+# target, so a multi-platform build emulates only the apt step.
+FROM --platform=$BUILDPLATFORM golang:1.27-trixie@sha256:433790e515d27dc6003e847e644cc0af956985cf315c1c58a3b73ee2dd305183 AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # CGO off, so the binary runs on any base image.
-RUN CGO_ENABLED=0 go build -trimpath -o /out/egress-netsetup ./cmd/egress-netsetup
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/egress-netsetup ./cmd/egress-netsetup
 
 FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 # egress-netsetup refuses any iptables binary that reports the nf_tables

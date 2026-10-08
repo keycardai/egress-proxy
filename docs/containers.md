@@ -21,8 +21,33 @@ repository enforces it, the text says so and names the enforcer.
 | sandbox-base | `make image-sandbox-base`, `images/sandbox-base/Dockerfile` | Debian trixie-slim, `ca-certificates`, `openssl`, `curl`, `git`, `python3` with `python3-requests`, `nodejs`, the agent uid and `keycard-sandbox-entrypoint`. An agent image builds `FROM` this one. |
 
 `make images` builds all three locally and checks each one in a container,
-under `test/images`. Nothing in this repository pushes an image. Publishing is a
-release step.
+under `test/images`.
+
+## Published images
+
+Every push to main publishes the three images for linux/amd64 and
+linux/arm64, from the same definitions:
+
+| Image | Reference |
+|---|---|
+| proxy | `ghcr.io/keycardai/egress-proxy` |
+| netsetup | `ghcr.io/keycardai/egress-netsetup` |
+| sandbox-base | `ghcr.io/keycardai/sandbox-base` |
+
+The `main` tag follows the latest push to main. A release adds its version
+tag, `vX.Y.Z`, and attaches `digests.txt` to the GitHub release with the
+digest of each image. Tags move, so a manifest names an image by digest.
+
+Each image index carries an SPDX SBOM and a SLSA provenance attestation:
+
+    docker buildx imagetools inspect ghcr.io/keycardai/egress-proxy@sha256:... --format '{{json .SBOM}}'
+
+Each index, platform manifest and attestation is signed with cosign,
+keylessly, by the release workflow. Verify a digest against that identity:
+
+    cosign verify ghcr.io/keycardai/egress-proxy@sha256:... \
+      --certificate-identity https://github.com/keycardai/egress-proxy/.github/workflows/release.yml@refs/heads/main \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 ## The proxy container
 
