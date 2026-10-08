@@ -123,7 +123,8 @@ jobs:
       # Removing toolchains this job never uses keeps it clear of that line.
       - name: free disk for the cluster
         run: |
-          df -h /
+          df -h
+          lsblk
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           df -h /
       # Ensure all kernel modules needed by netsetup are loaded.
