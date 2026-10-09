@@ -1,6 +1,6 @@
 module github.com/keycardai/egress-proxy
 
-go 1.27.1
+go 1.27.2
 
 // Build-time tools, run as `go tool <name>`. Their modules are requirements
 // of this module but no package here imports them, so they are in no binary
@@ -30,7 +30,7 @@ require (
 	github.com/urfave/cli/v3 v3.13.0
 	go.yaml.in/yaml/v2 v2.4.4
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	k8s.io/api v0.36.1
