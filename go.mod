@@ -15,7 +15,7 @@ tool (
 
 require (
 	github.com/coreos/go-iptables v0.8.0
-	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/elazarl/goproxy v1.9.1
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gowebpki/jcs v1.0.2
