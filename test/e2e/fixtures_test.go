@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilexec "k8s.io/client-go/util/exec"
 	"sigs.k8s.io/e2e-framework/klient/decoder"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
@@ -267,16 +268,22 @@ func waitReady(t *testing.T, run *test, name string) {
 	require.NoError(t, err, "pod %s did not report ready", name)
 }
 
-// dump writes what every container in a pod logged, so a failure names why
-// the pod did not come up.
+// dump writes what every container in a pod logged, the node's state and
+// the cluster's warning events, so a failure names why the pod did not come
+// up.
 func dump(t *testing.T, run *test, name string) {
 	t.Helper()
+	defer dumpCluster(t, run)
 	pod := &corev1.Pod{}
 	if err := run.client.Resources().Get(context.Background(), name, namespace, pod); err != nil {
 		t.Logf("e2e: read pod %s: %v", name, err)
 		return
 	}
 	t.Logf("e2e: pod %s phase %s", name, pod.Status.Phase)
+	for _, condition := range pod.Status.Conditions {
+		t.Logf("e2e: pod %s condition %s=%s %s: %s",
+			name, condition.Type, condition.Status, condition.Reason, condition.Message)
+	}
 	for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
 		t.Logf("e2e: pod %s container %s ready=%t restarts=%d state=%+v",
 			name, status.Name, status.Ready, status.RestartCount, status.State)
@@ -328,4 +335,38 @@ func execInAgent(t *testing.T, run *test, pod string, command ...string) (string
 		require.NoError(t, err, "run %v in %s: %s", command, pod, stderr.String())
 	}
 	return stdout.String(), stderr.String(), status
+}
+
+// dumpCluster logs every node's conditions and taints, the warning events
+// in the test namespace and kube-system, what the node's image store holds
+// and the host's free space.
+func dumpCluster(t *testing.T, run *test) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	nodes, err := run.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Logf("e2e: list the nodes: %v", err)
+	} else {
+		for _, node := range nodes.Items {
+			t.Logf("e2e: node %s taints %+v", node.Name, node.Spec.Taints)
+			for _, condition := range node.Status.Conditions {
+				t.Logf("e2e: node %s condition %s=%s %s: %s",
+					node.Name, condition.Type, condition.Status, condition.Reason, condition.Message)
+			}
+		}
+	}
+	for _, ns := range []string{namespace, metav1.NamespaceSystem} {
+		events, err := run.clientset.CoreV1().Events(ns).List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"})
+		if err != nil {
+			t.Logf("e2e: list the events in %s: %v", ns, err)
+			continue
+		}
+		for _, event := range events.Items {
+			t.Logf("e2e: event %s %s/%s %s x%d: %s", ns, event.InvolvedObject.Kind, event.InvolvedObject.Name,
+				event.Reason, event.Count, event.Message)
+		}
+	}
+	t.Log(diagnostic("docker", "exec", nodeContainer, "crictl", "images"))
+	t.Log(diagnostic("df", "-h", "/", "/tmp"))
 }

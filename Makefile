@@ -77,10 +77,12 @@ acceptance:
 # the images, creates a k3d cluster, imports them, applies a sandbox pod and
 # drives requests from inside the agent container. It is behind the e2e
 # build tag so `go test ./...` never starts a cluster, and it skips with a
-# message when Docker or k3d is missing.
+# message when Docker or k3d is missing. E2E_FLAGS passes go test flags,
+# for example -v to show the host disk the test logs on a run that passes.
+E2E_FLAGS ?=
 .PHONY: e2e
 e2e:
-	$(GO) test -tags e2e -count=1 ./test/e2e/...
+	$(GO) test -tags e2e -count=1 $(E2E_FLAGS) ./test/e2e/...
 
 # The three images, built locally. ko builds the proxy straight from the
 # module. The other two are Dockerfiles, and the netsetup one takes the
