@@ -415,8 +415,8 @@ func endpointPort(scheme, text string) (int, error) {
 
 // canonicalResource is the resource an endpoint sends to the zone. The root
 // path is left out, so https://api.github.com/ sends https://api.github.com,
-// the identifier a catalog install registers. Any other path is kept as
-// written, because /api and /api/ cover different paths.
+// the resource URL registered in the zone. Any other path is kept as written,
+// because /api and /api/ cover different paths.
 func canonicalResource(parsed endpointURL) string {
 	authority := parsed.host
 	if parsed.port != schemePort(parsed.scheme) {
