@@ -37,13 +37,17 @@ jobs:
           manifest-file: .release-please-manifest.json
       # A PR the workflow token opens or updates starts no pull_request
       # workflow, so the gates are dispatched on its branch. The checks land
-      # on the PR's head commit.
+      # on the PR's head commit. release-please sets `pr` only when it opens
+      # or changes the PR, so `pr` is parsed in the script, where an empty
+      # value never reaches fromJSON.
       - name: run the gates on the release PR
-        if: steps.release.outputs.pr
+        if: steps.release.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
-        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          PR: ${{ steps.release.outputs.pr }}
+        run: |
+          branch="$(jq -r .headBranchName <<<"$PR")"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
 
   publish:
     needs: release-please
