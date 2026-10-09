@@ -210,9 +210,9 @@ third-party archives.
 
 
 ----------------------------------------------------------------------------
-github.com/elazarl/goproxy v1.9.1
+github.com/elazarl/goproxy v1.9.2
 License: BSD-3-Clause
-Source: https://github.com/elazarl/goproxy/blob/v1.9.1/LICENSE
+Source: https://github.com/elazarl/goproxy/blob/v1.9.2/LICENSE
 
 Copyright (c) 2012 Elazar Leibovich. All rights reserved.
 
@@ -876,9 +876,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ----------------------------------------------------------------------------
-github.com/keycardai/go-sdk/oauth v0.23.2
+github.com/keycardai/go-sdk/oauth v0.23.3
 License: MIT
-Source: https://github.com/keycardai/go-sdk/blob/v0.23.2/LICENSE
+Source: https://github.com/keycardai/go-sdk/blob/v0.23.3/LICENSE
 
 MIT LICENSE
 
