@@ -389,8 +389,8 @@ github.com/dprotaso/go-yit v0.0.0-20260209000607-dfb86291624d h1:/USl0X37Afc2Syj
 github.com/dprotaso/go-yit v0.0.0-20260209000607-dfb86291624d/go.mod h1:k03zg0AFMepR2TrssNeMUISoI0QcX2N58Sl0qPU6MZs=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
-github.com/elazarl/goproxy v1.9.1 h1:1gQuANpCxN2UQKWwkNPpWqAk1LnAMYuBxqfIdU8mMoE=
-github.com/elazarl/goproxy v1.9.1/go.mod h1:THdE5ix2clxX9lZzcICPpZ67d6CdrPZxdOYsNgU5e30=
+github.com/elazarl/goproxy v1.9.2 h1:+vXRRSWrznMtBrAb559qfqC+Cny1Q3rR0l51Yu/3WUw=
+github.com/elazarl/goproxy v1.9.2/go.mod h1:THdE5ix2clxX9lZzcICPpZ67d6CdrPZxdOYsNgU5e30=
 github.com/emicklei/go-restful/v3 v3.13.0 h1:C4Bl2xDndpU6nJ4bc1jXd+uTmYPVUwkD6bFY/oTyCes=
 github.com/emicklei/go-restful/v3 v3.13.0/go.mod h1:6n3XBCmQQb25CM2LCACGz8ukIrRry+4bhvbpWn3mrbc=
 github.com/emicklei/proto v1.14.3 h1:zEhlzNkpP8kN6utonKMzlPfIvy82t5Kb9mufaJxSe1Q=
