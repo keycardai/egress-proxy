@@ -10,7 +10,7 @@
 #
 # The build stage runs on the build platform and cross-compiles for the
 # target, so a multi-platform build emulates only the apt step.
-FROM --platform=$BUILDPLATFORM golang:1.27-trixie@sha256:433790e515d27dc6003e847e644cc0af956985cf315c1c58a3b73ee2dd305183 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-trixie@sha256:2f84bc93ecfb2689f782b153fdcd368b5a7ab96c1386c65cdaccf35e726d6a44 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
