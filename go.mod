@@ -20,7 +20,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gowebpki/jcs v1.0.2
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/keycardai/go-sdk v0.23.2
+	github.com/keycardai/go-sdk v0.23.3
 	github.com/mccutchen/go-httpbin/v2 v2.25.0
 	github.com/miekg/dns v1.1.73
 	github.com/moby/buildkit v0.33.1

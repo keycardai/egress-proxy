@@ -747,8 +747,8 @@ github.com/karamaru-alpha/copyloopvar v1.2.2 h1:yfNQvP9YaGQR7VaWLYcfZUlRP2eo2vhE
 github.com/karamaru-alpha/copyloopvar v1.2.2/go.mod h1:oY4rGZqZ879JkJMtX3RRkcXRkmUvH0x35ykgaKgsgJY=
 github.com/keybase/go-keychain v0.0.1 h1:way+bWYa6lDppZoZcgMbYsvC7GxljxrskdNInRtuthU=
 github.com/keybase/go-keychain v0.0.1/go.mod h1:PdEILRW3i9D8JcdM+FmY6RwkHGnhHxXwkPPMeUgOK1k=
-github.com/keycardai/go-sdk v0.23.2 h1:Dlj5yxufufwgYTCPH/dR3zeMQCMVxldPlm8G5Mra+k4=
-github.com/keycardai/go-sdk v0.23.2/go.mod h1:TihTyCzUmAAMG4pnvbz5+DARNZ3OvaCaIy50NlnLk3Q=
+github.com/keycardai/go-sdk v0.23.3 h1:iJepgaJUX/AbeAPJVNbetKBxnpy6HhoFzacR2fG9v1g=
+github.com/keycardai/go-sdk v0.23.3/go.mod h1:TihTyCzUmAAMG4pnvbz5+DARNZ3OvaCaIy50NlnLk3Q=
 github.com/kisielk/errcheck v1.20.0 h1:9rwHBNKzd4wkDWcROy3DvFGNqEPlkxBg305rvk7HabI=
 github.com/kisielk/errcheck v1.20.0/go.mod h1:O+f80MKNwX8Oor2jwgpeQ9An7uJm+hRSgT+h22knRJU=
 github.com/kkHAIKE/contextcheck v1.1.6 h1:7HIyRcnyzxL9Lz06NGhiKvenXq7Zw6Q0UQu/ttjfJCE=
