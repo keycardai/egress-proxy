@@ -43,6 +43,11 @@ enforces and what it does not.
 Go 1.27.1 or newer. The build-time tools are `tool` directives in `go.mod`,
 built by the `go` command on first use. Nothing else needs installing.
 
+## Contributing and security
+
+`CONTRIBUTING.md` says how to report a bug or request a feature. `SECURITY.md`
+says how to report a vulnerability. Never report one in a public issue.
+
 ## License
 
 Apache-2.0. See `LICENSE` and, for third-party attributions, `NOTICE`.
