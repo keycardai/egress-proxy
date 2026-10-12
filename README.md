@@ -9,7 +9,7 @@ It is a forward "man-in-the-middle" (MITM) proxy which terminates TLS and govern
 
 It proxies HTTP and HTTPS.
 
-This service does not provide workload isolation "sandboxing". Rather, it is designed to be deployed as a component into such a configuration, as a means by which trust can be removed from untrustworthy workloads. See [https://github.com/keycardai/agent-sandbox-examples] for a reference example of such a deployment.
+This service does not provide workload isolation "sandboxing". Rather, it is designed to be deployed as a component into such a configuration, as a means by which trust can be removed from untrustworthy workloads. See [keycardai/agent-sandbox-examples](https://github.com/keycardai/agent-sandbox-examples) for a reference example of such a deployment.
 
 Here you'll also find supporting utilities which configure a self-signed CA for TLS termination, as well as network firewall rules for transparent proxying.
 
