@@ -27,6 +27,7 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/credential"
+	"github.com/keycardai/egress-proxy/internal/dns"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/strictdoc"
@@ -1211,7 +1212,8 @@ func (c *Config) validateTransparent(found *problems) {
 
 // validateDNS checks the resolver's address and its forward targets. A
 // resolver is optional. It refuses forward targets without listen.dns,
-// because nothing would read them.
+// because nothing would read them. It refuses a listen host that Listen
+// would refuse.
 func (c *Config) validateDNS(found *problems) {
 	for i, target := range c.DNS.ForwardTo {
 		if _, err := netip.ParseAddr(strings.TrimSpace(target)); err == nil {
@@ -1230,6 +1232,10 @@ func (c *Config) validateDNS(found *problems) {
 	}
 	if port(c.Listen.DNS) == 0 {
 		found.addf("listen.dns %q is not host:port with a port in 1-%d", c.Listen.DNS, maxPort)
+		return
+	}
+	if host, _, _ := net.SplitHostPort(strings.TrimSpace(c.Listen.DNS)); !dns.BindsLoopback(host) {
+		found.addf("listen.dns %q %v", c.Listen.DNS, dns.ErrNotLoopback)
 	}
 }
 

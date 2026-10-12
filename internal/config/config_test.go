@@ -393,6 +393,33 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 	}
 }
 
+// TestParseAcceptsALoopbackResolver covers the listen.dns hosts that bind
+// loopback. TestParseRefusesInvalidSettings covers the ones refused.
+func TestParseAcceptsALoopbackResolver(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		address string
+	}{
+		{name: "an empty host", address: ":53"},
+		{name: "the IPv4 unspecified address", address: "0.0.0.0:53"},
+		{name: "the IPv6 unspecified address", address: "[::]:53"},
+		{name: "another 127/8 address", address: "127.0.0.2:53"},
+		{name: "the IPv6 loopback address", address: "[::1]:53"},
+		{name: "IPv4-mapped loopback", address: "[::ffff:127.0.0.1]:53"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := minimal + "listen:\n  dns: \"" + tc.address + "\"\ndns:\n  forward_to: [\"10.43.0.10\"]\n"
+			cfg, err := config.Parse([]byte(doc), config.Overrides{})
+			require.NoError(t, err, "Parse:\n%s", doc)
+			assert.Equal(t, tc.address, cfg.Listen.DNS, "the address the resolver binds")
+			assert.Equal(t, 53, cfg.DNSPort(), "the port the containment check compares")
+		})
+	}
+}
+
 // TestParseRefusesMalformedDocuments covers the refusals the parser makes
 // before any setting is read: a key that names no setting, a key given
 // twice, two keys that name one setting, and a second document.
@@ -506,6 +533,56 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 			name:    "a resolver address naming a port outside 1-65535",
 			doc:     minimal + "listen:\n  dns: \"127.0.0.1:0\"\n",
 			wantErr: "listen.dns \"127.0.0.1:0\" is not host:port",
+		},
+		{
+			name:    "a resolver on a pod IP",
+			doc:     minimal + "listen:\n  dns: \"10.0.0.5:53\"\n",
+			wantErr: "listen.dns \"10.0.0.5:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on a private address",
+			doc:     minimal + "listen:\n  dns: \"192.168.1.10:53\"\n",
+			wantErr: "listen.dns \"192.168.1.10:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on a public address",
+			doc:     minimal + "listen:\n  dns: \"203.0.113.10:53\"\n",
+			wantErr: "listen.dns \"203.0.113.10:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on an IPv4 link-local address",
+			doc:     minimal + "listen:\n  dns: \"169.254.1.1:53\"\n",
+			wantErr: "listen.dns \"169.254.1.1:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on an IPv6 unique local address",
+			doc:     minimal + "listen:\n  dns: \"[fd00::1]:53\"\n",
+			wantErr: "listen.dns \"[fd00::1]:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on an IPv6 global address",
+			doc:     minimal + "listen:\n  dns: \"[2001:db8::1]:53\"\n",
+			wantErr: "listen.dns \"[2001:db8::1]:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on an IPv6 link-local address",
+			doc:     minimal + "listen:\n  dns: \"[fe80::1]:53\"\n",
+			wantErr: "listen.dns \"[fe80::1]:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on an IPv4-mapped unspecified address",
+			doc:     minimal + "listen:\n  dns: \"[::ffff:0.0.0.0]:53\"\n",
+			wantErr: "listen.dns \"[::ffff:0.0.0.0]:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on a hostname",
+			doc:     minimal + "listen:\n  dns: \"dns.example:53\"\n",
+			wantErr: "listen.dns \"dns.example:53\" is not a loopback address",
+		},
+		{
+			name:    "a resolver on localhost",
+			doc:     minimal + "listen:\n  dns: \"localhost:53\"\n",
+			wantErr: "listen.dns \"localhost:53\" is not a loopback address",
 		},
 		{
 			name:    "a forward target that is a hostname",

@@ -188,7 +188,8 @@ func listenFlags(opts *flags) []cli.Flag {
 				"(listen.transparent_port); 0 runs no transparent frontend",
 		},
 		stringFlag("dns", "DNS", &opts.dns,
-			"address of the allowlist resolver on the pod loopback, host:port (listen.dns); empty disables the resolver"),
+			"address of the allowlist resolver, host:port (listen.dns); the host must be a loopback address, "+
+				"and an empty or unspecified host binds 127.0.0.1 and ::1; an empty address disables the resolver"),
 		&cli.StringSliceFlag{
 			Name: "dns-forward-to", Destination: &opts.dnsForwardTo, Sources: env("DNS_FORWARD_TO"),
 			Usage: "cluster resolver an allowed name is forwarded to; repeatable, comma-separated in the " +
