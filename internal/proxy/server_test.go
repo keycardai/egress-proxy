@@ -678,8 +678,19 @@ func TestDeniedRequestsInsideAnAllowedTunnel(t *testing.T) {
 			// Cleaning these bytes changes nothing. Only the decoded form
 			// shows the dot segments, and an upstream that decodes first
 			// reads this as /cred/x.
-			name:       "escaped dot segments",
-			request:    "GET /ok/%2e%2e/cred/x HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			name:       "dot segments behind escaped slashes",
+			request:    "GET /ok/x/..%2F..%2Fcred/x HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
+		},
+		{
+			// An upstream that decodes reads /cred/x.
+			name:       "an escaped letter",
+			request:    "GET /%63red/x HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
+			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
+		},
+		{
+			name:       "a lowercase escape",
+			request:    "GET /ok/a%3fb HTTP/1.1\r\nHost: " + authority + "\r\n\r\n",
 			wantStatus: http.StatusBadRequest, wantReason: policy.ReasonMalformedRequest,
 		},
 		{
