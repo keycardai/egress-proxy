@@ -28,7 +28,7 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
   the e2e tests deploy it as. It verifies the client assertion against a
   test key in the unit and acceptance tests, and against the cluster's
   service account keys in the e2e tests,
-  `test/gates/` for the gate self-tests and the release workflow test,
+  `test/gates/` for the gate self-tests,
   `test/images/` the image tests, Go behind the `images` build tag, which
   builds the three images locally and checks each one in a container,
   `scripts/` for the gate scripts,
