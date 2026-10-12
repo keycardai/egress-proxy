@@ -40,7 +40,10 @@ When the agent calls the GitHub API:
    GitHub.
 
 The agent never holds the GitHub token, and the token never appears in the
-proxy's logs or audit records. The configuration document says where each
+proxy's logs or audit records. The proxy does not filter responses, so an
+upstream that echoes the token back gives it to the agent. See
+[what the proxy does not protect](docs/security-model.md#outside-the-threat-model).
+The configuration document says where each
 endpoint's credential goes:
 
 ```yaml

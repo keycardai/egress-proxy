@@ -20,6 +20,22 @@ some configurations, with network interception configured within that namespace.
 The security claim is that every route out terminates at the proxy for an
 unprivileged workload.
 
+## Outside the threat model
+
+The proxy controls which requests leave the pod and which credential each
+request gets. It does not control what an upstream sends back.
+
+- The proxy streams every upstream response to the workload unchanged. If
+  the upstream echoes the injected credential in a header, a body, or a
+  redirect `Location`, the workload reads it. The workload can then use the
+  credential without the proxy, outside the endpoint policy. A credential
+  can be encoded in a response in too many ways to filter reliably, so the
+  proxy does not inspect responses for it.
+- Do not attach a credential to an endpoint whose upstream reflects request
+  headers or query parameters, such as a request-echo service. Prefer a
+  credential from the token exchange over a static one, because the zone
+  sets how long an exchanged token lasts.
+
 ## Current guarantees
 
 - The proxy fails closed. Every path that cannot produce a decision denies
