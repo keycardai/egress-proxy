@@ -1051,7 +1051,10 @@ func (e Endpoint) validate(i int, found *problems) {
 		found.addf("endpoints[%d]: host %q must be a DNS name of ASCII labels, "+
 			"with no wildcard", i, e.Host)
 	}
-	if !normalizedPrefix(e.PathPrefix) {
+	switch {
+	case !policy.CanonicalEscapes(e.PathPrefix):
+		found.addf("endpoints[%d]: url path %q %s", i, e.PathPrefix, policy.NonCanonicalEscape)
+	case !normalizedPrefix(e.PathPrefix):
 		found.addf("endpoints[%d]: url path %q must be an absolute path in its shortest form", i, e.PathPrefix)
 	}
 	if e.Credential != nil {

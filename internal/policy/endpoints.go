@@ -112,10 +112,9 @@ func Compile(endpoints []Endpoint, deny *DenyList) (*Matcher, error) {
 			))
 			continue
 		}
-		if !normalizedPath(endpoint.PathPrefix) {
+		if problem := prefixProblem(endpoint.PathPrefix); problem != "" {
 			problems = append(problems, fmt.Sprintf(
-				"endpoints[%d]: path prefix %q must be an absolute path in its shortest form",
-				i, endpoint.PathPrefix,
+				"endpoints[%d]: path prefix %q %s", i, endpoint.PathPrefix, problem,
 			))
 			continue
 		}
@@ -175,9 +174,10 @@ func (m *Matcher) Connection(host string, port int) Decision {
 // requestPath is the escaped path, exactly the bytes the upstream receives,
 // so the decision and the forwarded request read one path.
 //
-// The path must be absolute and already in its shortest form, decoded as
-// well as escaped. Request refuses a path with dot segments, which can
-// match one endpoint here and reach another upstream.
+// The path must be absolute, already in its shortest form, decoded as well
+// as escaped, and spell every escape canonically. Request refuses a path
+// with dot segments, which can match one endpoint here and reach another
+// upstream.
 func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	connection := m.Connection(host, port)
 	if !connection.Allowed() {
@@ -210,6 +210,18 @@ func (m *Matcher) Hosts() []string {
 	return hosts
 }
 
+// prefixProblem says what is wrong with a path prefix, or returns "" when
+// nothing is.
+func prefixProblem(prefix string) string {
+	switch {
+	case !CanonicalEscapes(prefix):
+		return NonCanonicalEscape
+	case !normalizedPath(prefix):
+		return "must be an absolute path in its shortest form"
+	}
+	return ""
+}
+
 // normalizedPath reports whether requestPath is absolute and in its shortest
 // form. It keeps a trailing slash, because "/api/" and "/api" are different
 // paths.
@@ -229,7 +241,7 @@ func normalizedPath(requestPath string) bool {
 	if strings.ContainsAny(requestPath, "?#") {
 		return false
 	}
-	if !shortestForm(requestPath) {
+	if !CanonicalEscapes(requestPath) || !shortestForm(requestPath) {
 		return false
 	}
 	decoded, err := url.PathUnescape(requestPath)
@@ -237,6 +249,48 @@ func normalizedPath(requestPath string) bool {
 		return false
 	}
 	return shortestForm(decoded)
+}
+
+// CanonicalEscapes reports whether every percent-escape in escaped uses
+// uppercase hex digits and encodes a character outside the unreserved set of
+// RFC 3986 section 2.3: a letter, a digit, "-", ".", "_" or "~". A malformed
+// escape is not canonical.
+//
+// The matcher compares bytes. A second spelling of a character can match a
+// shorter prefix than the one the upstream routes the request to, and take
+// that endpoint's credential. Requests and prefixes must use the spelling
+// RFC 3986 section 6.2.2 calls normal.
+func CanonicalEscapes(escaped string) bool {
+	for i := 0; i < len(escaped); i++ {
+		if escaped[i] != '%' {
+			continue
+		}
+		if i+2 >= len(escaped) {
+			return false
+		}
+		high := strings.IndexByte(upperHexDigits, escaped[i+1])
+		low := strings.IndexByte(upperHexDigits, escaped[i+2])
+		if high < 0 || low < 0 || unreserved(high<<4|low) {
+			return false
+		}
+		i += 2
+	}
+	return true
+}
+
+// upperHexDigits are the hex digits a canonical escape uses, in value order.
+const upperHexDigits = "0123456789ABCDEF"
+
+// NonCanonicalEscape is the problem text for a path prefix that
+// CanonicalEscapes refuses.
+const NonCanonicalEscape = "percent-encodes an unreserved character or uses lowercase hex. " +
+	"Write letters, digits and \"-._~\" unescaped, and every escape in uppercase"
+
+// unreserved reports whether c is in the unreserved set of RFC 3986
+// section 2.3.
+func unreserved(c int) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		c == '-' || c == '.' || c == '_' || c == '~'
 }
 
 // shortestForm reports whether cleaning the path leaves it alone, except for

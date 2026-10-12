@@ -684,6 +684,16 @@ func TestParseRefusesInvalidEndpoints(t *testing.T) {
 		// match by accident: "/a%" matches "/a%25b".
 		{name: "url path with a malformed escape", doc: endpoint("url: https://a.example/a%zz"), wantErr: "is not a URL"},
 		{name: "url path ending in a bare percent", doc: endpoint("url: https://a.example/a%"), wantErr: "is not a URL"},
+		{
+			name:    "url path that escapes a letter",
+			doc:     endpoint("url: https://a.example/api/%61dmin/"),
+			wantErr: `url path "/api/%61dmin/" percent-encodes an unreserved character or uses lowercase hex`,
+		},
+		{
+			name:    "url path with a lowercase escape",
+			doc:     endpoint("url: https://gitlab.example/group%2fproject/"),
+			wantErr: `url path "/group%2fproject/" percent-encodes an unreserved character or uses lowercase hex`,
+		},
 		{name: "url path with dot segments", doc: endpoint("url: https://pypi.org/a/../b"), wantErr: "url path"},
 		{name: "url path with an empty segment", doc: endpoint("url: https://pypi.org//a"), wantErr: "url path"},
 		{name: "url with a query", doc: endpoint("url: https://pypi.org/a?x"), wantErr: "must not hold userinfo"},

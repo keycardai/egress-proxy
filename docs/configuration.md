@@ -313,16 +313,20 @@ connections and requests.
 
 **Port.** The scheme's port, 443 for `https` and 80 for `http`, unless the URL names another. An endpoint covers one port. A host reachable on two ports is two endpoints, which also gives each one its own prefix and credential. A CONNECT to any other port on the host is rejected with `no_matching_endpoint`, the same reason an unlisted host gets.
 
-**Path.** `/` when the URL has none, and `/` covers every path. A path that ends in `/` covers everything below it. Any other path covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching path decides. Write the path as it appears on the wire: the proxy compares it against the escaped path, so a path holding a character a client always escapes, such as a space, is rejected because it could never match.
+**Path.** `/` when the URL has none, and `/` covers every path. A path that ends in `/` covers everything below it. Any other path covers itself and its child paths as segments. For example, `/api` covers `/api` and `/api/v1`, but not `/apis`. The longest matching path decides. Write the path as it appears on the wire: the proxy compares it against the escaped path, so a path holding a character a client always escapes, such as a space, is rejected because it could never match. Write every escape in canonical form: letters, digits and `-._~` unescaped, and every other escape in uppercase hex, such as `%2F`. A path that escapes one of those characters or uses lowercase hex is rejected.
 
 **Resource.** The canonical form of the URL: the scheme and host in lowercase, no trailing dot, no port when it is the scheme default, and sub-path as written.
 
 The proxy decides on the escaped path, the bytes it forwards upstream. An
 escaped character is not a separator, so `/a%2Fb` is one segment named `a/b`
 and the prefix `/a/` does not cover it. The proxy refuses a path whose
-escaped or decoded form holds dot segments, so `/api/%2e%2e/secret`, which
-an upstream that decodes first reads as `/secret`, is rejected with
-`malformed_request`.
+escaped or decoded form holds dot segments, so `/api/x/..%2F..%2Fsecret`,
+which an upstream that decodes first reads as `/secret`, is rejected with
+`malformed_request`. It also rejects a path that escapes a letter, a digit
+or one of `-._~`, or writes an escape in lowercase hex, with
+`malformed_request`. An upstream that decodes reads `/api/%61dmin/x` as
+`/api/admin/x`, but byte for byte it falls under a shorter prefix, which
+would choose that endpoint's credential.
 
 Two endpoints whose URLs name the same host, port and path are rejected. The
 same host and path on two ports are two endpoints, not a repeat.
@@ -404,7 +408,7 @@ identifies a captured connection in the audit stream.
 | `no_sni` | deny | connection | The TLS handshake named no server, either inside a tunnel or on a captured connection whose ClientHello had no `server_name`. RFC 6066 section 3 forbids an IP literal there, so a client connecting straight to an address sends none. |
 | `not_redirected` | deny | connection | The destination recovered from a connection on the transparent listener is that listener's own address, so the connection was opened to the proxy rather than redirected into it. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
-| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a query that does not parse, or a CONNECT authority with a bad port. |
+| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a path that escapes an unreserved character or uses lowercase hex, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
