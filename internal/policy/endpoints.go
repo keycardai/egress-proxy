@@ -47,12 +47,11 @@ func (e Endpoint) ID() string {
 	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port)) + e.PathPrefix
 }
 
-// covers reports whether the endpoint's prefix covers a normalized path.
-func (e Endpoint) covers(requestPath string) bool {
-	if strings.HasSuffix(e.PathPrefix, "/") {
-		return strings.HasPrefix(requestPath, e.PathPrefix)
+func coversPath(prefix, requestPath string) bool {
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(requestPath, prefix)
 	}
-	return requestPath == e.PathPrefix || strings.HasPrefix(requestPath, e.PathPrefix+"/")
+	return requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/")
 }
 
 // Decision is a verdict and the reason for it. The zero value denies.
@@ -171,13 +170,10 @@ func (m *Matcher) Connection(host string, port int) Decision {
 
 // Request makes the request-scoped decision for a path on a host.
 //
-// requestPath is the escaped path, exactly the bytes the upstream receives,
-// so the decision and the forwarded request read one path.
-//
-// The path must be absolute, already in its shortest form, decoded as well
-// as escaped, and spell every escape canonically. Request refuses a path
-// with dot segments, which can match one endpoint here and reach another
-// upstream.
+// requestPath is the escaped path forwarded upstream. It must use canonical
+// escapes, and both its escaped and decoded forms must be absolute and in
+// shortest form. The matched endpoint must remain the unique longest match
+// after percent-decoding the path and every prefix once.
 func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	connection := m.Connection(host, port)
 	if !connection.Allowed() {
@@ -187,7 +183,10 @@ func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 		return deny(ReasonMalformedRequest)
 	}
 	for _, endpoint := range m.byHost[NormalizeHost(host)] {
-		if endpoint.Port == port && endpoint.covers(requestPath) {
+		if endpoint.Port == port && coversPath(endpoint.PathPrefix, requestPath) {
+			if m.decodedPathConflicts(endpoint, requestPath) {
+				return deny(ReasonMalformedRequest)
+			}
 			return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed, Endpoint: &endpoint}
 		}
 	}
@@ -208,6 +207,27 @@ func (m *Matcher) Hosts() []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+func (m *Matcher) decodedPathConflicts(selected Endpoint, requestPath string) bool {
+	decodedPath, pathErr := url.PathUnescape(requestPath)
+	decodedPrefix, prefixErr := url.PathUnescape(selected.PathPrefix)
+	if pathErr != nil || prefixErr != nil {
+		return true
+	}
+	for _, endpoint := range m.byHost[selected.Host] {
+		if endpoint.Port != selected.Port || endpoint.PathPrefix == selected.PathPrefix {
+			continue
+		}
+		prefix, err := url.PathUnescape(endpoint.PathPrefix)
+		if err != nil {
+			return true
+		}
+		if len(prefix) >= len(decodedPrefix) && coversPath(prefix, decodedPath) {
+			return true
+		}
+	}
+	return false
 }
 
 // prefixProblem says what is wrong with a path prefix, or returns "" when
@@ -255,11 +275,6 @@ func normalizedPath(requestPath string) bool {
 // uppercase hex digits and encodes a character outside the unreserved set of
 // RFC 3986 section 2.3: a letter, a digit, "-", ".", "_" or "~". A malformed
 // escape is not canonical.
-//
-// The matcher compares bytes. A second spelling of a character can match a
-// shorter prefix than the one the upstream routes the request to, and take
-// that endpoint's credential. Requests and prefixes must use the spelling
-// RFC 3986 section 6.2.2 calls normal.
 func CanonicalEscapes(escaped string) bool {
 	for i := 0; i < len(escaped); i++ {
 		if escaped[i] != '%' {

@@ -457,6 +457,71 @@ func TestMatcherDecisions(t *testing.T) {
 	}
 }
 
+func TestMatcherDecodedEndpointSelection(t *testing.T) {
+	t.Parallel()
+	deny, err := policy.NewDenyList(nil, nil)
+	require.NoError(t, err, "NewDenyList")
+	matcher, err := policy.Compile([]policy.Endpoint{
+		{Host: "alias.example", Port: 443, PathPrefix: "/api/admin%3Aview/"},
+		{Host: "alias.example", Port: 443, PathPrefix: "/api/admin:view/"},
+		{Host: "gitlab.example", Port: 443, PathPrefix: "/projects/"},
+		{Host: "gitlab.example", Port: 443, PathPrefix: "/projects/group%2Fproject/"},
+		{Host: "gitlab.example", Port: 8443, PathPrefix: "/projects/group/project/"},
+		{Host: "ordering.example", Port: 443, PathPrefix: "/a%2Fb%2Fc/"},
+		{Host: "ordering.example", Port: 443, PathPrefix: "/a/b/c/x/"},
+	}, deny)
+	require.NoError(t, err, "Compile")
+	tests := []struct {
+		name         string
+		host         string
+		path         string
+		wantVerdict  policy.Verdict
+		wantReason   policy.Reason
+		wantEndpoint string
+	}{
+		{
+			name: "an escaped prefix stays selected despite an alias on another port", host: "gitlab.example",
+			path:        "/projects/group%2Fproject/repository",
+			wantVerdict: "allow", wantReason: "endpoint_allowed",
+			wantEndpoint: "gitlab.example:443/projects/group%2Fproject/",
+		},
+		{
+			name: "a literal slash cannot bypass an escaped prefix", host: "gitlab.example",
+			path:        "/projects/group/project/repository",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "decoded prefix lengths decide specificity", host: "ordering.example",
+			path:        "/a%2Fb%2Fc/x/value",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "an escaped path cannot choose between decoded prefix aliases", host: "alias.example",
+			path:        "/api/admin%3Aview/x",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "a literal path cannot choose between decoded prefix aliases", host: "alias.example",
+			path:        "/api/admin:view/x",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			decision := matcher.Request(tc.host, 443, tc.path)
+			assert.Equal(t, tc.wantVerdict, decision.Verdict, "verdict")
+			assert.Equal(t, tc.wantReason, decision.Reason, "reason")
+			if tc.wantEndpoint == "" {
+				assert.Nil(t, decision.Endpoint, "a denial selects no endpoint")
+			} else {
+				require.NotNil(t, decision.Endpoint, "an allow selects an endpoint")
+				assert.Equal(t, tc.wantEndpoint, decision.Endpoint.ID(), "endpoint")
+			}
+		})
+	}
+}
+
 func TestMatcherHosts(t *testing.T) {
 	t.Parallel()
 	deny, err := policy.NewDenyList(nil, nil)
