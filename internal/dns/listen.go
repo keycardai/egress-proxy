@@ -15,20 +15,17 @@ var ErrListen = errors.New("dns listener")
 
 // Listen opens the UDP and TCP sockets the resolver answers on.
 //
-// A loopback literal gets one pair of sockets of that address family. An
-// address with no host, or an unspecified one, gets a pair on each
-// family's loopback address, because a REDIRECT in the nat OUTPUT chain
-// rewrites the destination to 127.0.0.1 or ::1 and the packet then leaves
-// through lo. Listen refuses every other host. See [BindsLoopback].
+// A host of 127.0.0.1 or ::1 gets one pair of sockets of that address
+// family. An address with no host, or an unspecified one, gets a pair on
+// each. A REDIRECT in the nat OUTPUT chain rewrites the destination to
+// 127.0.0.1 or ::1 and the packet then leaves through lo, so no other
+// address receives a redirected query. Listen refuses every other host. See
+// [CheckListen].
 //
 // The IPv6 pair is optional. A kernel without IPv6 does not redirect
 // anything to it. The IPv4 pair is required.
 func Listen(ctx context.Context, address string) (Sockets, error) {
-	host, port, err := splitListen(address)
-	if err != nil {
-		return Sockets{}, err
-	}
-	addrs, err := boundAddrs(host)
+	addrs, port, err := parseListen(address)
 	if err != nil {
 		return Sockets{}, fmt.Errorf("%w: %w", ErrListen, err)
 	}
@@ -74,45 +71,56 @@ func bind(ctx context.Context, addr netip.Addr, port int) (Sockets, error) {
 	return Sockets{Packet: []net.PacketConn{packet}, Stream: []net.Listener{stream}}, nil
 }
 
-// ErrNotLoopback is a listen host that would bind an address other pods can
-// reach.
-var ErrNotLoopback = errors.New("is not a loopback address. Leave the host empty, or name 127.0.0.1 or ::1")
+// ErrNotLoopback marks a listen.dns host that Listen refuses because other
+// pods could reach it, or a redirected query would not arrive on it.
+var ErrNotLoopback = errors.New("not a loopback address")
 
-// BindsLoopback reports whether Listen accepts a host. The host must be
-// empty, an unspecified address or a loopback IP literal. A hostname is
+// CheckListen returns the error Listen returns for an address it refuses
+// before binding. The address is host:port. The host must be empty, an
+// unspecified address, 127.0.0.1, ::1 or ::ffff:127.0.0.1. A hostname is
 // refused, including localhost.
 //
 // NEVER widen this to an address other pods can reach. The resolver
 // decides what the sandbox can look up and answers no one else.
-func BindsLoopback(host string) bool {
-	if host == "" {
-		return true
-	}
-	addr, err := netip.ParseAddr(host)
-	return err == nil && (addr.IsUnspecified() || addr.IsLoopback())
+func CheckListen(address string) error {
+	_, _, err := parseListen(address)
+	return err
 }
 
-// boundAddrs is what Listen binds for a host. An empty or unspecified host
-// binds 127.0.0.1 and ::1, in that order. A loopback literal binds itself,
-// and an IPv4-mapped one binds its IPv4 address. Any other host is an error.
-func boundAddrs(host string) ([]netip.Addr, error) {
-	if !BindsLoopback(host) {
-		return nil, fmt.Errorf("listen.dns host %q %w", host, ErrNotLoopback)
+// parseListen reads a listen address as the addresses Listen binds and the
+// port. An empty or unspecified host binds 127.0.0.1 and ::1, in that
+// order. 127.0.0.1 and ::ffff:127.0.0.1 bind 127.0.0.1, and ::1 binds ::1.
+func parseListen(address string) ([]netip.Addr, int, error) {
+	host, port, err := splitListen(address)
+	if err != nil {
+		return nil, 0, err
 	}
-	if literal, err := netip.ParseAddr(host); err == nil && !literal.IsUnspecified() {
-		return []netip.Addr{literal.Unmap()}, nil
+	ipv4Loopback := netip.AddrFrom4([4]byte{127, 0, 0, 1})
+	if host == "" {
+		return []netip.Addr{ipv4Loopback, netip.IPv6Loopback()}, port, nil
 	}
-	return []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.IPv6Loopback()}, nil
+	addr, err := netip.ParseAddr(host)
+	if err != nil || addr.Zone() != "" {
+		return nil, 0, notLoopback(address)
+	}
+	if addr.IsUnspecified() {
+		return []netip.Addr{ipv4Loopback, netip.IPv6Loopback()}, port, nil
+	}
+	if addr.Unmap() == ipv4Loopback || addr == netip.IPv6Loopback() {
+		return []netip.Addr{addr.Unmap()}, port, nil
+	}
+	return nil, 0, notLoopback(address)
+}
+
+// notLoopback is the error for a listen address whose host Listen refuses.
+func notLoopback(address string) error {
+	return fmt.Errorf("listen.dns %q: %w. Leave the host empty, or name 127.0.0.1 or ::1", address, ErrNotLoopback)
 }
 
 // listenAddrs is the addresses and port a listen address binds. It returns
 // no address and port zero for an address Listen refuses.
 func listenAddrs(listen string) ([]netip.Addr, int) {
-	host, port, err := splitListen(listen)
-	if err != nil {
-		return nil, 0
-	}
-	addrs, err := boundAddrs(host)
+	addrs, port, err := parseListen(listen)
 	if err != nil {
 		return nil, 0
 	}
@@ -133,15 +141,18 @@ func Port(address string) int {
 	return port
 }
 
+// errPort marks a listen address whose port is not a number in 1-65535.
+var errPort = errors.New("does not name a port in 1-65535")
+
 // splitListen reads an address as a host and a port.
 func splitListen(address string) (string, int, error) {
 	host, portText, err := net.SplitHostPort(strings.TrimSpace(address))
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: listen.dns %q is not host:port: %w", ErrListen, address, err)
+		return "", 0, fmt.Errorf("listen.dns %q is not host:port: %w", address, err)
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
-		return "", 0, fmt.Errorf("%w: listen.dns %q does not name a port in 1-65535", ErrListen, address)
+		return "", 0, fmt.Errorf("listen.dns %q %w", address, errPort)
 	}
 	return host, port, nil
 }

@@ -68,7 +68,7 @@ stderr 'redirect DNS to port 53 and listen.dns binds port 5353'
 # Must fail: the resolver on the pod address would answer every peer that
 # can reach the pod.
 ! exec docker exec -u 1337 $LAB-workload egress-proxy --config /work/config.yaml --dns $LAB_WORKLOAD4:53 --upstream-ca-file /work/tls/ca.crt --ca-out-dir /tmp/ca
-stderr 'listen.dns "'$LAB_WORKLOAD4':53" is not a loopback address'
+stderr 'listen.dns "'$LAB_WORKLOAD4':53": not a loopback address'
 
 exec docker exec -d -u 1337 $LAB-workload sh -c '/usr/local/bin/egress-proxy --config /work/config.yaml --upstream-ca-file /work/tls/ca.crt --ca-out-dir /shared-ca >/out/audit.jsonl 2>/out/proxy.log'
 waitgrep out/proxy.log 'answering name lookups'

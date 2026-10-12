@@ -404,7 +404,6 @@ func TestParseAcceptsALoopbackResolver(t *testing.T) {
 		{name: "an empty host", address: ":53"},
 		{name: "the IPv4 unspecified address", address: "0.0.0.0:53"},
 		{name: "the IPv6 unspecified address", address: "[::]:53"},
-		{name: "another 127/8 address", address: "127.0.0.2:53"},
 		{name: "the IPv6 loopback address", address: "[::1]:53"},
 		{name: "IPv4-mapped loopback", address: "[::ffff:127.0.0.1]:53"},
 	}
@@ -532,57 +531,72 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		{
 			name:    "a resolver address naming a port outside 1-65535",
 			doc:     minimal + "listen:\n  dns: \"127.0.0.1:0\"\n",
-			wantErr: "listen.dns \"127.0.0.1:0\" is not host:port",
+			wantErr: "listen.dns \"127.0.0.1:0\" does not name a port in 1-65535",
 		},
 		{
 			name:    "a resolver on a pod IP",
 			doc:     minimal + "listen:\n  dns: \"10.0.0.5:53\"\n",
-			wantErr: "listen.dns \"10.0.0.5:53\" is not a loopback address",
+			wantErr: "listen.dns \"10.0.0.5:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on a private address",
 			doc:     minimal + "listen:\n  dns: \"192.168.1.10:53\"\n",
-			wantErr: "listen.dns \"192.168.1.10:53\" is not a loopback address",
+			wantErr: "listen.dns \"192.168.1.10:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on a public address",
 			doc:     minimal + "listen:\n  dns: \"203.0.113.10:53\"\n",
-			wantErr: "listen.dns \"203.0.113.10:53\" is not a loopback address",
+			wantErr: "listen.dns \"203.0.113.10:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on an IPv4 link-local address",
 			doc:     minimal + "listen:\n  dns: \"169.254.1.1:53\"\n",
-			wantErr: "listen.dns \"169.254.1.1:53\" is not a loopback address",
+			wantErr: "listen.dns \"169.254.1.1:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on an IPv6 unique local address",
 			doc:     minimal + "listen:\n  dns: \"[fd00::1]:53\"\n",
-			wantErr: "listen.dns \"[fd00::1]:53\" is not a loopback address",
+			wantErr: "listen.dns \"[fd00::1]:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on an IPv6 global address",
 			doc:     minimal + "listen:\n  dns: \"[2001:db8::1]:53\"\n",
-			wantErr: "listen.dns \"[2001:db8::1]:53\" is not a loopback address",
+			wantErr: "listen.dns \"[2001:db8::1]:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on an IPv6 link-local address",
 			doc:     minimal + "listen:\n  dns: \"[fe80::1]:53\"\n",
-			wantErr: "listen.dns \"[fe80::1]:53\" is not a loopback address",
+			wantErr: "listen.dns \"[fe80::1]:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on an IPv4-mapped unspecified address",
 			doc:     minimal + "listen:\n  dns: \"[::ffff:0.0.0.0]:53\"\n",
-			wantErr: "listen.dns \"[::ffff:0.0.0.0]:53\" is not a loopback address",
+			wantErr: "listen.dns \"[::ffff:0.0.0.0]:53\": not a loopback address",
+		},
+		{
+			name:    "a resolver on another 127/8 address",
+			doc:     minimal + "listen:\n  dns: \"127.0.0.2:53\"\n",
+			wantErr: "listen.dns \"127.0.0.2:53\": not a loopback address",
+		},
+		{
+			name:    "a resolver on a zoned IPv6 loopback address",
+			doc:     minimal + "listen:\n  dns: \"[::1%lo]:53\"\n",
+			wantErr: "listen.dns \"[::1%lo]:53\": not a loopback address",
+		},
+		{
+			name:    "a resolver on a zoned IPv4-mapped loopback address",
+			doc:     minimal + "listen:\n  dns: \"[::ffff:127.0.0.1%lo]:53\"\n",
+			wantErr: "listen.dns \"[::ffff:127.0.0.1%lo]:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on a hostname",
 			doc:     minimal + "listen:\n  dns: \"dns.example:53\"\n",
-			wantErr: "listen.dns \"dns.example:53\" is not a loopback address",
+			wantErr: "listen.dns \"dns.example:53\": not a loopback address",
 		},
 		{
 			name:    "a resolver on localhost",
 			doc:     minimal + "listen:\n  dns: \"localhost:53\"\n",
-			wantErr: "listen.dns \"localhost:53\" is not a loopback address",
+			wantErr: "listen.dns \"localhost:53\": not a loopback address",
 		},
 		{
 			name:    "a forward target that is a hostname",

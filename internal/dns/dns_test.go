@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -499,52 +498,65 @@ func TestListenBindsLoopbackOnBothTransports(t *testing.T) {
 func TestListenRefusals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		address string
-		want    string
+		name        string
+		address     string
+		want        string
+		notLoopback bool
 	}{
 		{name: "no port", address: "127.0.0.1", want: "is not host:port"},
 		{name: "a port outside the range", address: "127.0.0.1:70000", want: "does not name a port in 1-65535"},
 		{name: "a port that is not a number", address: "127.0.0.1:domain", want: "does not name a port in 1-65535"},
 		{
 			name: "a pod IP", address: net.JoinHostPort("10.0.0.5", "53"),
-			want: `listen.dns host "10.0.0.5" is not a loopback address`,
+			want: `listen.dns "10.0.0.5:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "a private address", address: net.JoinHostPort("192.168.1.10", "53"),
-			want: `listen.dns host "192.168.1.10" is not a loopback address`,
+			want: `listen.dns "192.168.1.10:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "a public address", address: net.JoinHostPort("203.0.113.10", "53"),
-			want: `listen.dns host "203.0.113.10" is not a loopback address`,
+			want: `listen.dns "203.0.113.10:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "an IPv4 link-local address", address: net.JoinHostPort("169.254.1.1", "53"),
-			want: `listen.dns host "169.254.1.1" is not a loopback address`,
+			want: `listen.dns "169.254.1.1:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "an IPv6 unique local address", address: net.JoinHostPort("fd00::1", "53"),
-			want: `listen.dns host "fd00::1" is not a loopback address`,
+			want: `listen.dns "[fd00::1]:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "an IPv6 global address", address: net.JoinHostPort("2001:db8::1", "53"),
-			want: `listen.dns host "2001:db8::1" is not a loopback address`,
+			want: `listen.dns "[2001:db8::1]:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "an IPv6 link-local address", address: net.JoinHostPort("fe80::1", "53"),
-			want: `listen.dns host "fe80::1" is not a loopback address`,
+			want: `listen.dns "[fe80::1]:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "an IPv4-mapped unspecified address", address: net.JoinHostPort("::ffff:0.0.0.0", "53"),
-			want: `listen.dns host "::ffff:0.0.0.0" is not a loopback address`,
+			want: `listen.dns "[::ffff:0.0.0.0]:53": not a loopback address`, notLoopback: true,
+		},
+		{
+			name: "another 127/8 address", address: net.JoinHostPort("127.0.0.2", "53"),
+			want: `listen.dns "127.0.0.2:53": not a loopback address`, notLoopback: true,
+		},
+		{
+			name: "a zoned IPv6 loopback address", address: net.JoinHostPort("::1%lo", "53"),
+			want: `listen.dns "[::1%lo]:53": not a loopback address`, notLoopback: true,
+		},
+		{
+			name: "a zoned IPv4-mapped loopback address", address: net.JoinHostPort("::ffff:127.0.0.1%lo", "53"),
+			want: `listen.dns "[::ffff:127.0.0.1%lo]:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "a hostname", address: net.JoinHostPort("dns.example", "53"),
-			want: `listen.dns host "dns.example" is not a loopback address`,
+			want: `listen.dns "dns.example:53": not a loopback address`, notLoopback: true,
 		},
 		{
 			name: "localhost", address: net.JoinHostPort("localhost", "53"),
-			want: `listen.dns host "localhost" is not a loopback address`,
+			want: `listen.dns "localhost:53": not a loopback address`, notLoopback: true,
 		},
 	}
 	for _, tc := range tests {
@@ -553,6 +565,9 @@ func TestListenRefusals(t *testing.T) {
 			sockets, err := dns.Listen(t.Context(), tc.address)
 			require.ErrorIs(t, err, dns.ErrListen, "the refusal is a listener failure")
 			require.ErrorContains(t, err, tc.want, "the refusal names what is wrong")
+			if tc.notLoopback {
+				require.ErrorIs(t, err, dns.ErrNotLoopback, "the refusal is about the host")
+			}
 			assert.Empty(t, sockets.Packet, "a refused address binds no socket")
 			assert.Empty(t, sockets.Stream, "a refused address binds no socket")
 		})
@@ -561,8 +576,7 @@ func TestListenRefusals(t *testing.T) {
 
 // TestListenBindsLoopbackOnly covers the hosts Listen accepts and the
 // addresses each one binds. A host without a family binds both loopback
-// addresses. The IPv6 rows depend on the host having ::1, and macOS
-// configures 127.0.0.1 alone out of 127/8.
+// addresses. The IPv6 rows depend on the host having ::1.
 func TestListenBindsLoopbackOnly(t *testing.T) {
 	t.Parallel()
 	ipv6 := hasIPv6Loopback(t)
@@ -575,13 +589,11 @@ func TestListenBindsLoopbackOnly(t *testing.T) {
 		host      string
 		want      []string
 		needsIPv6 bool
-		linuxOnly bool
 	}{
 		{name: "an empty host", host: "", want: both},
 		{name: "the IPv4 unspecified address", host: "0.0.0.0", want: both},
 		{name: "the IPv6 unspecified address", host: "::", want: both},
 		{name: "the IPv4 loopback address", host: "127.0.0.1", want: []string{"127.0.0.1"}},
-		{name: "another 127/8 address", host: "127.0.0.2", want: []string{"127.0.0.2"}, linuxOnly: true},
 		{name: "the IPv6 loopback address", host: "::1", want: []string{"::1"}, needsIPv6: true},
 		{name: "IPv4-mapped loopback", host: "::ffff:127.0.0.1", want: []string{"127.0.0.1"}},
 	}
@@ -591,10 +603,7 @@ func TestListenBindsLoopbackOnly(t *testing.T) {
 			if tc.needsIPv6 && !ipv6 {
 				t.Skip("this host has no ::1")
 			}
-			if tc.linuxOnly && runtime.GOOS != "linux" {
-				t.Skipf("%s routes 127.0.0.1 alone to the loopback interface", runtime.GOOS)
-			}
-			address, sockets := listenOn(t, tc.host)
+			address, sockets := listenOn(t, tc.host, len(tc.want))
 			t.Cleanup(func() { _ = sockets.Close() })
 			_, port, err := net.SplitHostPort(address)
 			require.NoError(t, err, "split %s", address)
@@ -917,13 +926,14 @@ const bindAttempts = 20
 // address.
 func listenLoopback(t *testing.T) (string, dns.Sockets) {
 	t.Helper()
-	return listenOn(t, "127.0.0.1")
+	return listenOn(t, "127.0.0.1", 1)
 }
 
 // listenOn calls Listen with a host and a free port and returns the
-// address. A port that is free over UDP can be held over TCP by another
-// test, so it tries another port when the bind finds it in use.
-func listenOn(t *testing.T, host string) (string, dns.Sockets) {
+// address. Another test can hold the port over TCP, which fails the bind,
+// or on ::1, which makes Listen drop the IPv6 pair. listenOn tries another
+// port until Listen returns pairs UDP and TCP sockets.
+func listenOn(t *testing.T, host string, pairs int) (string, dns.Sockets) {
 	t.Helper()
 	for range bindAttempts {
 		address := net.JoinHostPort(host, strconv.Itoa(freePort(t)))
@@ -932,6 +942,10 @@ func listenOn(t *testing.T, host string) (string, dns.Sockets) {
 			continue
 		}
 		require.NoError(t, err, "bind the resolver sockets on %s", address)
+		if len(sockets.Packet) < pairs {
+			require.NoError(t, sockets.Close(), "release the sockets on %s", address)
+			continue
+		}
 		return address, sockets
 	}
 	t.Fatalf("no loopback port was free over both UDP and TCP in %d attempts", bindAttempts)
