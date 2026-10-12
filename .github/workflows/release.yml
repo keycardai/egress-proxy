@@ -25,18 +25,23 @@ permissions:
   contents: read
 
 jobs:
-  # Decides whether this run may create the release. It may only when
-  # github.sha is the merge commit of a merged release PR. release-please
-  # marks that PR with the `label` in its config, `autorelease: pending` by
-  # default, and tags the PR's merge commit. This job's token cannot write.
-  release-commit:
+  release-please:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      pull-requests: read
+      contents: write
+      pull-requests: write
+      # To dispatch ci.yml on the release PR branch.
+      actions: write
     outputs:
-      skip: ${{ steps.check.outputs.skip }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
+      # Decides whether this run may create the release. It may only when
+      # github.sha is the merge commit of a merged release PR. release-please
+      # marks that PR with the `label` in its config, `autorelease: pending` by
+      # default, and tags the PR's merge commit. The check runs in this job,
+      # so a re-run of the job checks again.
       - name: check for a release merge commit
         id: check
         env:
@@ -68,27 +73,13 @@ jobs:
               echo "$msg" >> "$GITHUB_STEP_SUMMARY"
             done ||
             echo "::warning::Could not list merged release PRs."
-
-  release-please:
-    needs: release-commit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      # To dispatch ci.yml on the release PR branch.
-      actions: write
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      sha: ${{ steps.release.outputs.sha }}
-    steps:
       # Any value but `false` skips the release.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          skip-github-release: ${{ needs.release-commit.outputs.skip != 'false' }}
+          skip-github-release: ${{ steps.check.outputs.skip != 'false' }}
       # A PR the workflow token opens or updates starts no pull_request
       # workflow, so the gates are dispatched on its branch. The checks land
       # on the PR's head commit. release-please sets `pr` only when it opens
