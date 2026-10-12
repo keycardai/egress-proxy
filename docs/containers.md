@@ -34,9 +34,13 @@ linux/arm64, from the same definitions:
 | netsetup | `ghcr.io/keycardai/egress-netsetup` |
 | sandbox-base | `ghcr.io/keycardai/sandbox-base` |
 
-The `main` tag follows the latest push to main. A release adds its version
-tag, `vX.Y.Z`, and attaches `digests.txt` to the GitHub release with the
-digest of each image. Tags move, so a manifest names an image by digest.
+Each push to main builds and signs that commit. The `main` tag names the
+images from the last release job to finish. When gates finish out of
+order, or a run is re-run, it can name an older commit than the head of
+main. A release adds its version tag, `vX.Y.Z`, and attaches `digests.txt`
+to the GitHub release with the digest of each image. A release tags the
+release PR's merge commit, and its images are built from that commit. Tags
+move, so a manifest names an image by digest.
 
 Each image index carries an SPDX SBOM and a SLSA provenance attestation:
 

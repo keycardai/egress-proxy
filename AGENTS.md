@@ -284,10 +284,13 @@ On every push to main, after every gate passes, `ci.yml` calls
 
 - release-please opens or updates one release PR with the next version and
   `CHANGELOG.md`. Merging that PR tags `vX.Y.Z` and creates the GitHub
-  release.
+  release. Only the run for the merge commit creates it. If that run fails
+  or is cancelled, re-run it. Until it passes, release-please does not
+  update the release PR.
 - `make publish` builds the three images for linux/amd64 and linux/arm64
-  and pushes them to `ghcr.io/keycardai` under `main`, and under the version
-  tag when the push is a release. Each image index carries a BuildKit SBOM
+  from `github.sha`, the commit whose gates passed in that run. It pushes
+  them to `ghcr.io/keycardai` under `main`, and under the version tag when
+  the push is a release. Each image index carries a BuildKit SBOM
   and a provenance attestation.
 - `make sign` signs every pushed digest keylessly with cosign, which is a
   `tool` directive in `go.mod`. A release attaches the signed references as

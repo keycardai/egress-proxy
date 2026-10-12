@@ -7,8 +7,15 @@
 # the workflow token, which starts no workflow, so the images for a release
 # are published here rather than by a tag trigger.
 #
-# Every push to main also publishes the three images under the `main` tag.
-# A release adds its version tag to the same build.
+# Every push to main publishes the three images under the `main` tag. A
+# release adds its version tag to the same build.
+#
+# NEVER publish or sign any commit but github.sha, the commit whose gates
+# passed in this run. Only the run for the release PR's merge commit creates
+# the release. If that run fails or is cancelled, re-run it. Until it
+# passes, release-please does not update the release PR. If the release
+# commit guard in publish ever fails, the tag and the GitHub release exist
+# without images, and the images must be published by hand.
 name: release
 
 on:
@@ -30,11 +37,49 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       sha: ${{ steps.release.outputs.sha }}
     steps:
+      # Decides whether this run may create the release. It may only when
+      # github.sha is the merge commit of a merged release PR. release-please
+      # marks that PR with the `label` in its config, `autorelease: pending` by
+      # default, and tags the PR's merge commit. The check runs in this job,
+      # so a re-run of the job checks again.
+      - name: check for a release merge commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          config="$(gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$GITHUB_REPOSITORY/contents/release-please-config.json?ref=$GITHUB_SHA")"
+          labels="$(jq -c '(.label // "autorelease: pending") | split(",")' <<<"$config")"
+          count="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
+            jq --arg sha "$GITHUB_SHA" --arg base "$GITHUB_REF_NAME" --argjson want "$labels" \
+              '[.[] | select(.merge_commit_sha == $sha and .merged_at != null and .base.ref == $base)
+                    | select($want - [.labels[].name] == [])] | length')"
+          if [ "$count" -gt 0 ]; then
+            echo "$GITHUB_SHA is a release PR merge commit"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          # A merged release PR that still has the labels is not released.
+          # Its own run is in progress, failed, or was cancelled.
+          gh pr list --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" --state merged \
+              --label "$(jq -r '.[0]' <<<"$labels")" --json number,mergeCommit,labels |
+            jq -r --argjson want "$labels" \
+              '.[] | select($want - [.labels[].name] == []) | "\(.number) \(.mergeCommit.oid)"' |
+            while read -r pr sha; do
+              msg="Release PR #$pr merged as $sha is not released. If the ci run for $sha failed or was cancelled, re-run it."
+              echo "::warning::$msg"
+              echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            done ||
+            echo "::warning::Could not list merged release PRs."
+      # Any value but `false` skips the release.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-release: ${{ steps.check.outputs.skip != 'false' }}
       # A PR the workflow token opens or updates starts no pull_request
       # workflow, so the gates are dispatched on its branch. The checks land
       # on the PR's head commit. release-please sets `pr` only when it opens
@@ -62,11 +107,21 @@ jobs:
       RELEASE_CREATED: ${{ needs.release-please.outputs.release_created }}
       TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
     steps:
-      # A release builds the commit it tagged, which is this push unless a
-      # later push to main overtook it.
+      # A release that tags any commit but github.sha stops the job before
+      # it logs in or pushes.
+      - name: check the release commit
+        id: release-commit-guard
+        if: env.RELEASE_CREATED == 'true'
+        env:
+          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+        run: |
+          if [ "$RELEASE_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::release $TAG_NAME tags $RELEASE_SHA, but the gates passed on $GITHUB_SHA"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.release-please.outputs.release_created && needs.release-please.outputs.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
