@@ -82,7 +82,7 @@ func TestContainment(t *testing.T) {
 		{
 			name: "a resolver on a port the DNS redirect does not target",
 			ask:  func(q *netsetup.ContainmentRequest) { q.DNSPort = 5353 },
-			want: []string{"redirect DNS to port 53 and listen.dns binds port 5353", "--dns-port 5353"},
+			want: []string{"redirect DNS to port 53 and listen.dns_port is 5353", "--dns-port 5353"},
 		},
 		{
 			name: "DNS redirected to a sidecar that runs no resolver",

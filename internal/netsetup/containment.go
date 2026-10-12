@@ -92,8 +92,7 @@ type ContainmentRequest struct {
 	Path string
 	// TransparentPort is the port the transparent frontend will bind.
 	TransparentPort int
-	// DNSPort is the port listen.dns binds, zero when the process runs no
-	// resolver.
+	// DNSPort is listen.dns_port, zero when the process runs no resolver.
 	DNSPort int
 	// UID is the uid of this process.
 	UID int
@@ -183,16 +182,16 @@ func dnsPortProblems(receipt Receipt, request ContainmentRequest) []string {
 	}
 	if request.DNSPort == 0 {
 		return []string{fmt.Sprintf("the rules redirect DNS to port %d and this process runs no resolver, so "+
-			"every lookup the workload makes is refused. Set listen.dns to :%d, or program the rules with "+
-			"--dns-port 0", receipt.DNSPort, receipt.DNSPort)}
+			"every lookup the workload makes is refused. Set listen.dns_port to %d, or program the rules "+
+			"with --dns-port 0", receipt.DNSPort, receipt.DNSPort)}
 	}
 	if receipt.DNSPort == 0 {
-		return []string{fmt.Sprintf("listen.dns binds port %d and the rules redirect no DNS to it, so a client "+
+		return []string{fmt.Sprintf("listen.dns_port is %d and the rules redirect no DNS to it, so a client "+
 			"that names any other resolver reaches the terminal DROP. Program the rules with --dns-port %d, "+
-			"or leave listen.dns empty", request.DNSPort, request.DNSPort)}
+			"or unset listen.dns_port", request.DNSPort, request.DNSPort)}
 	}
-	return []string{fmt.Sprintf("the rules redirect DNS to port %d and listen.dns binds port %d, so no lookup "+
-		"arrives on this resolver. Set listen.dns to :%d, or program the rules with --dns-port %d",
+	return []string{fmt.Sprintf("the rules redirect DNS to port %d and listen.dns_port is %d, so no lookup "+
+		"arrives on this resolver. Set listen.dns_port to %d, or program the rules with --dns-port %d",
 		receipt.DNSPort, request.DNSPort, receipt.DNSPort, request.DNSPort)}
 }
 

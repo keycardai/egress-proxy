@@ -215,7 +215,7 @@ func flagsWithNoDefault() map[string]bool {
 		"workload-token-file":    true,
 		"impersonate-user":       true,
 		"transparent-port":       true,
-		"dns":                    true,
+		"dns-port":               true,
 		"dns-forward-to":         true,
 		"ca-state-dir":           true,
 		"client-secret-file":     true,

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,8 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/keycardai/egress-proxy/internal/admin"
+	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
+	"github.com/keycardai/egress-proxy/internal/dns"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/proxy"
 	"github.com/keycardai/egress-proxy/internal/transparent"
@@ -39,7 +42,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		"IMPERSONATE_USER":        "env-user",
 		"CONNECT":                 "127.0.0.1:1",
 		"TRANSPARENT_PORT":        "1015",
-		"DNS":                     "127.0.0.1:53",
+		"DNS_PORT":                "53",
 		"DNS_FORWARD_TO":          "10.43.0.10,fd00::a",
 		"ADMIN":                   "/env/admin.sock",
 		"NETSETUP_RECEIPT":        "/env/netsetup.json",
@@ -70,7 +73,7 @@ func TestCommandResolvesFlagsAndEnvironment(t *testing.T) { //nolint:paralleltes
 		SandboxID: "sbx-env", ZoneURL: "https://env.example", ClientID: "env-client",
 		WorkloadTokenFile: "/env/token", ImpersonateUser: "env-user",
 		// The flag wins over EGRESS_PROXY_CONNECT.
-		Connect: "127.0.0.1:2", TransparentPort: 1015, TransparentPortSet: true, DNS: "127.0.0.1:53",
+		Connect: "127.0.0.1:2", TransparentPort: 1015, TransparentPortSet: true, DNSPort: 53, DNSPortSet: true,
 		DNSForwardTo: []string{"10.43.0.10", "fd00::a"}, Admin: "/env/admin.sock",
 		NetsetupReceipt: "/env/netsetup.json", CAOutDir: "/env/ca", CAStateDir: "/env/state",
 		ClientSecretFile:     "/env/client-secret",
@@ -107,7 +110,24 @@ func TestCommandRequiresTheConfigPath(t *testing.T) { //nolint:paralleltest // t
 	}
 }
 
-func TestTransparentPortOverrides(t *testing.T) {
+// TestPortOverrides pins how a port flag and its variable replace the
+// document's port. Zero from either one turns the listener off, so the
+// override counts as set whenever the flag or the variable is present.
+func TestPortOverrides(t *testing.T) {
+	settings := []struct {
+		flag string
+		key  string
+		get  func(*config.Config) int
+	}{
+		{
+			flag: "transparent-port", key: "listen.transparent_port",
+			get: func(cfg *config.Config) int { return cfg.Listen.TransparentPort },
+		},
+		{
+			flag: "dns-port", key: "listen.dns_port",
+			get: func(cfg *config.Config) int { return cfg.Listen.DNSPort },
+		},
+	}
 	tests := []struct {
 		name     string
 		env      string
@@ -117,40 +137,42 @@ func TestTransparentPortOverrides(t *testing.T) {
 	}{
 		{name: "document without an override", unsetEnv: true, want: 1015},
 		{name: "empty environment keeps the document", want: 1015},
-		{name: "flag disables capture", args: []string{"--transparent-port", "0"}, want: 0},
-		{name: "environment disables capture", env: "0", want: 0},
-		{name: "flag disables capture over environment", env: "1016", args: []string{"--transparent-port", "0"}, want: 0},
-		{name: "flag enables capture over environment", env: "0", args: []string{"--transparent-port", "1016"}, want: 1016},
+		{name: "flag disables the listener", args: []string{"0"}, want: 0},
+		{name: "environment disables the listener", env: "0", want: 0},
+		{name: "flag disables the listener over environment", env: "1016", args: []string{"0"}, want: 0},
+		{name: "flag enables the listener over environment", env: "0", args: []string{"1016"}, want: 1016},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envPrefix+"TRANSPARENT_PORT", tc.env)
-			if tc.unsetEnv {
-				require.NoError(t, os.Unsetenv(envPrefix+"TRANSPARENT_PORT"), "omit the environment override")
-			}
-			var cfg *config.Config
-			cmd := command(io.Discard, io.Discard, func(_ context.Context, opts flags) error {
-				var err error
-				cfg, err = config.Parse([]byte("version: 1\nsandbox:\n  id: test\nlisten:\n  transparent_port: 1015\n"+
-					"endpoints:\n  - url: https://example.com/\n"), opts.overrides())
-				require.NoError(t, err, "parse the document")
-				return nil
+	for _, setting := range settings {
+		variable := envPrefix + strings.ToUpper(strings.ReplaceAll(setting.flag, "-", "_"))
+		document := "version: 1\nsandbox:\n  id: test\nlisten:\n  " +
+			strings.TrimPrefix(setting.key, "listen.") + ": 1015\nendpoints:\n  - url: https://example.com/\n"
+		for _, tc := range tests {
+			t.Run(setting.flag+"/"+tc.name, func(t *testing.T) {
+				t.Setenv(variable, tc.env)
+				if tc.unsetEnv {
+					require.NoError(t, os.Unsetenv(variable), "omit the environment override")
+				}
+				var cfg *config.Config
+				cmd := command(io.Discard, io.Discard, func(_ context.Context, opts flags) error {
+					var err error
+					cfg, err = config.Parse([]byte(document), opts.overrides())
+					require.NoError(t, err, "parse the document")
+					return nil
+				})
+				args := []string{"egress-proxy", "--config", "/unused.yaml"}
+				for _, value := range tc.args {
+					args = append(args, "--"+setting.flag, value)
+				}
+				require.NoError(t, cmd.Run(t.Context(), args), "parse the command and document")
+				require.NotNil(t, cfg, "the command loaded the document")
+				assert.Equal(t, tc.want, setting.get(cfg), "the effective %s", setting.key)
+				if tc.env != "" || len(tc.args) != 0 {
+					assert.Contains(t, cfg.Overridden, setting.key, "record the supplied override")
+				} else {
+					assert.NotContains(t, cfg.Overridden, setting.key, "an omitted override leaves the document alone")
+				}
 			})
-			args := append([]string{"egress-proxy", "--config", "/unused.yaml"}, tc.args...)
-			require.NoError(t, cmd.Run(t.Context(), args), "parse the command and document")
-			require.NotNil(t, cfg, "the command loaded the document")
-			assert.Equal(t, tc.want, cfg.Listen.TransparentPort, "the effective transparent port")
-			if tc.env != "" || len(tc.args) != 0 {
-				assert.Contains(t, cfg.Overridden, "listen.transparent_port", "record the supplied override")
-			} else {
-				assert.NotContains(
-					t,
-					cfg.Overridden,
-					"listen.transparent_port",
-					"an omitted override leaves the document alone",
-				)
-			}
-		})
+		}
 	}
 }
 
@@ -352,7 +374,7 @@ func startingProcess(t *testing.T, connectAddr string, transparentPort int, fami
 		cfg:             cfg,
 		logger:          slog.New(slog.DiscardHandler),
 		admin:           adminServer,
-		captureFamilies: families,
+		receiptFamilies: families,
 		certPath:        certPath,
 	}
 	if transparentPort != 0 {
@@ -374,8 +396,39 @@ const bindDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 // resolverDocument runs the allowlist resolver and no transparent
 // frontend, which is the posture the rules still have to feed.
 const resolverDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
-	"listen:\n  connect: 127.0.0.1:0\n  dns: 127.0.0.1:53\n" +
+	"listen:\n  connect: 127.0.0.1:0\n  dns_port: 53\n" +
 	"dns:\n  forward_to: [\"10.43.0.10\"]\nendpoints:\n  - url: https://example.com/\n"
+
+// TestDNSInfoReportsTheResolverPort pins the dns object /info serves: a port
+// of 0 when no resolver runs, and listen.dns_port when one does.
+func TestDNSInfoReportsTheResolverPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		document string
+		want     map[string]any
+	}{
+		{name: "no resolver", document: bindDocument, want: map[string]any{"port": 0}},
+		{
+			name:     "a resolver",
+			document: resolverDocument,
+			want: map[string]any{
+				"port": 53, "resolves": []string{"example.com"}, "forward_to": []string{"10.43.0.10:53"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(tc.document), config.Overrides{})
+			require.NoError(t, err, "config.Parse:\n%s", tc.document)
+			resolver, err := nameResolver(cfg, nil, audit.NewJSONSink(io.Discard), slog.New(slog.DiscardHandler))
+			require.NoError(t, err, "build the resolver")
+			proc := &process{cfg: cfg, resolver: resolver}
+			assert.Equal(t, tc.want, proc.dnsInfo(), "the dns object in /info")
+		})
+	}
+}
 
 // TestTheReceiptIsReadForEverySurfaceTheRulesFeed pins which postures read
 // the netsetup receipt. The rules deliver the captured connections and the
@@ -463,6 +516,77 @@ func TestCaptureFamiliesFollowTheSocketsThatBound(t *testing.T) {
 				"the families the receipt names with no socket")
 		})
 	}
+}
+
+// TestResolverBindsEveryFamilyTheReceiptNames pins the start-up refusal
+// for a resolver that misses a family the redirect covers. The redirect
+// would send that family's queries to a closed port.
+func TestResolverBindsEveryFamilyTheReceiptNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// addresses are the sockets the resolver bound, UDP and TCP on each.
+		addresses []string
+		wantErr   string
+	}{
+		{name: "both families bound", addresses: []string{"127.0.0.1", "::1"}},
+		{
+			name: "ipv4 alone", addresses: []string{"127.0.0.1"},
+			wantErr: "the netsetup receipt names ipv4,ipv6 and the resolver bound ipv4, so the redirect sends ipv6",
+		},
+		{
+			name: "ipv6 alone", addresses: []string{"::1"},
+			wantErr: "the netsetup receipt names ipv4,ipv6 and the resolver bound ipv6, so the redirect sends ipv4",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(resolverDocument), config.Overrides{})
+			require.NoError(t, err, "config.Parse")
+			logger := slog.New(slog.DiscardHandler)
+			resolver, err := nameResolver(cfg, nil, audit.NewJSONSink(io.Discard), logger)
+			require.NoError(t, err, "build the resolver")
+			var opened dns.Sockets
+			proc := &process{
+				cfg: cfg, logger: logger, resolver: resolver,
+				receiptFamilies: []string{"ipv4", "ipv6"},
+				listenResolver: func(ctx context.Context, _ int) (dns.Sockets, error) {
+					opened = boundSockets(ctx, t, tc.addresses)
+					return opened, nil
+				},
+			}
+
+			sockets, err := proc.resolverSockets(t.Context())
+			if tc.wantErr == "" {
+				require.NoError(t, err, "resolverSockets")
+				assert.Equal(t, opened, sockets, "the sockets that bound")
+				require.NoError(t, sockets.Close(), "close the resolver sockets")
+				return
+			}
+			require.ErrorIs(t, err, errResolver, "the refusal is the resolver's")
+			require.ErrorContains(t, err, tc.wantErr, "the refusal names the missing family")
+			assert.Empty(t, sockets.Packet, "a refused bind returns no socket")
+			assert.ErrorIs(t, opened.Close(), net.ErrClosed, "the refusal closed what bound")
+		})
+	}
+}
+
+// boundSockets opens a UDP and a TCP socket on each address at a port the
+// kernel picks, the shape dns.Listen hands the bind.
+func boundSockets(ctx context.Context, t *testing.T, addresses []string) dns.Sockets {
+	t.Helper()
+	var sockets dns.Sockets
+	for _, address := range addresses {
+		hostPort := net.JoinHostPort(address, "0")
+		packet, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", hostPort)
+		require.NoError(t, err, "listen on udp %s", hostPort)
+		stream, err := (&net.ListenConfig{}).Listen(ctx, "tcp", hostPort)
+		require.NoError(t, err, "listen on tcp %s", hostPort)
+		sockets.Packet = append(sockets.Packet, packet)
+		sockets.Stream = append(sockets.Stream, stream)
+	}
+	return sockets
 }
 
 // boundListeners opens one socket per address, the shape transparent.Listen

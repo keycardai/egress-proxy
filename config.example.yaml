@@ -28,14 +28,14 @@ identity:
 #   connect: "127.0.0.1:3128"           # EGRESS_PROXY_CONNECT
 #   transparent_port: 1015              # EGRESS_PROXY_TRANSPARENT_PORT: redirect target on 127.0.0.1 and ::1. Unset disables it
 #   cleartext_ports: [80]               # captured ports use HTTP. Other ports use TLS
-#   dns: "127.0.0.1:53"                 # EGRESS_PROXY_DNS; the allowlist resolver, unset disables it
+#   dns_port: 53                        # EGRESS_PROXY_DNS_PORT: allowlist resolver on 127.0.0.1 and ::1. Unset disables it
 #   admin: "/run/egress/admin/admin.sock" # EGRESS_PROXY_ADMIN; a Unix socket, never a port
 # dns:
 #   forward_to: ["10.43.0.10"]          # EGRESS_PROXY_DNS_FORWARD_TO; unset reads the netsetup receipt
 # Only the endpoint hosts and the zone host resolve, matched exactly. No
 # setting changes that.
 # netsetup:
-#   receipt: "/run/egress/netsetup/netsetup.json" # EGRESS_PROXY_NETSETUP_RECEIPT: read when listen.transparent_port or listen.dns is set
+#   receipt: "/run/egress/netsetup/netsetup.json" # EGRESS_PROXY_NETSETUP_RECEIPT: read when listen.transparent_port or listen.dns_port is set
 # ca:
 #   out_dir: "/shared-ca/out"           # EGRESS_PROXY_CA_OUT_DIR; receives ca.crt and nothing else
 #   state_dir: ""                       # EGRESS_PROXY_CA_STATE_DIR; a memory-backed volume holding the CA across restarts

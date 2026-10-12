@@ -54,7 +54,7 @@ type Receipt struct {
 	// CapturePorts are the destination ports the redirect covers.
 	CapturePorts []int `json:"capture_ports"`
 	// DNSPort is where the nat REDIRECT sends UDP and TCP port 53. It must
-	// be the port listen.dns binds. Zero says no DNS redirect was
+	// be listen.dns_port. Zero says no DNS redirect was
 	// programmed.
 	DNSPort int `json:"dns_port"`
 	// DNSServers are the cluster resolvers the sidecar's allowlist

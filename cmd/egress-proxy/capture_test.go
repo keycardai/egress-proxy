@@ -151,7 +151,8 @@ func containAndCapture(cfg *config.Config, logger *slog.Logger) (*transparent.Fr
 	if err != nil {
 		return nil, nil, err
 	}
-	return capture(cfg, receipt, nil, logger)
+	frontend, err := capture(cfg, receipt, nil, logger)
+	return frontend, redirectedFamilies(receipt), err
 }
 
 // thisNetNamespace reads the network namespace of the test process. It is

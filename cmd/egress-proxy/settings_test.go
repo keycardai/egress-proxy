@@ -89,6 +89,7 @@ func TestSettingsPublishWhatADeploymentHasToMatch(t *testing.T) {
 		{flag: "connect", wantEnv: config.EnvPrefix + "CONNECT", wantDefault: config.DefaultConnect},
 		{flag: "admin", wantEnv: config.EnvPrefix + "ADMIN", wantDefault: config.DefaultAdmin},
 		{flag: "transparent-port", wantEnv: config.EnvPrefix + "TRANSPARENT_PORT", wantDefault: nil},
+		{flag: "dns-port", wantEnv: config.EnvPrefix + "DNS_PORT", wantDefault: nil},
 		{
 			flag: "netsetup-receipt", wantEnv: config.EnvPrefix + "NETSETUP_RECEIPT",
 			wantDefault: netsetup.DefaultReceiptPath,
