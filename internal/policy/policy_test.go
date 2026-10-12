@@ -232,6 +232,15 @@ func TestMatcherDecisions(t *testing.T) {
 	deny, err := policy.NewDenyList(nil, nil)
 	require.NoError(t, err, "NewDenyList")
 	matcher, err := policy.Compile([]policy.Endpoint{
+		{
+			Host: "api.example", Port: 443, PathPrefix: "/api/",
+			Resource: "https://api.example/api/", Credential: &headerPlacement,
+		},
+		{Host: "api.example", Port: 443, PathPrefix: "/api/admin/", Resource: "https://api.example/api/admin/"},
+		{
+			Host: "api.example", Port: 443, PathPrefix: "/api/admin:view/",
+			Resource: "https://api.example/api/admin:view/",
+		},
 		{Host: "api.github.com", Port: 443, PathPrefix: "/", Credential: &headerPlacement},
 		{Host: "openrouter.ai", Port: 443, PathPrefix: "/api/v1/"},
 		{Host: "openrouter.ai", Port: 443, PathPrefix: "/api/v1/models"},
@@ -349,6 +358,24 @@ func TestMatcherDecisions(t *testing.T) {
 		{
 			name: "a lowercase escape is refused", host: "openrouter.ai", path: "/api/v1/a%3fb",
 			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "an escaped colon cannot select a broader credential", host: "api.example",
+			path:        "/api/admin%3Aview/x",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "an escaped slash cannot select a broader credential", host: "api.example",
+			path:        "/api/admin%2Fx",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "a literal colon selects the narrower endpoint", host: "api.example", path: "/api/admin:view/x",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "api.example:443/api/admin:view/",
+		},
+		{
+			name: "a literal slash selects the narrower endpoint", host: "api.example", path: "/api/admin/x",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "api.example:443/api/admin/",
 		},
 		{
 			// GitLab names a project as group%2Fproject. An uppercase escape
