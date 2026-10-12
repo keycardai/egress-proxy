@@ -97,3 +97,5 @@ says how to report a vulnerability. Never report one in a public issue.
 ## License
 
 Apache-2.0. See `LICENSE` and, for third-party attributions, `NOTICE`.
+The Keycard name and logo are trademarks; `TRADEMARKS.md` states how they may
+be used.
