@@ -13,7 +13,9 @@
 # NEVER publish or sign any commit but github.sha, the commit whose gates
 # passed in this run. Only the run for the release PR's merge commit creates
 # the release. If that run fails or is cancelled, re-run it. Until it
-# passes, release-please does not update the release PR.
+# passes, release-please does not update the release PR. If the release
+# commit guard in publish ever fails, the tag and the GitHub release exist
+# without images, and the images must be published by hand.
 name: release
 
 on:
@@ -23,25 +25,20 @@ permissions:
   contents: read
 
 jobs:
-  release-please:
+  # Decides whether this run may create the release. It may only when
+  # github.sha is the merge commit of a merged release PR. release-please
+  # marks that PR with the `label` in its config, `autorelease: pending` by
+  # default, and tags the PR's merge commit. This job's token cannot write.
+  release-commit:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
-      # To dispatch ci.yml on the release PR branch.
-      actions: write
+      contents: read
+      pull-requests: read
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      sha: ${{ steps.release.outputs.sha }}
+      skip: ${{ steps.check.outputs.skip }}
     steps:
-      # This run may create the release only when github.sha is the merge
-      # commit of a merged release PR. release-please marks that PR with
-      # the `label` in its config, `autorelease: pending` by default, and
-      # tags the PR's merge commit. A run for any other commit skips the
-      # release.
       - name: check for a release merge commit
-        id: merge
+        id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -56,15 +53,42 @@ jobs:
           if [ "$count" -gt 0 ]; then
             echo "$GITHUB_SHA is a release PR merge commit"
             echo "skip=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          # A merged release PR that still has the labels is not released.
+          # Its own run is in progress, failed, or was cancelled.
+          gh pr list --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" --state merged \
+              --label "$(jq -r '.[0]' <<<"$labels")" --json number,mergeCommit,labels |
+            jq -r --argjson want "$labels" \
+              '.[] | select($want - [.labels[].name] == []) | "\(.number) \(.mergeCommit.oid)"' |
+            while read -r pr sha; do
+              msg="Release PR #$pr merged as $sha is not released. If the ci run for $sha failed or was cancelled, re-run it."
+              echo "::warning::$msg"
+              echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            done ||
+            echo "::warning::Could not list merged release PRs."
+
+  release-please:
+    needs: release-commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # To dispatch ci.yml on the release PR branch.
+      actions: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      # Any value but `false` skips the release.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          skip-github-release: ${{ steps.merge.outputs.skip }}
+          skip-github-release: ${{ needs.release-commit.outputs.skip != 'false' }}
       # A PR the workflow token opens or updates starts no pull_request
       # workflow, so the gates are dispatched on its branch. The checks land
       # on the PR's head commit. release-please sets `pr` only when it opens
@@ -95,6 +119,7 @@ jobs:
       # A release that tags any commit but github.sha stops the job before
       # it logs in or pushes.
       - name: check the release commit
+        id: release-commit-guard
         if: env.RELEASE_CREATED == 'true'
         env:
           RELEASE_SHA: ${{ needs.release-please.outputs.sha }}

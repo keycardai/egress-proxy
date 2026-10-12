@@ -10,8 +10,10 @@ on:
   # The release job dispatches this workflow on the release PR branch.
   workflow_dispatch:
 
-# A push to main is never cancelled, so every commit on main runs the
-# release job. Anything else gives way to a newer run on the same ref.
+# A push to main gets a group of its own, so its gates are never cancelled.
+# The release job shares one group across pushes, and a newer pending
+# release job replaces an older pending one. Anything else gives way to a
+# newer run on the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
