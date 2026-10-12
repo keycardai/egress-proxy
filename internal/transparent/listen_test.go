@@ -81,3 +81,47 @@ func TestListenFailsWhenTheIPv6PortIsTaken(t *testing.T) {
 	require.NoError(t, err, "the IPv4 socket Listen opened is closed again")
 	_ = inet.Close()
 }
+
+// TestListenSkipsAnUnavailableIPv6Family injects each IPv6 bind error
+// through the socket options. An error that says the kernel cannot provide
+// IPv6 leaves the ::1 socket out. Any other error fails the call and
+// releases the IPv4 socket.
+func TestListenSkipsAnUnavailableIPv6Family(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		injected error
+		wantErr  error
+	}{
+		{name: "IPv6 disabled on lo", injected: syscall.EADDRNOTAVAIL},
+		{name: "a kernel without IPv6", injected: syscall.EAFNOSUPPORT},
+		{name: "the ::1 port is taken", injected: syscall.EADDRINUSE, wantErr: syscall.EADDRINUSE},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			config := &net.ListenConfig{Control: func(network, _ string, _ syscall.RawConn) error {
+				if network == "tcp6" {
+					return tc.injected
+				}
+				return nil
+			}}
+			listeners, err := transparent.ListenWith(t.Context(), config, 0)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr, "the ::1 error is returned")
+				assert.Empty(t, listeners, "a failed Listen returns no socket")
+				return
+			}
+			require.NoError(t, err, "an unavailable family is skipped")
+			t.Cleanup(func() {
+				for _, listener := range listeners {
+					_ = listener.Close()
+				}
+			})
+			require.Len(t, listeners, 1, "the IPv4 socket alone")
+			addr, ok := listeners[0].Addr().(*net.TCPAddr)
+			require.True(t, ok, "the listener is bound on TCP")
+			assert.Equal(t, netip.MustParseAddr("127.0.0.1"), addr.AddrPort().Addr(), "the IPv4 loopback address")
+		})
+	}
+}

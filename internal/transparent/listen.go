@@ -2,12 +2,12 @@ package transparent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 )
 
 // Listen opens the sockets the transparent frontend accepts redirected
@@ -32,16 +32,21 @@ import (
 // pkg/tcpip/stack/conntrack.go, ConnTrack.originalDst, whose tupleID has
 // netProto). One socket per family works on gVisor and on Linux.
 //
-// The IPv6 socket is optional only when the kernel has no IPv6, which
-// socket(2) reports as EAFNOSUPPORT. Such a kernel has no ip6tables ruleset
-// redirecting anything to it. Every other IPv6 error fails the call. gVisor
-// registers IPv6 even when net.ipv6.conf.all.disable_ipv6 is set (gvisor
-// runsc/boot/loader.go, newEmptySandboxNetworkStack), so under gVisor the
-// IPv6 socket always opens. The IPv4 socket is never optional. A frontend
+// Listen skips the IPv6 socket when the kernel cannot provide IPv6 (see
+// [netsetup.FamilyUnavailable]). The receipt family check refuses the start
+// if the redirect covers IPv6. Every other IPv6 error closes the IPv4
+// socket and fails the call. gVisor registers IPv6 even when
+// net.ipv6.conf.all.disable_ipv6 is set (gvisor runsc/boot/loader.go,
+// newEmptySandboxNetworkStack), so under gVisor the IPv6 socket always
+// opens. The IPv4 socket is never optional. A frontend
 // that binds nothing accepts nothing, and the filter DROP then denies the
 // workload every destination.
 func Listen(ctx context.Context, port int) ([]net.Listener, error) {
-	config := &net.ListenConfig{}
+	return listen(ctx, &net.ListenConfig{}, port)
+}
+
+// listen is Listen with the socket options it binds with.
+func listen(ctx context.Context, config *net.ListenConfig, port int) ([]net.Listener, error) {
 	inetAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	inet, err := config.Listen(ctx, "tcp4", inetAddress)
 	if err != nil {
@@ -49,7 +54,7 @@ func Listen(ctx context.Context, port int) ([]net.Listener, error) {
 	}
 	inet6Address := net.JoinHostPort("::1", strconv.Itoa(port))
 	inet6, err := config.Listen(ctx, "tcp6", inet6Address)
-	if errors.Is(err, syscall.EAFNOSUPPORT) {
+	if netsetup.FamilyUnavailable(err) {
 		return []net.Listener{inet}, nil
 	}
 	if err != nil {

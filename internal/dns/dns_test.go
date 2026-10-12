@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -561,6 +562,53 @@ func holdIPv6Port(t *testing.T) (int, net.PacketConn) {
 	}
 	t.Fatalf("no port was free on ::1 in %d attempts", bindAttempts)
 	return 0, nil
+}
+
+// TestListenSkipsAnUnavailableIPv6Family injects each IPv6 bind error
+// through the socket options. An error that says the kernel cannot provide
+// IPv6 leaves the ::1 pair out. Any other error fails the call and releases
+// the IPv4 pair.
+func TestListenSkipsAnUnavailableIPv6Family(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		injected error
+		wantErr  error
+	}{
+		{name: "IPv6 disabled on lo", injected: syscall.EADDRNOTAVAIL},
+		{name: "a kernel without IPv6", injected: syscall.EAFNOSUPPORT},
+		{name: "the ::1 port is taken", injected: syscall.EADDRINUSE, wantErr: syscall.EADDRINUSE},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			port := freePort(t)
+			sockets, err := dns.ListenWith(t.Context(), failIPv6(tc.injected), port)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr, "the ::1 error is returned")
+				assert.Empty(t, sockets.Packet, "a failed Listen returns no socket")
+				reclaimed, reclaimErr := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4",
+					net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+				require.NoError(t, reclaimErr, "the failed Listen left the IPv4 socket open on port %d", port)
+				require.NoError(t, reclaimed.Close(), "close the reclaimed IPv4 socket")
+				return
+			}
+			require.NoError(t, err, "an unavailable family is skipped")
+			t.Cleanup(func() { _ = sockets.Close() })
+			want := "udp 127.0.0.1:" + strconv.Itoa(port) + ",tcp 127.0.0.1:" + strconv.Itoa(port)
+			assert.Equal(t, want, sockets.Addresses(), "the IPv4 pair alone")
+		})
+	}
+}
+
+// failIPv6 is socket options that fail every IPv6 bind with err.
+func failIPv6(err error) *net.ListenConfig {
+	return &net.ListenConfig{Control: func(network, _ string, _ syscall.RawConn) error {
+		if strings.HasSuffix(network, "6") {
+			return err
+		}
+		return nil
+	}}
 }
 
 func TestListenRefusesAPortOutsideTheRange(t *testing.T) {

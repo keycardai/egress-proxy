@@ -22,6 +22,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Family is an IP address family. One Program covers one family, because
@@ -39,6 +40,14 @@ func (f Family) String() string {
 		return "ipv6"
 	}
 	return "ipv4"
+}
+
+// FamilyUnavailable reports whether a bind error means the kernel cannot
+// provide the loopback address of a family: EAFNOSUPPORT, or EADDRNOTAVAIL
+// when IPv6 is disabled on lo. A listener skips such a family, and the
+// receipt family check refuses the start if the redirect covers it.
+func FamilyUnavailable(err error) bool {
+	return errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)
 }
 
 // Defaults for the pod contract this ruleset is written for.

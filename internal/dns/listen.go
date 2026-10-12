@@ -7,7 +7,8 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
-	"syscall"
+
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 )
 
 // ErrListen is a set of sockets the resolver could not open.
@@ -21,21 +22,26 @@ var ErrListen = errors.New("dns listener")
 // NEVER bind another address here. The resolver decides what the sandbox
 // can look up and answers no one else.
 //
-// The IPv6 pair is optional only when the kernel has no IPv6, which
-// socket(2) reports as EAFNOSUPPORT. Such a kernel has no ip6tables ruleset
-// redirecting anything to it. Every other IPv6 error closes the IPv4 pair
+// Listen skips the IPv6 pair when the kernel cannot provide IPv6 (see
+// [netsetup.FamilyUnavailable]). The receipt family check refuses the start
+// if the redirect covers IPv6. Every other IPv6 error closes the IPv4 pair
 // and fails the call. The IPv4 pair is always required.
 func Listen(ctx context.Context, port int) (Sockets, error) {
+	return listen(ctx, &net.ListenConfig{}, port)
+}
+
+// listen is Listen with the socket options it binds with.
+func listen(ctx context.Context, config *net.ListenConfig, port int) (Sockets, error) {
 	if port < 1 || port > maxPort {
 		return Sockets{}, fmt.Errorf("%w: port %d is outside 1-%d", ErrListen, port, maxPort)
 	}
 	addrs := loopback()
-	sockets, err := bind(ctx, addrs[0], port)
+	sockets, err := bind(ctx, config, addrs[0], port)
 	if err != nil {
 		return Sockets{}, err
 	}
-	six, err := bind(ctx, addrs[1], port)
-	if errors.Is(err, syscall.EAFNOSUPPORT) {
+	six, err := bind(ctx, config, addrs[1], port)
+	if netsetup.FamilyUnavailable(err) {
 		return sockets, nil
 	}
 	if err != nil {
@@ -58,13 +64,12 @@ func loopback() []netip.Addr {
 // bind opens one UDP and one TCP socket on an address. If the TCP socket
 // cannot be opened, it closes the UDP one. A resolver on UDP alone would
 // refuse every TCP fallback.
-func bind(ctx context.Context, addr netip.Addr, port int) (Sockets, error) {
+func bind(ctx context.Context, config *net.ListenConfig, addr netip.Addr, port int) (Sockets, error) {
 	udpNetwork, tcpNetwork := "udp4", "tcp4"
 	if addr.Is6() {
 		udpNetwork, tcpNetwork = "udp6", "tcp6"
 	}
 	address := net.JoinHostPort(addr.String(), strconv.Itoa(port))
-	config := &net.ListenConfig{}
 	packet, err := config.ListenPacket(ctx, udpNetwork, address)
 	if err != nil {
 		return Sockets{}, fmt.Errorf("%w: listen on udp %s: %w", ErrListen, address, err)
