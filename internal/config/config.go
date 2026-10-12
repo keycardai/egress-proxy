@@ -27,7 +27,6 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/credential"
-	"github.com/keycardai/egress-proxy/internal/dns"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/policy"
 	"github.com/keycardai/egress-proxy/internal/strictdoc"
@@ -203,14 +202,12 @@ type Listen struct {
 	// a sidecar restart and stand in for the proxy. The proxy holds
 	// NET_BIND_SERVICE and no other capability.
 	TransparentPort int `json:"transparent_port"`
-	// DNS is the address the allowlist resolver binds, host:port. An empty
-	// value runs no resolver. A host that is empty or unspecified binds
-	// each family's loopback address, which is where the nat REDIRECT
-	// sends a query.
+	// DNSPort is the port the allowlist resolver binds on 127.0.0.1 and ::1,
+	// which is where the nat REDIRECT sends a query. Zero runs no resolver.
 	//
 	// The port is below 1024, so an unprivileged workload cannot bind it
 	// during a sidecar restart and answer its own lookups.
-	DNS string `json:"dns"`
+	DNSPort int `json:"dns_port"`
 	// CleartextPorts lists captured destination ports to read as cleartext
 	// HTTP. The destination comes from the Host header. Empty means port 80.
 	// Every other captured port is read as TLS.
@@ -512,7 +509,8 @@ type Overrides struct {
 	Connect               string
 	TransparentPort       int
 	TransparentPortSet    bool
-	DNS                   string
+	DNSPort               int
+	DNSPortSet            bool
 	DNSForwardTo          []string
 	Admin                 string
 	NetsetupReceipt       string
@@ -721,30 +719,6 @@ func (c *Config) UpstreamRoots() (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// port is the port a listen address names, zero for an address that names
-// none or does not parse.
-func port(address string) int {
-	if address == "" {
-		return 0
-	}
-	_, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		return 0
-	}
-	value, err := strconv.Atoi(portText)
-	if err != nil || value < 1 || value > maxPort {
-		return 0
-	}
-	return value
-}
-
-// DNSPort is the port the allowlist resolver binds, zero when listen.dns
-// is unset. The containment check compares it with the port
-// the netsetup rules redirect DNS to.
-func (c *Config) DNSPort() int {
-	return port(c.Listen.DNS)
-}
-
 // DNSHosts are the names the allowlist resolver answers for: every
 // endpoint host and the zone host. It is derived from the document and
 // nothing configures it.
@@ -869,7 +843,8 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("listen.connect", overrides.Connect != "", func() { c.Listen.Connect = overrides.Connect })
 	override("listen.transparent_port", overrides.TransparentPortSet || overrides.TransparentPort != 0,
 		func() { c.Listen.TransparentPort = overrides.TransparentPort })
-	override("listen.dns", overrides.DNS != "", func() { c.Listen.DNS = overrides.DNS })
+	override("listen.dns_port", overrides.DNSPortSet || overrides.DNSPort != 0,
+		func() { c.Listen.DNSPort = overrides.DNSPort })
 	override("dns.forward_to", len(overrides.DNSForwardTo) > 0,
 		func() { c.DNS.ForwardTo = append([]string(nil), overrides.DNSForwardTo...) })
 	override("listen.admin", overrides.Admin != "", func() { c.Listen.Admin = overrides.Admin })
@@ -1210,10 +1185,9 @@ func (c *Config) validateTransparent(found *problems) {
 	}
 }
 
-// validateDNS checks the resolver's address and its forward targets. A
-// resolver is optional. It refuses forward targets without listen.dns,
-// because nothing would read them. It refuses a listen address that
-// dns.Listen would refuse.
+// validateDNS checks the resolver's port and its forward targets. A
+// resolver is optional. It refuses forward targets without
+// listen.dns_port, because nothing would read them.
 func (c *Config) validateDNS(found *problems) {
 	for i, target := range c.DNS.ForwardTo {
 		if _, err := netip.ParseAddr(strings.TrimSpace(target)); err == nil {
@@ -1224,14 +1198,14 @@ func (c *Config) validateDNS(found *problems) {
 				"a resolver to look it up", i, target)
 		}
 	}
-	if c.Listen.DNS == "" {
+	if c.Listen.DNSPort == 0 {
 		if len(c.DNS.ForwardTo) > 0 {
-			found.addf("dns.forward_to names resolvers and listen.dns is unset, so nothing reads them")
+			found.addf("dns.forward_to names resolvers and listen.dns_port is unset, so nothing reads them")
 		}
 		return
 	}
-	if err := dns.CheckListen(c.Listen.DNS); err != nil {
-		found.addf("%v", err)
+	if c.Listen.DNSPort < 0 || c.Listen.DNSPort > maxPort {
+		found.addf("listen.dns_port is %d, outside 1-%d", c.Listen.DNSPort, maxPort)
 	}
 }
 

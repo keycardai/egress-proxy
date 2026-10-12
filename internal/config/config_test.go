@@ -30,6 +30,8 @@ func TestParseAppliesDefaults(t *testing.T) {
 		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin/admin.sock"},
 		// Zero disables the transparent frontend.
 		{"listen.transparent_port", cfg.Listen.TransparentPort, 0},
+		// Zero runs no resolver.
+		{"listen.dns_port", cfg.Listen.DNSPort, 0},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
 		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup/netsetup.json"},
 		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca/out"},
@@ -175,12 +177,12 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 				Connect: "127.0.0.1:9", Admin: "/other/admin.sock",
 				NetsetupReceipt: "/other/netsetup.json", CAOutDir: "/other/ca",
 				CacheSize: 7, MaxConnections: 3, MaxDNSConnections: 5, SandboxID: "another-sandbox",
-				// The resolver's address decides no answer. Which names
+				// The resolver's port decides no answer. Which names
 				// resolve comes from the endpoints and the zone, which the
 				// digest already covers, so the forward targets decide no
 				// answer either: the proxy re-resolves a name on the dial,
 				// and a forward target that lies steers no connection.
-				DNS: "127.0.0.1:53", DNSForwardTo: []string{"10.43.0.10"},
+				DNSPort: 53, DNSForwardTo: []string{"10.43.0.10"},
 			},
 			wantSame: true,
 		},
@@ -367,7 +369,7 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 	}{
 		{
 			name: "the endpoint hosts alone when the document names no zone",
-			doc:  minimal + "listen:\n  dns: \"127.0.0.1:53\"\ndns:\n  forward_to: [\"10.43.0.10\"]\n",
+			doc:  minimal + "listen:\n  dns_port: 53\ndns:\n  forward_to: [\"10.43.0.10\"]\n",
 			want: []string{"pypi.org"},
 			port: 53,
 		},
@@ -388,33 +390,7 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
 			require.NoError(t, err, "Parse:\n%s", tc.doc)
 			assert.Equal(t, tc.want, cfg.DNSHosts(), "the names the resolver answers for")
-			assert.Equal(t, tc.port, cfg.DNSPort(), "the port the containment check compares")
-		})
-	}
-}
-
-// TestParseAcceptsALoopbackResolver covers the listen.dns hosts that bind
-// loopback. TestParseRefusesInvalidSettings covers the ones refused.
-func TestParseAcceptsALoopbackResolver(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		address string
-	}{
-		{name: "an empty host", address: ":53"},
-		{name: "the IPv4 unspecified address", address: "0.0.0.0:53"},
-		{name: "the IPv6 unspecified address", address: "[::]:53"},
-		{name: "the IPv6 loopback address", address: "[::1]:53"},
-		{name: "IPv4-mapped loopback", address: "[::ffff:127.0.0.1]:53"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			doc := minimal + "listen:\n  dns: \"" + tc.address + "\"\ndns:\n  forward_to: [\"10.43.0.10\"]\n"
-			cfg, err := config.Parse([]byte(doc), config.Overrides{})
-			require.NoError(t, err, "Parse:\n%s", doc)
-			assert.Equal(t, tc.address, cfg.Listen.DNS, "the address the resolver binds")
-			assert.Equal(t, 53, cfg.DNSPort(), "the port the containment check compares")
+			assert.Equal(t, tc.port, cfg.Listen.DNSPort, "the port the containment check compares")
 		})
 	}
 }
@@ -524,89 +500,31 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		},
 		{name: "connect without a port", doc: minimal + "listen:\n  connect: 127.0.0.1\n", wantErr: "listen.connect"},
 		{
-			name:    "a resolver address with no port",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.1\"\n",
-			wantErr: "listen.dns \"127.0.0.1\" is not host:port",
+			name:    "a resolver port of -1",
+			doc:     minimal + "listen:\n  dns_port: -1\n",
+			wantErr: "listen.dns_port is -1, outside 1-65535",
 		},
 		{
-			name:    "a resolver address naming a port outside 1-65535",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.1:0\"\n",
-			wantErr: "listen.dns \"127.0.0.1:0\" does not name a port in 1-65535",
+			name:    "a resolver port above 65535",
+			doc:     minimal + "listen:\n  dns_port: 65536\n",
+			wantErr: "listen.dns_port is 65536, outside 1-65535",
 		},
 		{
-			name:    "a resolver on a pod IP",
-			doc:     minimal + "listen:\n  dns: \"10.0.0.5:53\"\n",
-			wantErr: "listen.dns \"10.0.0.5:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on a private address",
-			doc:     minimal + "listen:\n  dns: \"192.168.1.10:53\"\n",
-			wantErr: "listen.dns \"192.168.1.10:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on a public address",
-			doc:     minimal + "listen:\n  dns: \"203.0.113.10:53\"\n",
-			wantErr: "listen.dns \"203.0.113.10:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on an IPv4 link-local address",
-			doc:     minimal + "listen:\n  dns: \"169.254.1.1:53\"\n",
-			wantErr: "listen.dns \"169.254.1.1:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on an IPv6 unique local address",
-			doc:     minimal + "listen:\n  dns: \"[fd00::1]:53\"\n",
-			wantErr: "listen.dns \"[fd00::1]:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on an IPv6 global address",
-			doc:     minimal + "listen:\n  dns: \"[2001:db8::1]:53\"\n",
-			wantErr: "listen.dns \"[2001:db8::1]:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on an IPv6 link-local address",
-			doc:     minimal + "listen:\n  dns: \"[fe80::1]:53\"\n",
-			wantErr: "listen.dns \"[fe80::1]:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on an IPv4-mapped unspecified address",
-			doc:     minimal + "listen:\n  dns: \"[::ffff:0.0.0.0]:53\"\n",
-			wantErr: "listen.dns \"[::ffff:0.0.0.0]:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on another 127/8 address",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.2:53\"\n",
-			wantErr: "listen.dns \"127.0.0.2:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on a zoned IPv6 loopback address",
-			doc:     minimal + "listen:\n  dns: \"[::1%lo]:53\"\n",
-			wantErr: "listen.dns \"[::1%lo]:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on a zoned IPv4-mapped loopback address",
-			doc:     minimal + "listen:\n  dns: \"[::ffff:127.0.0.1%lo]:53\"\n",
-			wantErr: "listen.dns \"[::ffff:127.0.0.1%lo]:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on a hostname",
-			doc:     minimal + "listen:\n  dns: \"dns.example:53\"\n",
-			wantErr: "listen.dns \"dns.example:53\": not a loopback address",
-		},
-		{
-			name:    "a resolver on localhost",
-			doc:     minimal + "listen:\n  dns: \"localhost:53\"\n",
-			wantErr: "listen.dns \"localhost:53\": not a loopback address",
+			// The resolver binds 127.0.0.1 and ::1 alone, so the document
+			// names no address for it.
+			name:    "a resolver address",
+			doc:     minimal + "listen:\n  dns: \"127.0.0.1:53\"\n",
+			wantErr: `unknown field "dns"`,
 		},
 		{
 			name:    "a forward target that is a hostname",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.1:53\"\ndns:\n  forward_to: [\"kube-dns\"]\n",
+			doc:     minimal + "listen:\n  dns_port: 53\ndns:\n  forward_to: [\"kube-dns\"]\n",
 			wantErr: "dns.forward_to[0] \"kube-dns\" must be an IP address or address:port",
 		},
 		{
 			name:    "forward targets with no resolver to read them",
 			doc:     minimal + "dns:\n  forward_to: [\"10.43.0.10\"]\n",
-			wantErr: "listen.dns is unset, so nothing reads them",
+			wantErr: "listen.dns_port is unset, so nothing reads them",
 		},
 		{
 			name:    "state dir under out dir",

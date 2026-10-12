@@ -69,7 +69,8 @@ type flags struct {
 	connect               string
 	transparentPort       int
 	transparentPortSet    bool
-	dns                   string
+	dnsPort               int
+	dnsPortSet            bool
 	dnsForwardTo          []string
 	admin                 string
 	netsetupReceipt       string
@@ -98,7 +99,8 @@ func (f flags) overrides() config.Overrides {
 		Connect:               f.connect,
 		TransparentPort:       f.transparentPort,
 		TransparentPortSet:    f.transparentPortSet,
-		DNS:                   f.dns,
+		DNSPort:               f.dnsPort,
+		DNSPortSet:            f.dnsPortSet,
 		DNSForwardTo:          f.dnsForwardTo,
 		Admin:                 f.admin,
 		NetsetupReceipt:       f.netsetupReceipt,
@@ -187,9 +189,11 @@ func listenFlags(opts *flags) []cli.Flag {
 			Usage: "port the netsetup rules redirect to, bound on 127.0.0.1 and ::1 " +
 				"(listen.transparent_port); 0 runs no transparent frontend",
 		},
-		stringFlag("dns", "DNS", &opts.dns,
-			"address of the allowlist resolver, host:port (listen.dns); the host must be 127.0.0.1, ::1, "+
-				"unspecified or empty, and an unspecified or empty host binds both; an empty address disables the resolver"),
+		&cli.IntFlag{
+			Name: "dns-port", Destination: &opts.dnsPort, Sources: env("DNS_PORT"),
+			Usage: "port of the allowlist resolver, bound on 127.0.0.1 and ::1 (listen.dns_port); " +
+				"0 runs no resolver",
+		},
 		&cli.StringSliceFlag{
 			Name: "dns-forward-to", Destination: &opts.dnsForwardTo, Sources: env("DNS_FORWARD_TO"),
 			Usage: "cluster resolver an allowed name is forwarded to; repeatable, comma-separated in the " +
@@ -233,6 +237,7 @@ func command(stdout, stderr io.Writer, action func(context.Context, flags) error
 				return errNoConfig
 			}
 			opts.transparentPortSet = cmd.Count("transparent-port") > 0
+			opts.dnsPortSet = cmd.Count("dns-port") > 0
 			return action(ctx, opts)
 		},
 	}
@@ -256,7 +261,7 @@ type process struct {
 	// transparent.Listen.
 	listenCapture func(ctx context.Context, port int) ([]net.Listener, error)
 	// resolver answers the sandbox's name lookups. It is nil when
-	// listen.dns is unset.
+	// listen.dns_port is unset.
 	resolver *dns.Resolver
 	// captureFamilies are the address families the netsetup receipt says
 	// the redirect covers. Every one of them needs a bound capture socket,
@@ -399,7 +404,7 @@ func (p *process) announce() {
 		slog.String("sandbox_id", p.cfg.Sandbox.ID),
 		slog.Any("overridden", p.cfg.Overridden),
 		slog.Any("endpoint_hosts", p.matcher.Hosts()),
-		slog.String("listen_dns", p.cfg.Listen.DNS),
+		slog.Int("listen_dns_port", p.cfg.Listen.DNSPort),
 		slog.Any("cluster_cidrs", deny.ClusterCIDRs()))
 	for _, exception := range deny.Exceptions() {
 		p.logger.Warn("deny list exception: the platform deny list does not cover this range",
@@ -493,17 +498,20 @@ func (p *process) info() any {
 // runs, the names it answers for and where it forwards.
 func (p *process) dnsInfo() map[string]any {
 	if p.resolver == nil {
-		return map[string]any{listenKey: ""}
+		return map[string]any{portKey: 0}
 	}
 	return map[string]any{
-		listenKey:    p.cfg.Listen.DNS,
+		portKey:      p.cfg.Listen.DNSPort,
 		"resolves":   p.resolver.Hosts(),
 		"forward_to": p.resolver.Forward(),
 	}
 }
 
-// listenKey is the field /info reports a listen address under.
+// listenKey is the field /info reports the listen settings under.
 const listenKey = "listen"
+
+// portKey is the field /info reports the resolver's port under.
+const portKey = "port"
 
 // errNotReady is what the admin socket reports at /readyz while the
 // process is not serving, which is before the bind and again from the
@@ -539,7 +547,7 @@ func (p *process) ready() error {
 // network namespace, and owner reads. A zero-value request reads this process
 // and its filesystem.
 func containment(cfg *config.Config, probes netsetup.ContainmentRequest) (*netsetup.Receipt, error) {
-	if cfg.Listen.TransparentPort == 0 && cfg.Listen.DNS == "" {
+	if cfg.Listen.TransparentPort == 0 && cfg.Listen.DNSPort == 0 {
 		return nil, nil //nolint:nilnil // no capture and no resolver is a posture, not a failure
 	}
 	if cfg.Listen.TransparentPort != 0 && !transparent.Supported {
@@ -549,7 +557,7 @@ func containment(cfg *config.Config, probes netsetup.ContainmentRequest) (*netse
 	request := probes
 	request.Path = cfg.Netsetup.Receipt
 	request.TransparentPort = cfg.Listen.TransparentPort
-	request.DNSPort = cfg.DNSPort()
+	request.DNSPort = cfg.Listen.DNSPort
 	request.UID = os.Getuid()
 	receipt, err := netsetup.Containment(request)
 	if err != nil {
@@ -598,7 +606,7 @@ func capture(cfg *config.Config, receipt *netsetup.Receipt, server *proxy.Server
 var errResolver = errors.New("dns resolver")
 
 // nameResolver builds the allowlist resolver. It returns nil when
-// listen.dns is unset.
+// listen.dns_port is unset.
 //
 // The names that resolve come from the document alone. The resolvers an
 // allowed name is forwarded to come from dns.forward_to, or from the
@@ -606,7 +614,7 @@ var errResolver = errors.New("dns resolver")
 func nameResolver(cfg *config.Config, receipt *netsetup.Receipt, sink audit.Sink, logger *slog.Logger) (
 	*dns.Resolver, error,
 ) {
-	if cfg.Listen.DNS == "" {
+	if cfg.Listen.DNSPort == 0 {
 		return nil, nil //nolint:nilnil // no resolver is a posture, not a failure
 	}
 	forward := cfg.DNS.ForwardTo
@@ -614,13 +622,13 @@ func nameResolver(cfg *config.Config, receipt *netsetup.Receipt, sink audit.Sink
 		forward = receipt.DNSServers
 	}
 	if len(forward) == 0 {
-		return nil, fmt.Errorf("%w: listen.dns is set and no resolver is named. Set dns.forward_to, or run "+
+		return nil, fmt.Errorf("%w: listen.dns_port is set and no resolver is named. Set dns.forward_to, or run "+
 			"the init container so the receipt names the cluster resolvers", errResolver)
 	}
 	resolver, err := dns.New(dns.Options{
 		Hosts:          cfg.DNSHosts(),
 		Forward:        forward,
-		Listen:         cfg.Listen.DNS,
+		Port:           cfg.Listen.DNSPort,
 		Audit:          sink,
 		Logger:         logger,
 		MaxConnections: cfg.Limits.MaxDNSConnections,
@@ -629,7 +637,7 @@ func nameResolver(cfg *config.Config, receipt *netsetup.Receipt, sink audit.Sink
 		return nil, fmt.Errorf("%w: %w", errResolver, err)
 	}
 	logger.Info("name resolution in force",
-		slog.String("listen", cfg.Listen.DNS),
+		slog.Int("port", cfg.Listen.DNSPort),
 		slog.Any("resolves", resolver.Hosts()),
 		slog.Any("forward_to", resolver.Forward()))
 	return resolver, nil
@@ -727,7 +735,7 @@ func (p *process) resolverSockets(ctx context.Context) (dns.Sockets, error) {
 	if p.resolver == nil {
 		return dns.Sockets{}, nil
 	}
-	sockets, err := dns.Listen(ctx, p.cfg.Listen.DNS)
+	sockets, err := dns.Listen(ctx, p.cfg.Listen.DNSPort)
 	if err != nil {
 		return dns.Sockets{}, fmt.Errorf("%w: %w", errResolver, err)
 	}

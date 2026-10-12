@@ -81,7 +81,7 @@ program rules or read another process.
         add: ["NET_BIND_SERVICE"]
 
 The capability lets the proxy bind `listen.transparent_port` and
-`listen.dns`, both below 1024. The default redirect port is 1015 and the
+`listen.dns_port`, both below 1024. The default redirect port is 1015 and the
 resolver port is 53. An unprivileged workload cannot bind a port below
 1024, so it cannot take over either port during a sidecar restart.
 
@@ -177,13 +177,14 @@ variables. The defaults a pod has to agree with are in
 `egress-proxy settings` under `netsetup`: the proxy uid, the redirect port,
 the captured ports, the DNS port and the receipt path. `--proxy-uid` and
 the proxy container's `runAsUser` name the same uid, `--redirect-port` and
-`listen.transparent_port` name the same port, and `--dns-port` and `listen.dns`
-name the same port. The proxy refuses to start when any of the three
+`listen.transparent_port` name the same port, and `--dns-port` and
+`listen.dns_port` name the same port. The proxy refuses to start when any of the three
 disagree.
 
 ## Name resolution
 
-The init container redirects UDP and TCP port 53 to `listen.dns`. The
+The init container redirects UDP and TCP port 53 to `listen.dns_port` on
+loopback. The
 filter chain does not accept DNS to any resolver. Every lookup the workload
 makes reaches the sidecar's resolver, whatever resolver the client named.
 A query the redirect missed reaches the terminal DROP.
@@ -201,7 +202,7 @@ start, because it would forward every allowed name to itself.
 **The resolvers the sidecar forwards to** come from the receipt, which
 holds what the init container read from `/etc/resolv.conf`. To name them
 another way, set `dns.forward_to` on the proxy. To run without a resolver,
-leave `listen.dns` unset and run the init container with `--dns-port 0`.
+leave `listen.dns_port` unset and run the init container with `--dns-port 0`.
 
 A name in `/etc/hosts` does not need a resolver. Debian
 resolves `files` before `dns`, so a `hostAliases` entry still works.
@@ -287,10 +288,10 @@ inside the container.
   that says `CAP_NET_ADMIN` was kept, and one that any other uid can write. It also
   refuses to serve while this process holds `CAP_NET_ADMIN`.
 - **The resolver's forward targets.** The proxy refuses a `dns.forward_to`
-  entry that names its own listen address, which would forward every
-  allowed name to itself, and one that is a name rather than an address.
-  With `listen.dns` set and no resolver named anywhere, it refuses to
-  start.
+  entry that names 127.0.0.1 or ::1 at its own port, which would forward
+  every allowed name to itself, and one that is a name rather than an
+  address. With `listen.dns_port` set and no resolver named anywhere, it
+  refuses to start.
 - **`net.ipv4.ip_unprivileged_port_start`.** The redirect target and the
   resolver port are below 1024 so the workload cannot bind either. That
   rests on the sysctl, so the proxy reads it at start-up rather than

@@ -82,10 +82,10 @@ type Options struct {
 	// wins. At least one is required: with none, every allowed name would
 	// fail.
 	Forward []string
-	// Listen is the address the resolver binds. New refuses a Forward
-	// entry that names it, which would make the resolver forward to
-	// itself.
-	Listen string
+	// Port is the port the resolver binds on 127.0.0.1 and ::1. New
+	// refuses a Forward entry that names one of those addresses at this
+	// port, which would make the resolver forward to itself.
+	Port int
 	// Audit receives one record per query. It is required: a query that
 	// leaves no record is a decision no operator can read.
 	Audit audit.Sink
@@ -117,13 +117,13 @@ type Resolver struct {
 
 // New builds a resolver. It refuses a configuration that could not answer
 // or could not be bounded: no audit sink, no resolver to forward to, a
-// forward target that is not an address, one that names the listen
+// forward target that is not an address, one that names the resolver's own
 // address, or no connection cap.
 func New(opts Options) (*Resolver, error) {
 	if opts.Audit == nil {
 		return nil, fmt.Errorf("%w: no audit sink, and a query that leaves no record is unreadable", ErrOptions)
 	}
-	forward, err := forwardTargets(opts.Forward, opts.Listen)
+	forward, err := forwardTargets(opts.Forward, opts.Port)
 	if err != nil {
 		return nil, err
 	}
@@ -445,15 +445,15 @@ func datagramLimit(query *mdns.Msg) int {
 }
 
 // forwardTargets parses the resolvers and refuses one that is this
-// resolver: a target on the listen port at an address Listen binds.
+// resolver: a target at listenPort on an address Listen binds.
 //
 // Each target is an IP address with an optional port. A hostname is
 // refused, because looking it up would need a resolver.
-func forwardTargets(targets []string, listen string) ([]string, error) {
+func forwardTargets(targets []string, listenPort int) ([]string, error) {
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("%w: no resolver to forward to, so every allowed name would fail", ErrOptions)
 	}
-	bound, listenPort := listenAddrs(listen)
+	bound := loopback()
 	out := make([]string, 0, len(targets))
 	for _, target := range targets {
 		addr, port, err := parseTarget(target)
@@ -461,8 +461,8 @@ func forwardTargets(targets []string, listen string) ([]string, error) {
 			return nil, err
 		}
 		if port == listenPort && slices.Contains(bound, addr) {
-			return nil, fmt.Errorf("%w: the resolver listens on %s and forwards to %s, so it would forward "+
-				"every allowed name to itself. Name the cluster resolver instead", ErrOptions, listen, target)
+			return nil, fmt.Errorf("%w: the resolver listens on port %d and forwards to %s, so it would forward "+
+				"every allowed name to itself. Name the cluster resolver instead", ErrOptions, listenPort, target)
 		}
 		out = append(out, net.JoinHostPort(addr.String(), strconv.Itoa(port)))
 	}

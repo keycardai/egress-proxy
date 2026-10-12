@@ -343,50 +343,42 @@ func TestNewRefusesAnUnusableResolver(t *testing.T) {
 	}{
 		{
 			name:    "no audit sink",
-			options: dns.Options{Forward: []string{"10.43.0.10"}, Listen: "127.0.0.1:53"},
+			options: dns.Options{Forward: []string{"10.43.0.10"}, Port: 53},
 			want:    "no audit sink",
 		},
 		{
 			name:    "no resolver to forward to",
-			options: dns.Options{Audit: &recordingSink{}, Listen: "127.0.0.1:53"},
+			options: dns.Options{Audit: &recordingSink{}, Port: 53},
 			want:    "no resolver to forward to",
 		},
 		{
-			name: "a forward target that is the listen address",
+			name: "a forward target on 127.0.0.1 at the listen port",
 			options: dns.Options{
-				Audit: &recordingSink{}, Listen: "127.0.0.1:53", Forward: []string{"127.0.0.1:53"},
+				Audit: &recordingSink{}, Port: 53, Forward: []string{"127.0.0.1:53"},
 				MaxConnections: fixtureMaxConnections,
 			},
 			want: "would forward every allowed name to itself",
 		},
 		{
-			name: "a forward target that is the listen address, IPv4-mapped",
+			name: "a forward target on 127.0.0.1 at the listen port, IPv4-mapped",
 			options: dns.Options{
-				Audit: &recordingSink{}, Listen: "127.0.0.1:53", Forward: []string{"[::ffff:127.0.0.1]:53"},
+				Audit: &recordingSink{}, Port: 53, Forward: []string{"[::ffff:127.0.0.1]:53"},
 				MaxConnections: fixtureMaxConnections,
 			},
 			want: "would forward every allowed name to itself",
 		},
 		{
-			name: "an unspecified listener and a target on 127.0.0.1 with the default port",
+			name: "a forward target on 127.0.0.1 with the default port",
 			options: dns.Options{
-				Audit: &recordingSink{}, Listen: "0.0.0.0:53", Forward: []string{"127.0.0.1"},
+				Audit: &recordingSink{}, Port: 53, Forward: []string{"127.0.0.1"},
 				MaxConnections: fixtureMaxConnections,
 			},
 			want: "would forward every allowed name to itself",
 		},
 		{
-			name: "a listener with no host and a target on ::1",
+			name: "a forward target on ::1 at the listen port",
 			options: dns.Options{
-				Audit: &recordingSink{}, Listen: ":53", Forward: []string{"[::1]:53"},
-				MaxConnections: fixtureMaxConnections,
-			},
-			want: "would forward every allowed name to itself",
-		},
-		{
-			name: "an unspecified IPv6 listener and a target on 127.0.0.1",
-			options: dns.Options{
-				Audit: &recordingSink{}, Listen: "[::]:53", Forward: []string{"127.0.0.1:53"},
+				Audit: &recordingSink{}, Port: 15353, Forward: []string{"10.43.0.10", "[::1]:15353"},
 				MaxConnections: fixtureMaxConnections,
 			},
 			want: "would forward every allowed name to itself",
@@ -394,14 +386,14 @@ func TestNewRefusesAnUnusableResolver(t *testing.T) {
 		{
 			name: "a forward target that is a name",
 			options: dns.Options{
-				Audit: &recordingSink{}, Listen: "127.0.0.1:53", Forward: []string{"kube-dns.kube-system"},
+				Audit: &recordingSink{}, Port: 53, Forward: []string{"kube-dns.kube-system"},
 			},
 			want: "is not an IP address or address:port",
 		},
 		{
 			name: "no connection cap",
 			options: dns.Options{
-				Audit: &recordingSink{}, Listen: "127.0.0.1:53", Forward: []string{"10.43.0.10"},
+				Audit: &recordingSink{}, Port: 53, Forward: []string{"10.43.0.10"},
 			},
 			want: "MaxConnections must be at least 1",
 		},
@@ -424,41 +416,35 @@ func TestNewAcceptsAForwardTargetThatIsNotThisResolver(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
-		listen  string
+		port    int
 		forward []string
 		// want is Forward(), with every port explicit.
 		want []string
 	}{
 		{
 			name:    "a loopback target on another port",
-			listen:  "127.0.0.1:53",
-			forward: []string{"127.0.0.1:15353", "10.43.0.10"},
-			want:    []string{"127.0.0.1:15353", "10.43.0.10:53"},
+			port:    53,
+			forward: []string{"127.0.0.1:15353", "[::1]:15353", "10.43.0.10"},
+			want:    []string{"127.0.0.1:15353", "[::1]:15353", "10.43.0.10:53"},
 		},
 		{
-			name:    "a cluster resolver on the listen port of an unspecified listener",
-			listen:  "0.0.0.0:53",
-			forward: []string{"10.43.0.10"},
-			want:    []string{"10.43.0.10:53"},
-		},
-		{
-			name:    "a cluster resolver on the listen port of a listener with no host",
-			listen:  ":53",
+			name:    "a cluster resolver on the listen port",
+			port:    53,
 			forward: []string{"10.43.0.10:53", "[fd00:10:43::a]:53"},
 			want:    []string{"10.43.0.10:53", "[fd00:10:43::a]:53"},
 		},
 		{
-			name:    "::1 on the listen port of an IPv4 literal listener",
-			listen:  "127.0.0.1:53",
-			forward: []string{"[::1]:53"},
-			want:    []string{"[::1]:53"},
+			name:    "a cluster resolver with the default port",
+			port:    53,
+			forward: []string{"10.43.0.10"},
+			want:    []string{"10.43.0.10:53"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			resolver, err := dns.New(dns.Options{
-				Audit: &recordingSink{}, Listen: tc.listen, Forward: tc.forward,
+				Audit: &recordingSink{}, Port: tc.port, Forward: tc.forward,
 				MaxConnections: fixtureMaxConnections,
 			})
 			require.NoError(t, err, "build the resolver")
@@ -470,7 +456,7 @@ func TestNewAcceptsAForwardTargetThatIsNotThisResolver(t *testing.T) {
 func TestHostsListsWhatResolves(t *testing.T) {
 	t.Parallel()
 	resolver, err := dns.New(dns.Options{
-		Audit: &recordingSink{}, Listen: "127.0.0.1:53", Forward: []string{"10.43.0.10"},
+		Audit: &recordingSink{}, Port: 53, Forward: []string{"10.43.0.10"},
 		Hosts: []string{"B.example.com", "a.example.com", "", "  "}, MaxConnections: fixtureMaxConnections,
 	})
 	require.NoError(t, err, "build the resolver")
@@ -478,149 +464,40 @@ func TestHostsListsWhatResolves(t *testing.T) {
 		"an empty host names nothing and a host is held in lowercase")
 }
 
-func TestListenBindsLoopbackOnBothTransports(t *testing.T) {
-	t.Parallel()
-	address, sockets := listenLoopback(t)
-	t.Cleanup(func() { _ = sockets.Close() })
-	_, portText, err := net.SplitHostPort(address)
-	require.NoError(t, err, "split %s", address)
-	port, err := strconv.Atoi(portText)
-	require.NoError(t, err, "read the port of %s", address)
-
-	require.Len(t, sockets.Packet, 1, "one UDP socket for the literal address")
-	require.Len(t, sockets.Stream, 1, "one TCP socket for the literal address")
-	assert.Equal(t, "127.0.0.1:"+strconv.Itoa(port), sockets.Packet[0].LocalAddr().String(), "the UDP address")
-	assert.Equal(t, "127.0.0.1:"+strconv.Itoa(port), sockets.Stream[0].Addr().String(), "the TCP address")
-	assert.Equal(t, port, dns.Port("127.0.0.1:"+strconv.Itoa(port)), "the port the containment check compares")
-	assert.Equal(t, 0, dns.Port(""), "an address that runs no resolver names no port")
-}
-
-func TestListenRefusals(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		address     string
-		want        string
-		notLoopback bool
-	}{
-		{name: "no port", address: "127.0.0.1", want: "is not host:port"},
-		{name: "a port outside the range", address: "127.0.0.1:70000", want: "does not name a port in 1-65535"},
-		{name: "a port that is not a number", address: "127.0.0.1:domain", want: "does not name a port in 1-65535"},
-		{
-			name: "a pod IP", address: net.JoinHostPort("10.0.0.5", "53"),
-			want: `listen.dns "10.0.0.5:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "a private address", address: net.JoinHostPort("192.168.1.10", "53"),
-			want: `listen.dns "192.168.1.10:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "a public address", address: net.JoinHostPort("203.0.113.10", "53"),
-			want: `listen.dns "203.0.113.10:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "an IPv4 link-local address", address: net.JoinHostPort("169.254.1.1", "53"),
-			want: `listen.dns "169.254.1.1:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "an IPv6 unique local address", address: net.JoinHostPort("fd00::1", "53"),
-			want: `listen.dns "[fd00::1]:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "an IPv6 global address", address: net.JoinHostPort("2001:db8::1", "53"),
-			want: `listen.dns "[2001:db8::1]:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "an IPv6 link-local address", address: net.JoinHostPort("fe80::1", "53"),
-			want: `listen.dns "[fe80::1]:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "an IPv4-mapped unspecified address", address: net.JoinHostPort("::ffff:0.0.0.0", "53"),
-			want: `listen.dns "[::ffff:0.0.0.0]:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "another 127/8 address", address: net.JoinHostPort("127.0.0.2", "53"),
-			want: `listen.dns "127.0.0.2:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "a zoned IPv6 loopback address", address: net.JoinHostPort("::1%lo", "53"),
-			want: `listen.dns "[::1%lo]:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "a zoned IPv4-mapped loopback address", address: net.JoinHostPort("::ffff:127.0.0.1%lo", "53"),
-			want: `listen.dns "[::ffff:127.0.0.1%lo]:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "a hostname", address: net.JoinHostPort("dns.example", "53"),
-			want: `listen.dns "dns.example:53": not a loopback address`, notLoopback: true,
-		},
-		{
-			name: "localhost", address: net.JoinHostPort("localhost", "53"),
-			want: `listen.dns "localhost:53": not a loopback address`, notLoopback: true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			sockets, err := dns.Listen(t.Context(), tc.address)
-			require.ErrorIs(t, err, dns.ErrListen, "the refusal is a listener failure")
-			require.ErrorContains(t, err, tc.want, "the refusal names what is wrong")
-			if tc.notLoopback {
-				require.ErrorIs(t, err, dns.ErrNotLoopback, "the refusal is about the host")
-			}
-			assert.Empty(t, sockets.Packet, "a refused address binds no socket")
-			assert.Empty(t, sockets.Stream, "a refused address binds no socket")
-		})
-	}
-}
-
-// TestListenBindsLoopbackOnly covers the hosts Listen accepts and the
-// addresses each one binds. A host without a family binds both loopback
-// addresses. The IPv6 rows depend on the host having ::1.
+// TestListenBindsLoopbackOnly pins the addresses the resolver binds:
+// 127.0.0.1 and ::1 at the port, on both transports, and nothing else. The
+// ::1 pair is expected only where the host has ::1.
 func TestListenBindsLoopbackOnly(t *testing.T) {
 	t.Parallel()
-	ipv6 := hasIPv6Loopback(t)
-	both := []string{"127.0.0.1"}
-	if ipv6 {
-		both = append(both, "::1")
+	_, port, sockets := listenLoopback(t)
+	t.Cleanup(func() { _ = sockets.Close() })
+	want := []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	if hasIPv6Loopback(t) {
+		want = append(want, net.JoinHostPort("::1", strconv.Itoa(port)))
 	}
-	tests := []struct {
-		name      string
-		host      string
-		want      []string
-		needsIPv6 bool
-	}{
-		{name: "an empty host", host: "", want: both},
-		{name: "the IPv4 unspecified address", host: "0.0.0.0", want: both},
-		{name: "the IPv6 unspecified address", host: "::", want: both},
-		{name: "the IPv4 loopback address", host: "127.0.0.1", want: []string{"127.0.0.1"}},
-		{name: "the IPv6 loopback address", host: "::1", want: []string{"::1"}, needsIPv6: true},
-		{name: "IPv4-mapped loopback", host: "::ffff:127.0.0.1", want: []string{"127.0.0.1"}},
+	packet := make([]string, 0, len(sockets.Packet))
+	for _, conn := range sockets.Packet {
+		packet = append(packet, conn.LocalAddr().String())
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	stream := make([]string, 0, len(sockets.Stream))
+	for _, listener := range sockets.Stream {
+		stream = append(stream, listener.Addr().String())
+	}
+	assert.Equal(t, want, packet, "the UDP addresses")
+	assert.Equal(t, want, stream, "the TCP addresses")
+}
+
+func TestListenRefusesAPortOutsideTheRange(t *testing.T) {
+	t.Parallel()
+	for _, port := range []int{-1, 0, 65536} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
 			t.Parallel()
-			if tc.needsIPv6 && !ipv6 {
-				t.Skip("this host has no ::1")
-			}
-			address, sockets := listenOn(t, tc.host, len(tc.want))
-			t.Cleanup(func() { _ = sockets.Close() })
-			_, port, err := net.SplitHostPort(address)
-			require.NoError(t, err, "split %s", address)
-			want := make([]string, 0, len(tc.want))
-			for _, host := range tc.want {
-				want = append(want, net.JoinHostPort(host, port))
-			}
-			packet := make([]string, 0, len(sockets.Packet))
-			for _, conn := range sockets.Packet {
-				packet = append(packet, conn.LocalAddr().String())
-			}
-			stream := make([]string, 0, len(sockets.Stream))
-			for _, listener := range sockets.Stream {
-				stream = append(stream, listener.Addr().String())
-			}
-			assert.Equal(t, want, packet, "the UDP addresses")
-			assert.Equal(t, want, stream, "the TCP addresses")
+			sockets, err := dns.Listen(t.Context(), port)
+			require.ErrorIs(t, err, dns.ErrListen, "the refusal is a listener failure")
+			require.EqualError(t, err, "dns listener: port "+strconv.Itoa(port)+" is outside 1-65535",
+				"the refusal names the port")
+			assert.Empty(t, sockets.Packet, "a refused port binds no socket")
+			assert.Empty(t, sockets.Stream, "a refused port binds no socket")
 		})
 	}
 }
@@ -629,9 +506,9 @@ func TestServeAnswersOnTheBoundSocketsAndStops(t *testing.T) {
 	t.Parallel()
 	upstream := startUpstream(t)
 	sink := &recordingSink{}
-	address, sockets := listenLoopback(t)
+	address, port, sockets := listenLoopback(t)
 	resolver, err := dns.New(dns.Options{
-		Hosts: fixtureHosts, Forward: []string{upstream.address}, Listen: address, Audit: sink,
+		Hosts: fixtureHosts, Forward: []string{upstream.address}, Port: port, Audit: sink,
 		MaxConnections: fixtureMaxConnections,
 	})
 	require.NoError(t, err, "build the resolver")
@@ -672,9 +549,9 @@ func TestServeReturnsWhenTheContextIsAlreadyCancelled(t *testing.T) {
 	t.Parallel()
 	upstream := startUpstream(t)
 	for run := range shutdownRaces {
-		address, sockets := listenLoopback(t)
+		_, port, sockets := listenLoopback(t)
 		resolver, err := dns.New(dns.Options{
-			Hosts: fixtureHosts, Forward: []string{upstream.address}, Listen: address, Audit: &recordingSink{},
+			Hosts: fixtureHosts, Forward: []string{upstream.address}, Port: port, Audit: &recordingSink{},
 			MaxConnections: fixtureMaxConnections,
 		})
 		require.NoError(t, err, "build the resolver on run %d", run)
@@ -706,9 +583,9 @@ func TestTheResolverCapsItsTCPConnections(t *testing.T) {
 	t.Parallel()
 	upstream := startUpstream(t)
 	sink := &recordingSink{served: make(chan audit.Record, 4)}
-	address, sockets := listenLoopback(t)
+	address, port, sockets := listenLoopback(t)
 	resolver, err := dns.New(dns.Options{
-		Hosts: fixtureHosts, Forward: []string{upstream.address}, Listen: address, Audit: sink,
+		Hosts: fixtureHosts, Forward: []string{upstream.address}, Port: port, Audit: sink,
 		MaxConnections: 1,
 	})
 	require.NoError(t, err, "build the resolver")
@@ -777,7 +654,7 @@ func newFixture(t *testing.T, hosts []string, adjust ...func(*dns.Options)) *fix
 	opts := dns.Options{
 		Hosts:          hosts,
 		Forward:        []string{upstream.address},
-		Listen:         "127.0.0.1:53",
+		Port:           53,
 		Audit:          sink,
 		Timeout:        waitFor,
 		MaxConnections: fixtureMaxConnections,
@@ -889,7 +766,13 @@ func (u *upstreamResolver) asked(t *testing.T) *mdns.Msg {
 func startUpstream(t *testing.T) *upstreamResolver {
 	t.Helper()
 	upstream := &upstreamResolver{}
-	address, sockets := listenLoopback(t)
+	address, _, sockets := listenLoopback(t)
+	for _, conn := range sockets.Packet[1:] {
+		_ = conn.Close()
+	}
+	for _, listener := range sockets.Stream[1:] {
+		_ = listener.Close()
+	}
 	udp := &mdns.Server{PacketConn: sockets.Packet[0], Handler: upstream, UDPSize: 4096}
 	tcp := &mdns.Server{Listener: sockets.Stream[0], Handler: upstream}
 	go func() { _ = udp.ActivateAndServe() }()
@@ -919,37 +802,35 @@ func closedTarget(t *testing.T) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
 }
 
-// bindAttempts is how many ports listenOn tries.
+// bindAttempts is how many ports listenLoopback tries.
 const bindAttempts = 20
 
-// listenLoopback binds UDP and TCP on one port of 127.0.0.1 and returns the
-// address.
-func listenLoopback(t *testing.T) (string, dns.Sockets) {
+// listenLoopback calls Listen on a free port and returns the 127.0.0.1
+// address, the port and the sockets. Another test can hold the port over
+// TCP, which fails the bind, or on ::1, which makes Listen drop the IPv6
+// pair. listenLoopback tries another port until Listen returns a pair on
+// each family this host has.
+func listenLoopback(t *testing.T) (string, int, dns.Sockets) {
 	t.Helper()
-	return listenOn(t, "127.0.0.1", 1)
-}
-
-// listenOn calls Listen with a host and a free port and returns the
-// address. Another test can hold the port over TCP, which fails the bind,
-// or on ::1, which makes Listen drop the IPv6 pair. listenOn tries another
-// port until Listen returns pairs UDP and TCP sockets.
-func listenOn(t *testing.T, host string, pairs int) (string, dns.Sockets) {
-	t.Helper()
+	pairs := 1
+	if hasIPv6Loopback(t) {
+		pairs = 2
+	}
 	for range bindAttempts {
-		address := net.JoinHostPort(host, strconv.Itoa(freePort(t)))
-		sockets, err := dns.Listen(t.Context(), address)
+		port := freePort(t)
+		sockets, err := dns.Listen(t.Context(), port)
 		if errors.Is(err, syscall.EADDRINUSE) {
 			continue
 		}
-		require.NoError(t, err, "bind the resolver sockets on %s", address)
+		require.NoError(t, err, "bind the resolver sockets on port %d", port)
 		if len(sockets.Packet) < pairs {
-			require.NoError(t, sockets.Close(), "release the sockets on %s", address)
+			require.NoError(t, sockets.Close(), "release the sockets on port %d", port)
 			continue
 		}
-		return address, sockets
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), port, sockets
 	}
 	t.Fatalf("no loopback port was free over both UDP and TCP in %d attempts", bindAttempts)
-	return "", dns.Sockets{}
+	return "", 0, dns.Sockets{}
 }
 
 // hasIPv6Loopback reports whether this host can bind ::1.

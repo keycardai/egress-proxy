@@ -13,7 +13,7 @@ listen:
   # answers only the endpoint hosts and the zone host. It forwards to the
   # resolvers the receipt names, which the init container read out of the
   # pod's /etc/resolv.conf.
-  dns: "127.0.0.1:{{ .DNSPort }}"
+  dns_port: {{ .DNSPort }}
 netsetup:
   receipt: "/run/egress/netsetup/netsetup.json"
 ca:
