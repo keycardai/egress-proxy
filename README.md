@@ -1,5 +1,8 @@
 # egress-proxy
 
+> [!WARNING]
+> This project is an early beta preview. It is provided for evaluation and demonstration purposes only, and as a Keycard integration reference. It has not yet had an independent security review.
+
 The Keycard egress proxy intercepts outbound network requests from an untrusted workload controlled by an agent.
 
 It is a forward "man-in-the-middle" (MITM) proxy which terminates TLS and governs outbound connections with Keycard policy, which allows or denies target destinations and replaces placeholder credentials with actual bearer tokens, API keys or other real credentials transparently to the untrusted agent workload.
