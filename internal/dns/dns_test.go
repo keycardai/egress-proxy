@@ -958,16 +958,27 @@ func hasIPv6Loopback(t *testing.T) bool {
 	return true
 }
 
-// freePort returns a port that no UDP socket holds. Nothing reserves it, so
-// a later bind can find it taken.
+// freePort returns a port that is free on 127.0.0.1 over both TCP and UDP,
+// because the resolver binds both. Nothing reserves it, so a later bind can
+// still find it taken.
 func freePort(t *testing.T) int {
 	t.Helper()
-	conn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
-	require.NoError(t, err, "find a free port")
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	require.True(t, ok, "the socket reports a UDP address")
-	require.NoError(t, conn.Close(), "release the port")
-	return addr.Port
+	for range bindAttempts {
+		stream, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp4", "127.0.0.1:0")
+		require.NoError(t, err, "find a free TCP port")
+		addr, ok := stream.Addr().(*net.TCPAddr)
+		require.True(t, ok, "the listener reports a TCP address")
+		packet, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4",
+			net.JoinHostPort("127.0.0.1", strconv.Itoa(addr.Port)))
+		require.NoError(t, stream.Close(), "release the TCP port")
+		if err != nil {
+			continue
+		}
+		require.NoError(t, packet.Close(), "release the UDP port")
+		return addr.Port
+	}
+	t.Fatalf("no port was free on 127.0.0.1 over TCP and UDP in %d attempts", bindAttempts)
+	return 0
 }
 
 // recordingSink keeps every record the resolver wrote. A test that waits
