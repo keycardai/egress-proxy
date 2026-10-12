@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"syscall"
 )
 
 // ErrListen is a set of sockets the resolver could not open.
@@ -20,8 +21,10 @@ var ErrListen = errors.New("dns listener")
 // NEVER bind another address here. The resolver decides what the sandbox
 // can look up and answers no one else.
 //
-// The IPv6 pair is optional. A kernel without IPv6 does not redirect
-// anything to it. The IPv4 pair is required.
+// The IPv6 pair is optional only when the kernel has no IPv6, which
+// socket(2) reports as EAFNOSUPPORT. Such a kernel has no ip6tables ruleset
+// redirecting anything to it. Every other IPv6 error closes the IPv4 pair
+// and fails the call. The IPv4 pair is always required.
 func Listen(ctx context.Context, port int) (Sockets, error) {
 	if port < 1 || port > maxPort {
 		return Sockets{}, fmt.Errorf("%w: port %d is outside 1-%d", ErrListen, port, maxPort)
@@ -32,9 +35,11 @@ func Listen(ctx context.Context, port int) (Sockets, error) {
 		return Sockets{}, err
 	}
 	six, err := bind(ctx, addrs[1], port)
-	if err != nil {
-		//nolint:nilerr // a kernel without IPv6 does not redirect anything to an IPv6 socket
+	if errors.Is(err, syscall.EAFNOSUPPORT) {
 		return sockets, nil
+	}
+	if err != nil {
+		return Sockets{}, errors.Join(err, sockets.Close())
 	}
 	return Sockets{
 		Packet: append(sockets.Packet, six.Packet...),

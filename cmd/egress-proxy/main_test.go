@@ -22,6 +22,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
+	"github.com/keycardai/egress-proxy/internal/dns"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
 	"github.com/keycardai/egress-proxy/internal/proxy"
 	"github.com/keycardai/egress-proxy/internal/transparent"
@@ -373,7 +374,7 @@ func startingProcess(t *testing.T, connectAddr string, transparentPort int, fami
 		cfg:             cfg,
 		logger:          slog.New(slog.DiscardHandler),
 		admin:           adminServer,
-		captureFamilies: families,
+		receiptFamilies: families,
 		certPath:        certPath,
 	}
 	if transparentPort != 0 {
@@ -515,6 +516,77 @@ func TestCaptureFamiliesFollowTheSocketsThatBound(t *testing.T) {
 				"the families the receipt names with no socket")
 		})
 	}
+}
+
+// TestResolverBindsEveryFamilyTheReceiptNames pins the start-up refusal
+// for a resolver that misses a family the redirect covers. The redirect
+// would send that family's queries to a closed port.
+func TestResolverBindsEveryFamilyTheReceiptNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// addresses are the sockets the resolver bound, UDP and TCP on each.
+		addresses []string
+		wantErr   string
+	}{
+		{name: "both families bound", addresses: []string{"127.0.0.1", "::1"}},
+		{
+			name: "ipv4 alone", addresses: []string{"127.0.0.1"},
+			wantErr: "the netsetup receipt names ipv4,ipv6 and the resolver bound ipv4, so the redirect sends ipv6",
+		},
+		{
+			name: "ipv6 alone", addresses: []string{"::1"},
+			wantErr: "the netsetup receipt names ipv4,ipv6 and the resolver bound ipv6, so the redirect sends ipv4",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(resolverDocument), config.Overrides{})
+			require.NoError(t, err, "config.Parse")
+			logger := slog.New(slog.DiscardHandler)
+			resolver, err := nameResolver(cfg, nil, audit.NewJSONSink(io.Discard), logger)
+			require.NoError(t, err, "build the resolver")
+			var opened dns.Sockets
+			proc := &process{
+				cfg: cfg, logger: logger, resolver: resolver,
+				receiptFamilies: []string{"ipv4", "ipv6"},
+				listenResolver: func(ctx context.Context, _ int) (dns.Sockets, error) {
+					opened = boundSockets(ctx, t, tc.addresses)
+					return opened, nil
+				},
+			}
+
+			sockets, err := proc.resolverSockets(t.Context())
+			if tc.wantErr == "" {
+				require.NoError(t, err, "resolverSockets")
+				assert.Equal(t, opened, sockets, "the sockets that bound")
+				require.NoError(t, sockets.Close(), "close the resolver sockets")
+				return
+			}
+			require.ErrorIs(t, err, errResolver, "the refusal is the resolver's")
+			require.ErrorContains(t, err, tc.wantErr, "the refusal names the missing family")
+			assert.Empty(t, sockets.Packet, "a refused bind returns no socket")
+			assert.ErrorIs(t, opened.Close(), net.ErrClosed, "the refusal closed what bound")
+		})
+	}
+}
+
+// boundSockets opens a UDP and a TCP socket on each address at a port the
+// kernel picks, the shape dns.Listen hands the bind.
+func boundSockets(ctx context.Context, t *testing.T, addresses []string) dns.Sockets {
+	t.Helper()
+	var sockets dns.Sockets
+	for _, address := range addresses {
+		hostPort := net.JoinHostPort(address, "0")
+		packet, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", hostPort)
+		require.NoError(t, err, "listen on udp %s", hostPort)
+		stream, err := (&net.ListenConfig{}).Listen(ctx, "tcp", hostPort)
+		require.NoError(t, err, "listen on tcp %s", hostPort)
+		sockets.Packet = append(sockets.Packet, packet)
+		sockets.Stream = append(sockets.Stream, stream)
+	}
+	return sockets
 }
 
 // boundListeners opens one socket per address, the shape transparent.Listen

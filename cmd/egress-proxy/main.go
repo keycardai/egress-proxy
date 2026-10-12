@@ -263,10 +263,14 @@ type process struct {
 	// resolver answers the sandbox's name lookups. It is nil when
 	// listen.dns_port is unset.
 	resolver *dns.Resolver
-	// captureFamilies are the address families the netsetup receipt says
-	// the redirect covers. Every one of them needs a bound capture socket,
-	// or the redirect sends that family nowhere.
-	captureFamilies []string
+	// listenResolver binds the resolver sockets. Nil binds them with
+	// dns.Listen.
+	listenResolver func(ctx context.Context, port int) (dns.Sockets, error)
+	// receiptFamilies are the address families the netsetup receipt says
+	// the rules redirect. The capture and the resolver each need a bound
+	// socket in every one of them, or the redirect sends that family to a
+	// closed port.
+	receiptFamilies []string
 	// certPath is the CA certificate the workload trusts. Readiness checks
 	// that it is on disk.
 	certPath string
@@ -352,7 +356,8 @@ func (p *process) buildFrontends(ctx context.Context, sink audit.Sink) error {
 	if err != nil {
 		return err
 	}
-	if p.transparent, p.captureFamilies, err = capture(p.cfg, receipt, p.server, p.logger); err != nil {
+	p.receiptFamilies = redirectedFamilies(receipt)
+	if p.transparent, err = capture(p.cfg, receipt, p.server, p.logger); err != nil {
 		return err
 	}
 	if p.resolver, err = nameResolver(p.cfg, receipt, sink, p.logger); err != nil {
@@ -566,14 +571,23 @@ func containment(cfg *config.Config, probes netsetup.ContainmentRequest) (*netse
 	return &receipt, nil
 }
 
+// redirectedFamilies is the address families the receipt records, nil
+// without a receipt. The bind compares the capture and resolver sockets
+// against them.
+func redirectedFamilies(receipt *netsetup.Receipt) []string {
+	if receipt == nil {
+		return nil
+	}
+	return receipt.Families
+}
+
 // capture builds the transparent frontend behind a receipt that checked
-// out. It also returns the address families the receipt records, which is
-// what the bind compares the capture sockets against.
+// out.
 func capture(cfg *config.Config, receipt *netsetup.Receipt, server *proxy.Server, logger *slog.Logger) (
-	*transparent.Frontend, []string, error,
+	*transparent.Frontend, error,
 ) {
 	if receipt == nil || cfg.Listen.TransparentPort == 0 {
-		return nil, nil, nil
+		return nil, nil //nolint:nilnil // no transparent frontend is a posture, not a failure
 	}
 	logger.Info("transparent network capture enabled",
 		slog.String("receipt", cfg.Netsetup.Receipt),
@@ -597,9 +611,9 @@ func capture(cfg *config.Config, receipt *netsetup.Receipt, server *proxy.Server
 		IdleTimeout:    cfg.Limits.IdleTimeout.Duration(),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("transparent frontend: %w", err)
+		return nil, fmt.Errorf("transparent frontend: %w", err)
 	}
-	return frontend, receipt.Families, nil
+	return frontend, nil
 }
 
 // errResolver is an allowlist resolver this process refuses to serve.
@@ -731,13 +745,33 @@ func (p *process) bind(ctx context.Context) (net.Listener, []net.Listener, dns.S
 // resolverSockets binds the allowlist resolver, one UDP and one TCP socket
 // per address family. It returns nothing when the process runs no
 // resolver.
+//
+// If a family the receipt names has no bound socket, the proxy refuses to
+// start. Otherwise the redirect would send that family's queries to a
+// closed port.
 func (p *process) resolverSockets(ctx context.Context) (dns.Sockets, error) {
 	if p.resolver == nil {
 		return dns.Sockets{}, nil
 	}
-	sockets, err := dns.Listen(ctx, p.cfg.Listen.DNSPort)
+	listen := p.listenResolver
+	if listen == nil {
+		listen = dns.Listen
+	}
+	sockets, err := listen(ctx, p.cfg.Listen.DNSPort)
+	if errors.Is(err, syscall.EACCES) {
+		return dns.Sockets{}, privilegedPortError(errResolver, err, p.cfg.Listen.DNSPort)
+	}
 	if err != nil {
 		return dns.Sockets{}, fmt.Errorf("%w: %w", errResolver, err)
+	}
+	bound := boundFamilies(sockets.Stream)
+	if missing := missingFamilies(p.receiptFamilies, bound); len(missing) > 0 {
+		return dns.Sockets{}, errors.Join(
+			fmt.Errorf("%w: the netsetup receipt names %s and the resolver bound %s, so the redirect sends %s "+
+				"queries nowhere", errResolver, strings.Join(p.receiptFamilies, ","),
+				strings.Join(bound, ","), strings.Join(missing, ",")),
+			sockets.Close(),
+		)
 	}
 	p.logger.Info("answering name lookups", slog.String("sockets", sockets.Addresses()))
 	return sockets, nil
@@ -763,20 +797,16 @@ func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) 
 	}
 	listeners, err := listen(ctx, p.cfg.Listen.TransparentPort)
 	if errors.Is(err, syscall.EACCES) {
-		return nil, fmt.Errorf("%w: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
-			"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
-			"grants only from the bounding set and, under no_new_privs, only when the process that ran this binary "+
-			"held it. Give the sidecar capabilities.add NET_BIND_SERVICE and make this binary the container "+
-			"entrypoint", errCapture, err, p.cfg.Listen.TransparentPort)
+		return nil, privilegedPortError(errCapture, err, p.cfg.Listen.TransparentPort)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errCapture, err)
 	}
 	bound := boundFamilies(listeners)
-	if missing := missingFamilies(p.captureFamilies, bound); len(missing) > 0 {
+	if missing := missingFamilies(p.receiptFamilies, bound); len(missing) > 0 {
 		return nil, errors.Join(
 			fmt.Errorf("%w: the netsetup receipt names %s and the capture bound %s, so the redirect sends %s nowhere",
-				errCapture, strings.Join(p.captureFamilies, ","),
+				errCapture, strings.Join(p.receiptFamilies, ","),
 				strings.Join(bound, ","), strings.Join(missing, ",")),
 			closeAll(listeners),
 		)
@@ -785,6 +815,16 @@ func (p *process) captureListeners(ctx context.Context) ([]net.Listener, error) 
 		slog.String("transparent", transparent.Addresses(listeners)),
 		slog.Any("families", bound))
 	return listeners, nil
+}
+
+// privilegedPortError explains an EACCES from binding a port below
+// net.ipv4.ip_unprivileged_port_start.
+func privilegedPortError(surface, err error, port int) error {
+	return fmt.Errorf("%w: %w. Port %d is below net.ipv4.ip_unprivileged_port_start, "+
+		"so binding it needs CAP_NET_BIND_SERVICE. This binary holds it as a file capability, which the kernel "+
+		"grants only from the bounding set and, under no_new_privs, only when the process that ran this binary "+
+		"held it. Give the sidecar capabilities.add NET_BIND_SERVICE and make this binary the container "+
+		"entrypoint", surface, err, port)
 }
 
 // boundFamilies names the address families a set of listeners covers, in

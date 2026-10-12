@@ -446,7 +446,10 @@ func datagramLimit(query *mdns.Msg) int {
 
 // forwardTargets parses the resolvers and refuses one that is this
 // resolver: a target at listenPort on an address Listen binds, or on an
-// unspecified address, which the kernel delivers to the same sockets.
+// unspecified address, which the kernel delivers to the same sockets. The
+// comparison drops the zone, because Linux ignores the zone of an address
+// that is not link-local. The target keeps its zone, so a link-local
+// resolver such as fe80::1%eth0 is still dialled on its interface.
 //
 // Each target is an IP address with an optional port. A hostname is
 // refused, because looking it up would need a resolver.
@@ -461,7 +464,8 @@ func forwardTargets(targets []string, listenPort int) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if port == listenPort && (slices.Contains(bound, addr) || addr.IsUnspecified()) {
+		unzoned := addr.WithZone("")
+		if port == listenPort && (slices.Contains(bound, unzoned) || unzoned.IsUnspecified()) {
 			return nil, fmt.Errorf("%w: the resolver listens on port %d and forwards to %s, so it would forward "+
 				"every allowed name to itself. Name the cluster resolver instead", ErrOptions, listenPort, target)
 		}

@@ -400,6 +400,22 @@ func TestNewRefusesAnUnusableResolver(t *testing.T) {
 			want: "would forward every allowed name to itself",
 		},
 		{
+			name: "a zoned forward target on ::1 at the listen port",
+			options: dns.Options{
+				Audit: &recordingSink{}, Port: 15353, Forward: []string{"[::1%lo0]:15353"},
+				MaxConnections: fixtureMaxConnections,
+			},
+			want: "would forward every allowed name to itself",
+		},
+		{
+			name: "a zoned forward target on :: at the listen port",
+			options: dns.Options{
+				Audit: &recordingSink{}, Port: 15353, Forward: []string{"[::%lo]:15353"},
+				MaxConnections: fixtureMaxConnections,
+			},
+			want: "would forward every allowed name to itself",
+		},
+		{
 			name: "a forward target that is a name",
 			options: dns.Options{
 				Audit: &recordingSink{}, Port: 53, Forward: []string{"kube-dns.kube-system"},
@@ -448,6 +464,12 @@ func TestNewAcceptsAForwardTargetThatIsNotThisResolver(t *testing.T) {
 			port:    53,
 			forward: []string{"10.43.0.10:53", "[fd00:10:43::a]:53"},
 			want:    []string{"10.43.0.10:53", "[fd00:10:43::a]:53"},
+		},
+		{
+			name:    "a zoned link-local resolver on the listen port",
+			port:    53,
+			forward: []string{"[fe80::1%eth0]:53", "fe80::2%eth0"},
+			want:    []string{"[fe80::1%eth0]:53", "[fe80::2%eth0]:53"},
 		},
 		{
 			name:    "a cluster resolver with the default port",
@@ -501,6 +523,44 @@ func TestListenBindsLoopbackOnly(t *testing.T) {
 	}
 	assert.Equal(t, want, packet, "the UDP addresses")
 	assert.Equal(t, want, stream, "the TCP addresses")
+}
+
+// TestListenFailsWhenIPv6IsBusy holds the port on ::1 before Listen runs.
+// Only a kernel without IPv6 may leave the ::1 pair out, so Listen returns
+// the error and releases the IPv4 pair it opened.
+func TestListenFailsWhenIPv6IsBusy(t *testing.T) {
+	t.Parallel()
+	if !hasIPv6Loopback(t) {
+		t.Skip("this host has no ::1")
+	}
+	port, held := holdIPv6Port(t)
+	t.Cleanup(func() { _ = held.Close() })
+
+	sockets, err := dns.Listen(t.Context(), port)
+	require.ErrorIs(t, err, dns.ErrListen, "the refusal is a listener failure")
+	require.ErrorIs(t, err, syscall.EADDRINUSE, "the ::1 error is returned")
+	assert.Empty(t, sockets.Packet, "a failed Listen returns no socket")
+	assert.Empty(t, sockets.Stream, "a failed Listen returns no socket")
+	reclaimed, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4",
+		net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	require.NoError(t, err, "the failed Listen left the IPv4 socket open on port %d", port)
+	require.NoError(t, reclaimed.Close(), "close the reclaimed IPv4 socket")
+}
+
+// holdIPv6Port binds a UDP socket on ::1 at a port that is free on
+// 127.0.0.1.
+func holdIPv6Port(t *testing.T) (int, net.PacketConn) {
+	t.Helper()
+	for range bindAttempts {
+		port := freePort(t)
+		conn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp6",
+			net.JoinHostPort("::1", strconv.Itoa(port)))
+		if err == nil {
+			return port, conn
+		}
+	}
+	t.Fatalf("no port was free on ::1 in %d attempts", bindAttempts)
+	return 0, nil
 }
 
 func TestListenRefusesAPortOutsideTheRange(t *testing.T) {
@@ -823,15 +883,9 @@ const bindAttempts = 20
 
 // listenLoopback calls Listen on a free port and returns the 127.0.0.1
 // address, the port and the sockets. Another test can hold the port over
-// TCP, which fails the bind, or on ::1, which makes Listen drop the IPv6
-// pair. listenLoopback tries another port until Listen returns a pair on
-// each family this host has.
+// TCP or on ::1, which fails the bind, so listenLoopback tries another port.
 func listenLoopback(t *testing.T) (string, int, dns.Sockets) {
 	t.Helper()
-	pairs := 1
-	if hasIPv6Loopback(t) {
-		pairs = 2
-	}
 	for range bindAttempts {
 		port := freePort(t)
 		sockets, err := dns.Listen(t.Context(), port)
@@ -839,13 +893,9 @@ func listenLoopback(t *testing.T) (string, int, dns.Sockets) {
 			continue
 		}
 		require.NoError(t, err, "bind the resolver sockets on port %d", port)
-		if len(sockets.Packet) < pairs {
-			require.NoError(t, sockets.Close(), "release the sockets on port %d", port)
-			continue
-		}
 		return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), port, sockets
 	}
-	t.Fatalf("no loopback port was free over both UDP and TCP in %d attempts", bindAttempts)
+	t.Fatalf("no port was free on 127.0.0.1 and ::1 over UDP and TCP in %d attempts", bindAttempts)
 	return "", 0, dns.Sockets{}
 }
 
