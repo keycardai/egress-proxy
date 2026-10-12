@@ -64,7 +64,8 @@ reader for its input, so hashing a file path leaks nothing.
 From 1.0, the schema grows by adding keys. The proxy does not rename or
 repurpose keys, and every earlier example document continues to parse from
 `internal/config/testdata/compat`. Before 1.0, a minor release may break the
-schema, and its release notes say what broke.
+schema. The pull request that breaks it says what broke, and its `!` title
+lists the change under breaking changes in `CHANGELOG.md`.
 
 ## Keys
 
@@ -176,7 +177,7 @@ refused where `upstream.example` resolves.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `forward_to` | from the receipt | `--dns-forward-to` (repeatable), `EGRESS_PROXY_DNS_FORWARD_TO` (comma-separated) | The cluster resolvers an allowed name goes to, each an address with an optional port that defaults to 53. They are tried in order and the first answer wins. When unset, the proxy reads them from the netsetup receipt, which holds what the init container read from `/etc/resolv.conf`. Name each resolver by IP address. The proxy refuses a hostname, because looking it up would need a resolver. It refuses a target on 127.0.0.1 or ::1 at `listen.dns_port`, which would forward every allowed name to itself. It also refuses this setting without `listen.dns_port`, because nothing would read it. |
+| `forward_to` | from the receipt | `--dns-forward-to` (repeatable), `EGRESS_PROXY_DNS_FORWARD_TO` (comma-separated) | The cluster resolvers an allowed name goes to, each an address with an optional port that defaults to 53. They are tried in order and the first answer wins. When unset, the proxy reads them from the netsetup receipt, which holds what the init container read from `/etc/resolv.conf`. Name each resolver by IP address. The proxy refuses a hostname, because looking it up would need a resolver. It refuses a target on 127.0.0.1, ::1 or an unspecified address at `listen.dns_port`, which would forward every allowed name to itself. It also refuses this setting without `listen.dns_port`, because nothing would read it. |
 
 A query no resolver answered gets `SERVFAIL` and an `upstream_failed`
 record. A message that is not one lookup gets `FORMERR` and a

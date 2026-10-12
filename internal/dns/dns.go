@@ -445,7 +445,8 @@ func datagramLimit(query *mdns.Msg) int {
 }
 
 // forwardTargets parses the resolvers and refuses one that is this
-// resolver: a target at listenPort on an address Listen binds.
+// resolver: a target at listenPort on an address Listen binds, or on an
+// unspecified address, which the kernel delivers to the same sockets.
 //
 // Each target is an IP address with an optional port. A hostname is
 // refused, because looking it up would need a resolver.
@@ -460,7 +461,7 @@ func forwardTargets(targets []string, listenPort int) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if port == listenPort && slices.Contains(bound, addr) {
+		if port == listenPort && (slices.Contains(bound, addr) || addr.IsUnspecified()) {
 			return nil, fmt.Errorf("%w: the resolver listens on port %d and forwards to %s, so it would forward "+
 				"every allowed name to itself. Name the cluster resolver instead", ErrOptions, listenPort, target)
 		}

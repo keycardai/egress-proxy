@@ -365,13 +365,11 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 		name string
 		doc  string
 		want []string
-		port int
 	}{
 		{
 			name: "the endpoint hosts alone when the document names no zone",
 			doc:  minimal + "listen:\n  dns_port: 53\ndns:\n  forward_to: [\"10.43.0.10\"]\n",
 			want: []string{"pypi.org"},
-			port: 53,
 		},
 		{
 			name: "the endpoint hosts and the zone host",
@@ -390,7 +388,6 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
 			require.NoError(t, err, "Parse:\n%s", tc.doc)
 			assert.Equal(t, tc.want, cfg.DNSHosts(), "the names the resolver answers for")
-			assert.Equal(t, tc.port, cfg.Listen.DNSPort, "the port the containment check compares")
 		})
 	}
 }

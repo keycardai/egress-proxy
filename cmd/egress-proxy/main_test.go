@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/keycardai/egress-proxy/internal/admin"
+	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
 	"github.com/keycardai/egress-proxy/internal/netsetup"
@@ -396,6 +397,37 @@ const bindDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 const resolverDocument = "version: 1\nsandbox:\n  id: bind-test\n" +
 	"listen:\n  connect: 127.0.0.1:0\n  dns_port: 53\n" +
 	"dns:\n  forward_to: [\"10.43.0.10\"]\nendpoints:\n  - url: https://example.com/\n"
+
+// TestDNSInfoReportsTheResolverPort pins the dns object /info serves: a port
+// of 0 when no resolver runs, and listen.dns_port when one does.
+func TestDNSInfoReportsTheResolverPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		document string
+		want     map[string]any
+	}{
+		{name: "no resolver", document: bindDocument, want: map[string]any{"port": 0}},
+		{
+			name:     "a resolver",
+			document: resolverDocument,
+			want: map[string]any{
+				"port": 53, "resolves": []string{"example.com"}, "forward_to": []string{"10.43.0.10:53"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Parse([]byte(tc.document), config.Overrides{})
+			require.NoError(t, err, "config.Parse:\n%s", tc.document)
+			resolver, err := nameResolver(cfg, nil, audit.NewJSONSink(io.Discard), slog.New(slog.DiscardHandler))
+			require.NoError(t, err, "build the resolver")
+			proc := &process{cfg: cfg, resolver: resolver}
+			assert.Equal(t, tc.want, proc.dnsInfo(), "the dns object in /info")
+		})
+	}
+}
 
 // TestTheReceiptIsReadForEverySurfaceTheRulesFeed pins which postures read
 // the netsetup receipt. The rules deliver the captured connections and the

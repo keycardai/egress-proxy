@@ -66,8 +66,9 @@ These apply to every task in this repository.
    grows fields and never renames or repurposes one, and
    `internal/config/testdata/compat/` holds every earlier example document
    that a test parses. Before 1.0, a minor release may break the schema. A
-   change that breaks it puts `!` in its PR title, which bumps the minor
-   version, edits the compat documents, and says in its PR what broke.
+   change that breaks it edits the compat documents, says in its PR what
+   broke, and puts `!` in its PR title. `bump-minor-pre-major` in
+   `release-please-config.json` makes that a minor version bump.
 5. Fail closed. Any error in decision, exchange or substitution denies, and
    the test asserts which reason.
 6. **NEVER import `github.com/keycardlabs/`.** This repository ships to

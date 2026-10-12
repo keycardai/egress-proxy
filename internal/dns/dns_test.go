@@ -384,6 +384,22 @@ func TestNewRefusesAnUnusableResolver(t *testing.T) {
 			want: "would forward every allowed name to itself",
 		},
 		{
+			name: "a forward target on 0.0.0.0 at the listen port",
+			options: dns.Options{
+				Audit: &recordingSink{}, Port: 53, Forward: []string{"0.0.0.0"},
+				MaxConnections: fixtureMaxConnections,
+			},
+			want: "would forward every allowed name to itself",
+		},
+		{
+			name: "a forward target on :: at the listen port",
+			options: dns.Options{
+				Audit: &recordingSink{}, Port: 15353, Forward: []string{"[::]:15353"},
+				MaxConnections: fixtureMaxConnections,
+			},
+			want: "would forward every allowed name to itself",
+		},
+		{
 			name: "a forward target that is a name",
 			options: dns.Options{
 				Audit: &recordingSink{}, Port: 53, Forward: []string{"kube-dns.kube-system"},
