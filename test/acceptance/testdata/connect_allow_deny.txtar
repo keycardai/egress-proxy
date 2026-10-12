@@ -83,6 +83,14 @@ stdout 'X-Keycard-Deny-Reason: credential_unavailable'
 exec curl -sS -o /dev/null -w '%{http_code}' --path-as-is --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello/%2e%2e/secret
 stdout '^400$'
 
+# Every escape must be canonical: an unreserved character is written
+# unescaped, and the hex is uppercase. /%68ello is /hello to an upstream
+# that decodes, so the proxy refuses it rather than judge other bytes.
+exec curl -sS -o /dev/null -w '%{http_code}' --path-as-is --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/%68ello
+stdout '^400$'
+exec curl -sS -o /dev/null -w '%{http_code}' --path-as-is --cacert shared-ca/ca.crt https://localhost:$UPSTREAM_PORT/hello/a%3fb
+stdout '^400$'
+
 # The socket directory reaches mode 0700 whatever mode it was mounted with.
 [exec:ls] exec ls -ld $ADMIN_DIR
 [exec:ls] stdout '^drwx------'
@@ -122,6 +130,8 @@ audit stdout scope=connection destination.host=localhost destination.port=443 de
 # connection it arrived on and the reason the workload was told.
 audit stdout scope=request request.path=/secret decision.verdict=deny decision.reason=no_matching_endpoint
 audit stdout scope=request request.path=/hello/%2e%2e/secret decision.verdict=deny decision.reason=malformed_request
+audit stdout scope=request request.path=/%68ello decision.verdict=deny decision.reason=malformed_request
+audit stdout scope=request request.path=/hello/a%3fb decision.verdict=deny decision.reason=malformed_request
 audit stdout scope=request request.path=/hello request.host=other.example decision.verdict=deny decision.reason=host_mismatch
 audit stdout scope=request request.path=/needs-credential decision.verdict=deny decision.reason=credential_unavailable decision.endpoint=localhost:$UPSTREAM_PORT/needs-credential
 audit -all stdout sandbox_id=acceptance

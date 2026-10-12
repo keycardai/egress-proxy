@@ -124,6 +124,16 @@ func TestCompileRefusals(t *testing.T) {
 			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/repos/../admin"}},
 			wantErr:   "must be an absolute path in its shortest form",
 		},
+		{
+			name:      "a path prefix that escapes a letter",
+			endpoints: []policy.Endpoint{{Host: "api.github.com", Port: 443, PathPrefix: "/%61dmin/"}},
+			wantErr:   `path prefix "/%61dmin/" percent-encodes an unreserved character or uses lowercase hex`,
+		},
+		{
+			name:      "a path prefix with a lowercase escape",
+			endpoints: []policy.Endpoint{{Host: "gitlab.example", Port: 443, PathPrefix: "/group%2fproject/"}},
+			wantErr:   `path prefix "/group%2fproject/" percent-encodes an unreserved character or uses lowercase hex`,
+		},
 		// A request has neither character: the request target's query
 		// splits off before the path, and EscapedPath writes "#" as "%23".
 		// A document is the only way either reaches the matcher.
@@ -318,8 +328,34 @@ func TestMatcherDecisions(t *testing.T) {
 			// Cleaning these bytes changes nothing, so only the decoded
 			// form shows the dot segments. An upstream that decodes first
 			// would read this as /api/secret, outside the prefix.
-			name: "escaped dot segments are refused", host: "openrouter.ai", path: "/api/v1/%2e%2e/secret",
+			name: "dot segments behind escaped slashes are refused", host: "openrouter.ai",
+			path:        "/api/v1/x/..%2F..%2Fsecret",
 			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			// An upstream that decodes reads /api/v1/models/x, which the
+			// longer prefix covers. Byte for byte, only /api/v1/ covers it.
+			name: "an escaped letter is refused", host: "openrouter.ai", path: "/api/v1/%6Dodels/x",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "an escaped dot is refused", host: "openrouter.ai", path: "/api/v1/%2E%2E/secret",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "an escaped tilde is refused", host: "openrouter.ai", path: "/api/v1/%7Euser",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			name: "a lowercase escape is refused", host: "openrouter.ai", path: "/api/v1/a%3fb",
+			wantVerdict: "deny", wantReason: "malformed_request",
+		},
+		{
+			// GitLab names a project as group%2Fproject. An uppercase escape
+			// of a reserved character is canonical, so it passes.
+			name: "an uppercase escape of a reserved character passes", host: "openrouter.ai",
+			path:        "/api/v1/projects/group%2Fproject",
+			wantVerdict: "allow", wantReason: "endpoint_allowed", wantEndpoint: "openrouter.ai:443/api/v1/",
 		},
 		{
 			// An escaped slash is not a separator. The upstream reads one
@@ -405,4 +441,42 @@ func TestMatcherHosts(t *testing.T) {
 	}, deny)
 	require.NoError(t, err, "Compile")
 	assert.Equal(t, []string{"api.github.com", "pypi.org"}, matcher.Hosts(), "Hosts, sorted and deduplicated")
+}
+
+// TestCanonicalEscapes covers each class of escape: reserved and non-ASCII
+// bytes in uppercase pass, and an unreserved character, lowercase hex or a
+// malformed escape fails.
+func TestCanonicalEscapes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "", want: true},
+		{path: "/api/v1/models", want: true},
+		{path: "/projects/group%2Fproject", want: true},
+		{path: "/a%20b", want: true},
+		{path: "/a%3Ab", want: true},
+		{path: "/caf%C3%A9", want: true},
+		{path: "/%61dmin", want: false},
+		{path: "/%41dmin", want: false},
+		{path: "/v%30", want: false},
+		{path: "/a%2Db", want: false},
+		{path: "/a%2Eb", want: false},
+		{path: "/a%5Fb", want: false},
+		{path: "/%7Euser", want: false},
+		{path: "/projects/group%2fproject", want: false},
+		{path: "/caf%c3%a9", want: false},
+		{path: "/a%2Fb%61", want: false},
+		{path: "/a%zz", want: false},
+		{path: "/a%2", want: false},
+		{path: "/a%", want: false},
+		{path: "/a%%2F", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, policy.CanonicalEscapes(tc.path), "CanonicalEscapes(%q)", tc.path)
+		})
+	}
 }
