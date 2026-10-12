@@ -361,14 +361,15 @@ sets the variable.
 ### Images
 
 The three images are defined under `images/`. `make images` builds them
-locally and checks each one in a container. Nothing in this repository
-pushes an image.
+locally and checks each one in a container. The release workflow pushes and
+signs them after every gate passes on a push to main.
 
 | Threat | Mitigation | Test |
 |---|---|---|
 | Code running in the proxy container finds a shell, a package manager or curl and uses the sidecar's uid, which the capture exempts, to leave the pod. | The proxy image is distroless static: the binary, the public roots, and nothing else. The probe is the binary itself rather than a shell command. | `TestProxyImage` |
 | The agent starts with a trust store the proxy's authority is not in, so every allowed request fails on certificate verification. | The base image entrypoint installs the certificate and runs `update-ca-certificates` before it execs the agent, and refuses to start the agent without it. Every bundle variable the image sets names the rebuilt bundle, and the image does not set a variable for a client it does not install. | `TestSandboxBaseImage` (the trust store, the git handshake, the missing certificate, the trust variables), `base_image_trust.txtar` |
 | Each tool in an agent image needs its own proxy and CA settings. A tool nobody configured fails to reach an endpoint. | The base image entrypoint rebuilds the trust store, and the capture sends every connection to the proxy. In the built image, curl, Python requests, Node fetch, a Go client and git each reach an endpoint without a proxy address or a CA path. | `base_image_trust.txtar` |
+| A release run signs a commit whose gates have not passed. release-please tags the release PR's merge commit, and a later push to main can reach the release job before that commit's own gates finish. | The publish job checks out `github.sha` and no other ref. Only the run whose `github.sha` is the merge commit of a release PR creates the release. Every other run passes `skip-github-release`. If a release tags any commit but `github.sha`, the publish job fails before it logs in to the registry. | None automated. The `check for a release merge commit` and `check the release commit` steps in `release.yml`. |
 | The netsetup image resolves an iptables binary on the nf_tables backend, whose rules the sandbox runtimes this proxy targets never apply, so the init container programs rules that never take effect. | The image installs the legacy binaries and the xtables extension libraries they load for `-m owner`, `-m conntrack`, `-m multiport` and `-m icmp6`. `TestNetsetupImage` runs the image's `egress-netsetup` with the init container's capabilities in a network namespace of its own. It loads both families through the legacy restore binaries, reads every rule back and drops CAP_NET_ADMIN. | `TestNetsetupImage` |
 
 ### Configuration document
