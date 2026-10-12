@@ -1,5 +1,8 @@
 # egress-proxy
 
+> [!WARNING]
+> This project is an early beta preview. It is provided for evaluation and demonstration purposes only, and as a Keycard integration reference. It has not yet had an independent security review.
+
 The Keycard egress proxy intercepts outbound network requests from an untrusted workload controlled by an agent.
 
 It is a forward "man-in-the-middle" (MITM) proxy which terminates TLS and governs outbound connections with Keycard policy, which allows or denies target destinations and replaces placeholder credentials with actual bearer tokens, API keys or other real credentials transparently to the untrusted agent workload.
@@ -37,7 +40,10 @@ When the agent calls the GitHub API:
    GitHub.
 
 The agent never holds the GitHub token, and the token never appears in the
-proxy's logs or audit records. The configuration document says where each
+proxy's logs or audit records. The proxy does not filter responses, so an
+upstream that echoes the token back gives it to the agent. See
+[what the proxy does not protect](docs/security-model.md#outside-the-threat-model).
+The configuration document says where each
 endpoint's credential goes:
 
 ```yaml
@@ -94,3 +100,5 @@ says how to report a vulnerability. Never report one in a public issue.
 ## License
 
 Apache-2.0. See `LICENSE` and, for third-party attributions, `NOTICE`.
+The Keycard name and logo are trademarks; `TRADEMARKS.md` states how they may
+be used.

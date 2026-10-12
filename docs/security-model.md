@@ -20,6 +20,22 @@ some configurations, with network interception configured within that namespace.
 The security claim is that every route out terminates at the proxy for an
 unprivileged workload.
 
+## Outside the threat model
+
+The proxy controls which requests leave the pod and which credential each
+request gets. It does not control what an upstream sends back.
+
+- The proxy streams every upstream response to the workload unchanged. If
+  the upstream echoes the injected credential in a header, a body, or a
+  redirect `Location`, the workload reads it. The workload can then use the
+  credential without the proxy, outside the endpoint policy. A credential
+  can be encoded in a response in too many ways to filter reliably, so the
+  proxy does not inspect responses for it.
+- Do not attach a credential to an endpoint whose upstream reflects request
+  headers or query parameters, such as a request-echo service. Prefer a
+  credential from the token exchange over a static one, because the zone
+  sets how long an exchanged token lasts.
+
 ## Current guarantees
 
 - The proxy fails closed. Every path that cannot produce a decision denies
@@ -228,11 +244,12 @@ way.
 | A workload asks over TCP, which a resolver that filtered datagrams alone would pass. DNS falls back to TCP for an answer that does not fit in a datagram, RFC 7766 section 5. | Both protocols are redirected and both are served, and the allowlist decides them alike. Every table row runs over each transport, and the record names which one. | `TestTheAllowlistDecidesEveryName`, `dns_allowlist.txtar` |
 | A subdomain of an endpoint host resolves, so the workload reaches a zone no endpoint declares. | The match is exact equality on the whole name. `data.upstream.example` is refused where `upstream.example` resolves. | `TestTheAllowlistDecidesEveryName`, `dns_allowlist.txtar` |
 | A resolver that times out or errors leaves the query to be answered by something else. | A query no resolver answered gets `SERVFAIL` and an `upstream_failed` record. A message that is not one lookup gets `FORMERR` and a `malformed_request` record. Neither forwards. | `TestAResolverThatDoesNotAnswerDenies`, `TestAMessageThatIsNotAQueryDenies` |
-| The redirect sends port 53 to a port that nothing binds, or the resolver binds a port that nothing redirects to. Every lookup fails. | The receipt records the port the rules redirect to, and the proxy refuses to start when it and `listen.dns` disagree, either way round. A sidecar that runs the resolver reads the receipt whether or not it also runs a transparent frontend. | `TestContainment`, `TestTheReceiptIsReadForEverySurfaceTheRulesFeed`, `dns_allowlist.txtar` |
+| The redirect sends port 53 to a port that nothing binds, or the resolver binds a port that nothing redirects to. Every lookup fails. | The receipt records the port the rules redirect to, and the proxy refuses to start when it and `listen.dns_port` disagree, either way round. A sidecar that runs the resolver reads the receipt whether or not it also runs a transparent frontend. | `TestContainment`, `TestTheReceiptIsReadForEverySurfaceTheRulesFeed`, `dns_allowlist.txtar` |
 | A workload binds the resolver port during a sidecar restart and answers its own lookups. | The port is 53, below 1024, so only a process holding CAP_NET_BIND_SERVICE can bind it. The proxy reads `net.ipv4.ip_unprivileged_port_start` at start-up rather than trusting the manifest, and refuses to serve unless it is above every port the sidecar binds below 1024. | `TestContainmentPortStart` |
-| The resolver is reachable from outside the pod, so another peer reads the sandbox's allowlist by asking it. | The listener binds each address family's loopback address and never a wildcard. | `TestListenBindsLoopbackOnBothTransports` |
+| The resolver is reachable from outside the pod, so another peer reads the sandbox's allowlist by asking it. | The resolver binds 127.0.0.1 and ::1 and no other address. The configuration names only a port, `listen.dns_port`, so no setting can name another address. | `TestListenBindsLoopbackOnly`, `TestParseRefusesInvalidSettings`, `dns_allowlist.txtar` |
+| The resolver binds one address family and the redirect sends the other family's queries to a closed port. Every lookup in that family fails. | `dns.Listen` leaves the ::1 pair out only when the kernel cannot provide IPv6: `EAFNOSUPPORT`, or `EADDRNOTAVAIL` when IPv6 is disabled on lo. Every other ::1 error stops the start. The proxy refuses to start when the netsetup receipt names a family with no bound resolver socket. | `TestListenFailsWhenIPv6IsBusy`, `TestListenSkipsAnUnavailableIPv6Family`, `TestResolverBindsEveryFamilyTheReceiptNames` |
 | A workload holds TCP connections to the resolver until the sidecar runs out of file descriptors. miekg/dns starts a goroutine per connection and holds it for the ten-second idle window, and the descriptors are the ones the frontends and the audit writer need. | `limits.max_dns_connections` caps the connections one resolver listener accepts, separately from `limits.max_connections`. Further accepts wait in the backlog. The resolver refuses to build without a cap. | `TestTheResolverCapsItsTCPConnections`, `TestNewRefusesAnUnusableResolver` |
-| A resolver forwards to itself, so every allowed name spends the budget and fails. | The proxy refuses a `dns.forward_to` entry that names its own listen address, and one that is a name rather than an address. | `TestNewRefusesAnUnusableResolver` |
+| A resolver forwards to itself, so every allowed name spends the budget and fails. | The proxy refuses a `dns.forward_to` entry on 127.0.0.1, ::1 or an unspecified address at the resolver's own port, with or without a zone, and one that is a name rather than an address. | `TestNewRefusesAnUnusableResolver` |
 
 ### Decision process
 
@@ -333,7 +350,7 @@ sets the variable.
 |---|---|---|
 | The workload starts before the proxy has written `ca.crt`, so every TLS handshake fails on certificate verification and an operator reads a misconfiguration as a policy denial. | The startup probe reads `/readyz`, which answers only once the listeners are bound and the certificate is on disk. The kubelet starts the workload only once it passes, under the pod contract above. The base image entrypoint waits for the certificate as well, which covers a restart that outlives the probe. | `TestReadinessNeedsTheCertificate`, `TestReadyz`, `TestProbeReadsTheAdminSocket`, `TestProxyImageBindsAPrivilegedPort`, `TestSandboxBaseImage` |
 | The kubelet releases the workload while the port the capture redirects to is unbound, so the workload's first captured connection is refused. | Readiness turns true only after every listener is bound, the transparent sockets included. A transparent socket that fails to bind leaves the process not ready and stops it. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound` |
-| The capture sockets cover fewer address families than the receipt names. The capture binds `127.0.0.1` and `::1`, and leaves IPv6 out when the kernel refuses the socket with EAFNOSUPPORT. A proxy that reported ready then refuses every captured connection of the missing family for the life of the pod. | The receipt names the address families the init container programmed. The bind compares them against the sockets it opened and stops the process when the receipt names a family no socket covers. The start-up log names the families bound. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound`, `TestCaptureFamiliesFollowTheSocketsThatBound` |
+| The capture sockets cover fewer address families than the receipt names. The capture binds `127.0.0.1` and `::1`, and leaves IPv6 out when the kernel cannot provide it: EAFNOSUPPORT, or EADDRNOTAVAIL when IPv6 is disabled on lo. A proxy that reported ready then refuses every captured connection of the missing family for the life of the pod. | The receipt names the address families the init container programmed. The bind compares them against the sockets it opened and stops the process when the receipt names a family no socket covers. The start-up log names the families bound. | `TestBindReportsReadyOnlyOnceEveryListenerIsBound`, `TestCaptureFamiliesFollowTheSocketsThatBound`, `TestListenSkipsAnUnavailableIPv6Family` |
 | The kubelet reads a 200 from `/readyz` during the SIGTERM drain and keeps sending the workload at a proxy whose listeners are closing. | The admin socket stops accepting when the drain starts, so the probe fails from the signal on. The shutdown path also clears the readiness flag, so a `/readyz` request already in flight answers 503. | `TestServeIsNotReadyOnceItStops` |
 | An admin server is built with no readiness gate, and `/readyz` answers 200 for a process that has decided nothing. | A nil `Options.Ready` answers 503 naming that no gate is configured. | `TestServerAnswersHealthAndInfo`, `TestServerWithNoAnswers` |
 | A probe reaches the admin surface over a port the workload can also reach. | There is no port. The probe runs this binary against the Unix socket in the proxy's mount namespace, and the socket path must be absolute. | `TestProbeReadsTheAdminSocket`, `TestProbeWithNoSocket`, `TestNewRefusals` |
@@ -344,14 +361,15 @@ sets the variable.
 ### Images
 
 The three images are defined under `images/`. `make images` builds them
-locally and checks each one in a container. Nothing in this repository
-pushes an image.
+locally and checks each one in a container. The release workflow pushes and
+signs them after every gate passes on a push to main.
 
 | Threat | Mitigation | Test |
 |---|---|---|
 | Code running in the proxy container finds a shell, a package manager or curl and uses the sidecar's uid, which the capture exempts, to leave the pod. | The proxy image is distroless static: the binary, the public roots, and nothing else. The probe is the binary itself rather than a shell command. | `TestProxyImage` |
 | The agent starts with a trust store the proxy's authority is not in, so every allowed request fails on certificate verification. | The base image entrypoint installs the certificate and runs `update-ca-certificates` before it execs the agent, and refuses to start the agent without it. Every bundle variable the image sets names the rebuilt bundle, and the image does not set a variable for a client it does not install. | `TestSandboxBaseImage` (the trust store, the git handshake, the missing certificate, the trust variables), `base_image_trust.txtar` |
 | Each tool in an agent image needs its own proxy and CA settings. A tool nobody configured fails to reach an endpoint. | The base image entrypoint rebuilds the trust store, and the capture sends every connection to the proxy. In the built image, curl, Python requests, Node fetch, a Go client and git each reach an endpoint without a proxy address or a CA path. | `base_image_trust.txtar` |
+| A release run signs a commit whose gates have not passed. | The publish job checks out `github.sha` and no other ref. Only the run whose `github.sha` is the merge commit of a release PR creates the release. Every other run passes `skip-github-release`. If a release tags any commit but `github.sha`, the publish job fails before it logs in to the registry. | None automated |
 | The netsetup image resolves an iptables binary on the nf_tables backend, whose rules the sandbox runtimes this proxy targets never apply, so the init container programs rules that never take effect. | The image installs the legacy binaries and the xtables extension libraries they load for `-m owner`, `-m conntrack`, `-m multiport` and `-m icmp6`. `TestNetsetupImage` runs the image's `egress-netsetup` with the init container's capabilities in a network namespace of its own. It loads both families through the legacy restore binaries, reads every rule back and drops CAP_NET_ADMIN. | `TestNetsetupImage` |
 
 ### Configuration document

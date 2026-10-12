@@ -61,9 +61,11 @@ changed what the sidecars enforce. Settings that decide nothing stay out of
 limits never move it. The digest is one way and this proxy publishes no
 reader for its input, so hashing a file path leaks nothing.
 
-The schema grows by adding keys. The proxy does not rename or repurpose keys.
-Every earlier example document continues to parse from
-`internal/config/testdata/compat`.
+From 1.0, the schema grows by adding keys. The proxy does not rename or
+repurpose keys, and every earlier example document continues to parse from
+`internal/config/testdata/compat`. Before 1.0, a minor release may break the
+schema. The pull request that breaks it says what broke, and its `!` title
+lists the change under breaking changes in `CHANGELOG.md`.
 
 ## Keys
 
@@ -127,9 +129,9 @@ that the endpoint list denies.
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
 | `connect` | `127.0.0.1:3128` | `--connect`, `EGRESS_PROXY_CONNECT` | The CONNECT frontend in `host:port` form. A workload that honors `HTTPS_PROXY` reaches the proxy through this address. |
-| `transparent_port` | unset | `--transparent-port`, `EGRESS_PROXY_TRANSPARENT_PORT` | The redirect target. The netsetup init container sends captured TCP here, so clients reach the proxy without a proxy variable. The frontend binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every captured connection to loopback. Other pods cannot connect to it. Unset or 0 disables the transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start` so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when it is at or below the higher of this port and `listen.dns`. containerd 2.0 and later sets the sysctl to 0, so set it to `1024` in the pod's `securityContext.sysctls`. The proxy binds the port with `NET_BIND_SERVICE` from a file capability. Add `NET_BIND_SERVICE` to the sidecar and run the binary as its entrypoint. Linux only. |
+| `transparent_port` | unset | `--transparent-port`, `EGRESS_PROXY_TRANSPARENT_PORT` | The redirect target. The netsetup init container sends captured TCP here, so clients reach the proxy without a proxy variable. The frontend binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every captured connection to loopback. Other pods cannot connect to it. Unset or 0 disables the transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start` so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when it is at or below the higher of this port and `listen.dns_port`. containerd 2.0 and later sets the sysctl to 0, so set it to `1024` in the pod's `securityContext.sysctls`. The proxy binds the port with `NET_BIND_SERVICE` from a file capability. Add `NET_BIND_SERVICE` to the sidecar and run the binary as its entrypoint. Linux only. |
 | `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP. It gets the destination from the `Host` header. It reads every other captured port as TLS and gets the destination from the ClientHello. Endpoints name HTTPS destinations, so the proxy reads a cleartext connection and then refuses it. `config.digest` includes this setting only when `transparent_port` is set. |
-| `dns` | unset | `--dns`, `EGRESS_PROXY_DNS` | The allowlist resolver in `host:port` form. The netsetup init container redirects UDP and TCP port 53 here. A name the document does not declare answers `NXDOMAIN` and does not reach the cluster resolver. A host that is empty or unspecified binds each address family's loopback address, which is where the redirect rewrites the destination. Unset disables the resolver, and the init container must then run with `--dns-port 0`. The proxy refuses to start when the two disagree. Keep the port below `net.ipv4.ip_unprivileged_port_start` for the reason `transparent_port` gives. Linux only. |
+| `dns_port` | unset | `--dns-port`, `EGRESS_PROXY_DNS_PORT` | The port of the allowlist resolver. The netsetup init container redirects UDP and TCP port 53 here. A name the document does not declare answers `NXDOMAIN` and does not reach the cluster resolver. The resolver binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every query to loopback. Other pods cannot reach it. Unset or 0 disables the resolver, and the init container must then run with `--dns-port 0`. The proxy refuses to start when the two disagree. Keep the port below `net.ipv4.ip_unprivileged_port_start` for the reason `transparent_port` gives. Linux only. |
 | `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. `egress-proxy probe` does not read the document, so set a socket path other than the default with the variable. |
 
 The admin socket answers `GET /healthz` with `ok` while the process is
@@ -141,9 +143,9 @@ with a JSON object that contains the binary version, `sandbox_id`,
 settings, the CA output directory and expiry, the credential source, the
 netsetup receipt path, a `dns` object, the endpoint hosts, the cluster
 ranges, and the deny list exceptions. The `dns` object holds the resolver's
-`listen` address, the names it answers for under `resolves`, and the
-resolvers it forwards to under `forward_to`. A process that runs no
-resolver reports an empty `listen` and nothing else. The socket
+`port`, the names it answers for under `resolves`, and the resolvers it
+forwards to under `forward_to`. A process that runs no resolver reports a
+`port` of 0 and nothing else. The socket
 has mode 0600 in a directory with mode 0700. The proxy sets that directory
 mode on every start and refuses to start when the directory does not end up
 at mode 0700, so no other uid in the pod can reach the socket. Keep
@@ -175,7 +177,7 @@ refused where `upstream.example` resolves.
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `forward_to` | from the receipt | `--dns-forward-to` (repeatable), `EGRESS_PROXY_DNS_FORWARD_TO` (comma-separated) | The cluster resolvers an allowed name goes to, each an address with an optional port that defaults to 53. They are tried in order and the first answer wins. When unset, the proxy reads them from the netsetup receipt, which holds what the init container read from `/etc/resolv.conf`. Name each resolver by IP address. The proxy refuses a hostname, because looking it up would need a resolver. It refuses a target that names its own listen address, which would forward every allowed name to itself. It also refuses this setting without `listen.dns`, because nothing would read it. |
+| `forward_to` | from the receipt | `--dns-forward-to` (repeatable), `EGRESS_PROXY_DNS_FORWARD_TO` (comma-separated) | The cluster resolvers an allowed name goes to, each an address with an optional port that defaults to 53. They are tried in order and the first answer wins. When unset, the proxy reads them from the netsetup receipt, which holds what the init container read from `/etc/resolv.conf`. Name each resolver by IP address. The proxy refuses a hostname, because looking it up would need a resolver. It refuses a target on 127.0.0.1, ::1 or an unspecified address at `listen.dns_port`, which would forward every allowed name to itself. It also refuses this setting without `listen.dns_port`, because nothing would read it. |
 
 A query no resolver answered gets `SERVFAIL` and an `upstream_failed`
 record. A message that is not one lookup gets `FORMERR` and a
@@ -185,7 +187,7 @@ record. A message that is not one lookup gets `FORMERR` and a
 
 | Key | Default | Flag and variable | Description |
 |---|---|---|---|
-| `receipt` | `/run/egress/netsetup/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it when `listen.transparent_port` or `listen.dns` is set, because the rules redirect traffic to both. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. Keep it out of the admin socket directory, which the proxy takes to mode 0700. |
+| `receipt` | `/run/egress/netsetup/netsetup.json` | `--netsetup-receipt`, `EGRESS_PROXY_NETSETUP_RECEIPT` | The file where the init container records the rules it programmed. The proxy reads it when `listen.transparent_port` or `listen.dns_port` is set, because the rules redirect traffic to both. Put it on an `emptyDir` with `medium: Memory` that the init container and sidecar share but the workload does not mount. Keep it out of the admin socket directory, which the proxy takes to mode 0700. |
 
 The proxy reads the receipt before it serves requests. It refuses to start if
 the active rules differ from the receipt: the rules were not verified, the

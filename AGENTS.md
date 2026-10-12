@@ -62,11 +62,13 @@ These apply to every task in this repository.
    the tree outlives the plan that produced it. CI runs every scenario on
    every commit. Acceptance and gate code is Go; there are no shell scripts
    to maintain beyond the gate wrappers under `scripts/`.
-4. Configuration is additive from the first release. From then on, the
-   config schema grows fields and never renames or repurposes one, and
+4. Configuration is additive from 1.0. From then on, the config schema
+   grows fields and never renames or repurposes one, and
    `internal/config/testdata/compat/` holds every earlier example document
-   that a test parses. Until that release, a change may break the schema and
-   edit the compat documents, and its PR says what broke.
+   that a test parses. Before 1.0, a minor release may break the schema. A
+   change that breaks it edits the compat documents, says in its PR what
+   broke, and puts `!` in its PR title. `bump-minor-pre-major` in
+   `release-please-config.json` makes that a minor version bump.
 5. Fail closed. Any error in decision, exchange or substitution denies, and
    the test asserts which reason.
 6. **NEVER import `github.com/keycardlabs/`.** This repository ships to
@@ -282,10 +284,13 @@ On every push to main, after every gate passes, `ci.yml` calls
 
 - release-please opens or updates one release PR with the next version and
   `CHANGELOG.md`. Merging that PR tags `vX.Y.Z` and creates the GitHub
-  release.
+  release. Only the run for the merge commit creates it. If that run fails
+  or is cancelled, re-run it. Until it passes, release-please does not
+  update the release PR.
 - `make publish` builds the three images for linux/amd64 and linux/arm64
-  and pushes them to `ghcr.io/keycardai` under `main`, and under the version
-  tag when the push is a release. Each image index carries a BuildKit SBOM
+  from `github.sha`, the commit whose gates passed in that run. It pushes
+  them to `ghcr.io/keycardai` under `main`, and under the version tag when
+  the push is a release. Each image index carries a BuildKit SBOM
   and a provenance attestation.
 - `make sign` signs every pushed digest keylessly with cosign, which is a
   `tool` directive in `go.mod`. A release attaches the signed references as

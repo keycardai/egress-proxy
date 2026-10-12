@@ -30,6 +30,8 @@ func TestParseAppliesDefaults(t *testing.T) {
 		{"listen.admin", cfg.Listen.Admin, "/run/egress/admin/admin.sock"},
 		// Zero disables the transparent frontend.
 		{"listen.transparent_port", cfg.Listen.TransparentPort, 0},
+		// Zero runs no resolver.
+		{"listen.dns_port", cfg.Listen.DNSPort, 0},
 		{"listen.cleartext_ports", cfg.Listen.CleartextPorts, []int{80}},
 		{"netsetup.receipt", cfg.Netsetup.Receipt, "/run/egress/netsetup/netsetup.json"},
 		{"ca.out_dir", cfg.CA.OutDir, "/shared-ca/out"},
@@ -175,12 +177,12 @@ func TestConfigDigestCoversTheEffectiveSettings(t *testing.T) {
 				Connect: "127.0.0.1:9", Admin: "/other/admin.sock",
 				NetsetupReceipt: "/other/netsetup.json", CAOutDir: "/other/ca",
 				CacheSize: 7, MaxConnections: 3, MaxDNSConnections: 5, SandboxID: "another-sandbox",
-				// The resolver's address decides no answer. Which names
+				// The resolver's port decides no answer. Which names
 				// resolve comes from the endpoints and the zone, which the
 				// digest already covers, so the forward targets decide no
 				// answer either: the proxy re-resolves a name on the dial,
 				// and a forward target that lies steers no connection.
-				DNS: "127.0.0.1:53", DNSForwardTo: []string{"10.43.0.10"},
+				DNSPort: 53, DNSForwardTo: []string{"10.43.0.10"},
 			},
 			wantSame: true,
 		},
@@ -363,13 +365,11 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 		name string
 		doc  string
 		want []string
-		port int
 	}{
 		{
 			name: "the endpoint hosts alone when the document names no zone",
-			doc:  minimal + "listen:\n  dns: \"127.0.0.1:53\"\ndns:\n  forward_to: [\"10.43.0.10\"]\n",
+			doc:  minimal + "listen:\n  dns_port: 53\ndns:\n  forward_to: [\"10.43.0.10\"]\n",
 			want: []string{"pypi.org"},
-			port: 53,
 		},
 		{
 			name: "the endpoint hosts and the zone host",
@@ -388,7 +388,6 @@ func TestDNSHostsAreDerivedFromTheDocument(t *testing.T) {
 			cfg, err := config.Parse([]byte(tc.doc), config.Overrides{})
 			require.NoError(t, err, "Parse:\n%s", tc.doc)
 			assert.Equal(t, tc.want, cfg.DNSHosts(), "the names the resolver answers for")
-			assert.Equal(t, tc.port, cfg.DNSPort(), "the port the containment check compares")
 		})
 	}
 }
@@ -498,24 +497,31 @@ func TestParseRefusesInvalidSettings(t *testing.T) {
 		},
 		{name: "connect without a port", doc: minimal + "listen:\n  connect: 127.0.0.1\n", wantErr: "listen.connect"},
 		{
-			name:    "a resolver address with no port",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.1\"\n",
-			wantErr: "listen.dns \"127.0.0.1\" is not host:port",
+			name:    "a resolver port of -1",
+			doc:     minimal + "listen:\n  dns_port: -1\n",
+			wantErr: "listen.dns_port is -1, outside 1-65535",
 		},
 		{
-			name:    "a resolver address naming a port outside 1-65535",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.1:0\"\n",
-			wantErr: "listen.dns \"127.0.0.1:0\" is not host:port",
+			name:    "a resolver port above 65535",
+			doc:     minimal + "listen:\n  dns_port: 65536\n",
+			wantErr: "listen.dns_port is 65536, outside 1-65535",
+		},
+		{
+			// The resolver binds 127.0.0.1 and ::1 alone, so the document
+			// names no address for it.
+			name:    "a resolver address",
+			doc:     minimal + "listen:\n  dns: \"127.0.0.1:53\"\n",
+			wantErr: `unknown field "dns"`,
 		},
 		{
 			name:    "a forward target that is a hostname",
-			doc:     minimal + "listen:\n  dns: \"127.0.0.1:53\"\ndns:\n  forward_to: [\"kube-dns\"]\n",
+			doc:     minimal + "listen:\n  dns_port: 53\ndns:\n  forward_to: [\"kube-dns\"]\n",
 			wantErr: "dns.forward_to[0] \"kube-dns\" must be an IP address or address:port",
 		},
 		{
 			name:    "forward targets with no resolver to read them",
 			doc:     minimal + "dns:\n  forward_to: [\"10.43.0.10\"]\n",
-			wantErr: "listen.dns is unset, so nothing reads them",
+			wantErr: "listen.dns_port is unset, so nothing reads them",
 		},
 		{
 			name:    "state dir under out dir",

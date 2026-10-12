@@ -1,5 +1,5 @@
-# A sidecar that answers the sandbox's name lookups. listen.dns is the
-# loopback address the netsetup rules redirect port 53 to, and
+# A sidecar that answers the sandbox's name lookups. listen.dns_port is the
+# port on 127.0.0.1 and ::1 the netsetup rules redirect port 53 to, and
 # dns.forward_to names the cluster resolvers an allowed name goes to. Only
 # the endpoint hosts and the zone host resolve.
 version: 1
@@ -8,7 +8,7 @@ sandbox:
 listen:
   connect: "127.0.0.1:3128"
   transparent_port: 1015
-  dns: "127.0.0.1:53"
+  dns_port: 53
   admin: "/run/egress/admin.sock"
 netsetup:
   receipt: "/run/egress/netsetup.json"

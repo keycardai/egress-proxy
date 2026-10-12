@@ -7,43 +7,45 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
-	"strings"
+
+	"github.com/keycardai/egress-proxy/internal/netsetup"
 )
 
 // ErrListen is a set of sockets the resolver could not open.
 var ErrListen = errors.New("dns listener")
 
-// Listen opens the UDP and TCP sockets the resolver answers on.
+// Listen opens the UDP and TCP sockets the resolver answers on: one pair
+// on 127.0.0.1 and one on ::1, at port. A REDIRECT in the nat OUTPUT chain
+// rewrites the destination to one of those two addresses and the packet
+// then leaves through lo. Other pods cannot reach either address.
 //
-// A literal address gets one pair of sockets of that address family. An
-// address with no host, or an unspecified one, gets a pair on each
-// family's loopback address, because a REDIRECT in the nat OUTPUT chain
-// rewrites the destination to 127.0.0.1 or ::1 and the packet then leaves
-// through lo.
+// NEVER bind another address here. The resolver decides what the sandbox
+// can look up and answers no one else.
 //
-// NEVER bind a wildcard address here. The resolver decides what the
-// sandbox can look up and answers no one else, and a wildcard bind would
-// serve every peer that can reach the pod.
-//
-// The IPv6 pair is optional. A kernel without IPv6 does not redirect
-// anything to it. The IPv4 pair is required.
-func Listen(ctx context.Context, address string) (Sockets, error) {
-	host, port, err := splitListen(address)
+// Listen skips the IPv6 pair when the kernel cannot provide IPv6 (see
+// [netsetup.FamilyUnavailable]). The receipt family check refuses the start
+// if the redirect covers IPv6. Every other IPv6 error closes the IPv4 pair
+// and fails the call. The IPv4 pair is always required.
+func Listen(ctx context.Context, port int) (Sockets, error) {
+	return listen(ctx, &net.ListenConfig{}, port)
+}
+
+// listen is Listen with the socket options it binds with.
+func listen(ctx context.Context, config *net.ListenConfig, port int) (Sockets, error) {
+	if port < 1 || port > maxPort {
+		return Sockets{}, fmt.Errorf("%w: port %d is outside 1-%d", ErrListen, port, maxPort)
+	}
+	addrs := loopback()
+	sockets, err := bind(ctx, config, addrs[0], port)
 	if err != nil {
 		return Sockets{}, err
 	}
-	addrs := boundAddrs(host)
-	sockets, err := bind(ctx, addrs[0], port)
-	if err != nil {
-		return Sockets{}, err
-	}
-	if len(addrs) == 1 {
+	six, err := bind(ctx, config, addrs[1], port)
+	if netsetup.FamilyUnavailable(err) {
 		return sockets, nil
 	}
-	six, err := bind(ctx, addrs[1], port)
 	if err != nil {
-		//nolint:nilerr // a kernel without IPv6 does not redirect anything to an IPv6 socket
-		return sockets, nil
+		return Sockets{}, errors.Join(err, sockets.Close())
 	}
 	return Sockets{
 		Packet: append(sockets.Packet, six.Packet...),
@@ -51,16 +53,23 @@ func Listen(ctx context.Context, address string) (Sockets, error) {
 	}, nil
 }
 
+// maxPort is the highest port Listen binds.
+const maxPort = 65535
+
+// loopback is the addresses Listen binds, in the order it binds them.
+func loopback() []netip.Addr {
+	return []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.IPv6Loopback()}
+}
+
 // bind opens one UDP and one TCP socket on an address. If the TCP socket
 // cannot be opened, it closes the UDP one. A resolver on UDP alone would
 // refuse every TCP fallback.
-func bind(ctx context.Context, addr netip.Addr, port int) (Sockets, error) {
+func bind(ctx context.Context, config *net.ListenConfig, addr netip.Addr, port int) (Sockets, error) {
 	udpNetwork, tcpNetwork := "udp4", "tcp4"
 	if addr.Is6() {
 		udpNetwork, tcpNetwork = "udp6", "tcp6"
 	}
 	address := net.JoinHostPort(addr.String(), strconv.Itoa(port))
-	config := &net.ListenConfig{}
 	packet, err := config.ListenPacket(ctx, udpNetwork, address)
 	if err != nil {
 		return Sockets{}, fmt.Errorf("%w: listen on udp %s: %w", ErrListen, address, err)
@@ -73,56 +82,4 @@ func bind(ctx context.Context, addr netip.Addr, port int) (Sockets, error) {
 		)
 	}
 	return Sockets{Packet: []net.PacketConn{packet}, Stream: []net.Listener{stream}}, nil
-}
-
-// boundAddrs is what Listen binds for a host. A literal address binds
-// itself. An empty, unspecified or non-literal host binds 127.0.0.1 and ::1,
-// in that order.
-func boundAddrs(host string) []netip.Addr {
-	if literal, err := netip.ParseAddr(host); err == nil && !literal.IsUnspecified() {
-		return []netip.Addr{literal}
-	}
-	return []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.IPv6Loopback()}
-}
-
-// listenAddrs is the addresses and port a listen address binds, unmapped for
-// comparison with a forward target. It returns no address and port zero for
-// an address that does not parse, which never binds.
-func listenAddrs(listen string) ([]netip.Addr, int) {
-	host, port, err := splitListen(listen)
-	if err != nil {
-		return nil, 0
-	}
-	addrs := boundAddrs(host)
-	for i, addr := range addrs {
-		addrs[i] = addr.Unmap()
-	}
-	return addrs, port
-}
-
-// Port is the port an address binds, zero when the address names none or
-// does not parse. The containment check compares it with the port the
-// netsetup rules redirect DNS to.
-func Port(address string) int {
-	if strings.TrimSpace(address) == "" {
-		return 0
-	}
-	_, port, err := splitListen(address)
-	if err != nil {
-		return 0
-	}
-	return port
-}
-
-// splitListen reads an address as a host and a port.
-func splitListen(address string) (string, int, error) {
-	host, portText, err := net.SplitHostPort(strings.TrimSpace(address))
-	if err != nil {
-		return "", 0, fmt.Errorf("%w: listen.dns %q is not host:port: %w", ErrListen, address, err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
-		return "", 0, fmt.Errorf("%w: listen.dns %q does not name a port in 1-65535", ErrListen, address)
-	}
-	return host, port, nil
 }
