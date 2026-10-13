@@ -328,6 +328,14 @@ or one of `-._~`, or writes an escape in lowercase hex, with
 `/api/admin/x`, but byte for byte it falls under a shorter prefix, which
 would choose that endpoint's credential.
 
+Before allowing a request, the proxy percent-decodes its path and every
+endpoint prefix once. The endpoint selected on the wire must remain the
+unique longest match on that host and port. A different match or a tie is
+refused with `malformed_request`. For example, with `/api/` and
+`/api/admin:view/` declared, `/api/admin%3Aview/x` is refused. An uppercase
+reserved escape such as `group%2Fproject` still passes when it preserves
+the selected endpoint. The forwarded path and resource URL remain as written.
+
 Two endpoints whose URLs name the same host, port and path are rejected. The
 same host and path on two ports are two endpoints, not a repeat.
 The proxy forwards nothing cleartext. A cleartext `http://` request is
@@ -408,7 +416,7 @@ identifies a captured connection in the audit stream.
 | `no_sni` | deny | connection | The TLS handshake named no server, either inside a tunnel or on a captured connection whose ClientHello had no `server_name`. RFC 6066 section 3 forbids an IP literal there, so a client connecting straight to an address sends none. |
 | `not_redirected` | deny | connection | The destination recovered from a connection on the transparent listener is that listener's own address, so the connection was opened to the proxy rather than redirected into it. |
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
-| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a path that escapes an unreserved character or uses lowercase hex, a query that does not parse, or a CONNECT authority with a bad port. |
+| `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a path that escapes an unreserved character or uses lowercase hex, a path that changes or ties the selected endpoint after percent-decoding, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
