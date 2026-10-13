@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/keycardai/egress-proxy/compare/v0.2.0...v0.2.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* refuse path escapes that change endpoint selection ([#52](https://github.com/keycardai/egress-proxy/issues/52)) ([e455c02](https://github.com/keycardai/egress-proxy/commit/e455c0205f7fa1eb21b708f6baf00e85b2d0099c))
+
 ## [0.2.0](https://github.com/keycardai/egress-proxy/compare/v0.1.0...v0.2.0) (2026-10-13)
 
 
