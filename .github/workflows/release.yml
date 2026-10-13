@@ -137,14 +137,28 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      # The runner starts with little free disk. The df output shows where
+      # it goes.
       - name: publish
         run: |
+          df -h /
           tags=main
           if [ "$RELEASE_CREATED" = "true" ]; then
             tags="$tags $TAG_NAME"
           fi
           make publish PUBLISH_TAGS="$tags" IMAGE_REVISION="$(git rev-parse HEAD)"
-      - run: make sign
+          df -h /
+      # The multi-platform builds leave gigabytes in the builder's cache, and
+      # make sign compiles cosign in what space is left. Signing reads only
+      # the registry, so the cache goes first.
+      - name: prune the build cache
+        run: |
+          docker buildx prune --all --force
+          df -h /
+      - name: sign
+        run: |
+          make sign
+          df -h /
       - name: record the digests
         run: |
           {
