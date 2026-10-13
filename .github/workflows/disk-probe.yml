@@ -1,0 +1,49 @@
+# TEMPORARY (ACC-1268): measures disk use of the publish job's steps on a PR
+# runner, pushing to a local registry. Removed before merge.
+name: disk-probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports: ["5000:5000"]
+    steps:
+      - run: df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - name: after setup
+        run: |
+          df -h /
+          du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" || true
+      - name: publish
+        run: |
+          make publish REGISTRY=localhost:5000 PUBLISH_TAGS=probe
+          df -h /
+          docker buildx du | tail -3
+          sudo du -sh /var/lib/docker || true
+      - name: compile cosign (no prune)
+        run: |
+          go tool cosign version
+          df -h /
+          du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" || true
+      - name: prune
+        run: |
+          docker buildx prune --all --force
+          df -h /
