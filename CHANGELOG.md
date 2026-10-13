@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/keycardai/egress-proxy/compare/v0.1.0...v0.2.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* replace listen.dns with listen.dns_port ([#46](https://github.com/keycardai/egress-proxy/issues/46))
+
+### Bug Fixes
+
+* refuse a path escape that is not canonical ([#45](https://github.com/keycardai/egress-proxy/issues/45)) ([a1a9391](https://github.com/keycardai/egress-proxy/commit/a1a9391a2401873e2502a3d8ac788c1744da75c1))
+* replace listen.dns with listen.dns_port ([#46](https://github.com/keycardai/egress-proxy/issues/46)) ([4e20b06](https://github.com/keycardai/egress-proxy/commit/4e20b069c2d0769fcf4e514ea2797f957d0d127d))
+
 ## 0.1.0 (2026-10-09)
 
 
