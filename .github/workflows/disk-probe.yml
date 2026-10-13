@@ -15,8 +15,12 @@ jobs:
       registry:
         image: registry:2
         ports: ["5000:5000"]
+    # A worker that runs out of disk loses the whole job log, so each step
+    # reports its numbers as annotations, which survive once the step ends.
+    env:
+      DISK: 'echo "::notice title=$STEP::$(df -h / | tail -1)"'
     steps:
-      - run: df -h /
+      - run: STEP=start; eval "$DISK"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -30,20 +34,19 @@ jobs:
           driver-opts: network=host
       - name: after setup
         run: |
-          df -h /
-          du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" || true
+          STEP=setup; eval "$DISK"
+          echo "::notice title=go caches::$(du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" | tr '\n' ' ')"
       - name: publish
         run: |
           make publish REGISTRY=localhost:5000 PUBLISH_TAGS=probe
-          df -h /
-          docker buildx du | tail -3
-          sudo du -sh /var/lib/docker || true
-      - name: compile cosign (no prune)
-        run: |
-          go tool cosign version
-          df -h /
-          du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" || true
+          STEP=publish; eval "$DISK"
+          echo "::notice title=buildx du::$(docker buildx du | tail -1)"
       - name: prune
         run: |
           docker buildx prune --all --force
-          df -h /
+          STEP=prune; eval "$DISK"
+      - name: compile cosign
+        run: |
+          go tool cosign version
+          STEP=cosign; eval "$DISK"
+          echo "::notice title=go caches::$(du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" | tr '\n' ' ')"
