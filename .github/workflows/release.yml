@@ -119,6 +119,13 @@ jobs:
             echo "::error::release $TAG_NAME tags $RELEASE_SHA, but the gates passed on $GITHUB_SHA"
             exit 1
           fi
+      # The runner starts with its disk about 83% full, and the
+      # multi-platform builds take nearly all that is left. Removing
+      # toolchains this job never uses leaves room for them.
+      - name: free disk for the builds
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -137,11 +144,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      # The runner starts with little free disk. The df output shows where
-      # it goes.
       - name: publish
         run: |
-          df -h /
           tags=main
           if [ "$RELEASE_CREATED" = "true" ]; then
             tags="$tags $TAG_NAME"

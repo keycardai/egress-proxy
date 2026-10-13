@@ -21,6 +21,10 @@ jobs:
       DISK: 'echo "::notice title=$STEP::$(df -h / | tail -1)"'
     steps:
       - run: STEP=start; eval "$DISK"
+      - name: free disk for the builds
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          STEP=freed; eval "$DISK"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
