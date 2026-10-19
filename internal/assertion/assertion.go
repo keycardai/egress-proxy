@@ -68,6 +68,10 @@ type Claims struct {
 	// authenticated them at create. The runtime asserts it and nothing
 	// here verifies it. Empty where the runtime recorded none.
 	Owner string
+	// OwnerID is the Keycard user public id of the owner, resolved by the
+	// runtime. An identity that impersonates the sandbox owner exchanges
+	// for it. Empty where the runtime resolved none.
+	OwnerID string
 }
 
 // Subject builds the sub claim for an application and a sandbox id.
@@ -84,6 +88,7 @@ type privateClaims struct {
 	SandboxUUID string `json:"sandbox_id,omitempty"`
 	ExecPath    string `json:"exec_path,omitempty"`
 	Owner       string `json:"owner,omitempty"`
+	OwnerID     string `json:"owner_id,omitempty"`
 }
 
 // Verifier checks assertions against one issuer key.
@@ -175,6 +180,7 @@ func (v *Verifier) Verify(token string, now time.Time) (Claims, error) {
 		ExecPath:    private.ExecPath,
 		Application: private.Application,
 		Owner:       private.Owner,
+		OwnerID:     private.OwnerID,
 	}, nil
 }
 
@@ -275,6 +281,7 @@ func Sign(key *ecdsa.PrivateKey, claims Claims, audiences []string, now time.Tim
 			SandboxUUID: claims.SandboxUUID,
 			ExecPath:    claims.ExecPath,
 			Owner:       claims.Owner,
+			OwnerID:     claims.OwnerID,
 		}).
 		Serialize()
 	if err != nil {

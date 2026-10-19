@@ -52,17 +52,19 @@ func keypair(t *testing.T, opts ...assertion.Option) (*ecdsa.PrivateKey, *assert
 	return priv, verifier
 }
 
-// owned is troy with the owner the runtime recorded at create.
+// owned is troy with the owner the runtime recorded at create, and the
+// Keycard user id the runtime resolved for them.
 func owned() assertion.Claims {
 	claims := troy()
 	claims.Owner = "openshell-client"
+	claims.OwnerID = "igmua2g0fwapl21qll7tczdw7t"
 	return claims
 }
 
 // TestSignAndVerifyRoundTrip pins the claim set both ways: Verify returns
 // what Sign was given plus the subject Sign derived, a token with a second
 // audience for the zone is accepted by a verifier that checks only its own,
-// and the owner travels when set and only then.
+// and the owner and owner id travel when set and only then.
 func TestSignAndVerifyRoundTrip(t *testing.T) {
 	t.Parallel()
 	priv, verifier := keypair(t)
@@ -121,6 +123,7 @@ func TestWireClaimNames(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload, &claims))
 	names := []string{
 		"iss", "sub", "aud", "iat", "exp", "jti", "app", "sandbox", "workspace", "sandbox_id", "exec_path", "owner",
+		"owner_id",
 	}
 	for _, name := range names {
 		assert.Contains(t, claims, name)
@@ -128,6 +131,7 @@ func TestWireClaimNames(t *testing.T) {
 	assert.Equal(t, "openshell:review-agent:26697100-f1ee-45cf-8ab9-8ee6fb645700", claims["sub"])
 	assert.Equal(t, "keycard-demo", claims["sandbox"])
 	assert.Equal(t, "openshell-client", claims["owner"])
+	assert.Equal(t, "igmua2g0fwapl21qll7tczdw7t", claims["owner_id"])
 	assert.NotEmpty(t, claims["jti"])
 	got, err := verifier.Verify(token, at())
 	require.NoError(t, err)
