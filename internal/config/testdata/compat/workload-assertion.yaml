@@ -1,0 +1,27 @@
+# The first document whose applications exchange as the asserted sandbox:
+# each identity names the zone and client_assertion: sandbox, and holds no
+# client id, secret, token file or impersonated user. The assertion must
+# name the issuer. Kept so a later schema still parses it.
+version: 1
+
+sandbox:
+  id: "openshell-local"
+
+sandbox_assertion:
+  issuer_key_file: "/etc/keycard/extension.pub"
+  issuer: "https://extension.greendale.example"
+
+applications:
+  - name: review-agent
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_assertion: sandbox
+  - name: research-agent
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_assertion: sandbox
+
+endpoints:
+  - url: "https://api.github.com/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

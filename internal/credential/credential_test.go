@@ -2,6 +2,8 @@ package credential_test
 
 import (
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -435,6 +437,63 @@ func TestRedact(t *testing.T) {
 				forms = credential.WireForms(tc.placement, tc.credential)
 			}
 			assert.Equal(t, tc.want, credential.Redact(tc.text, forms), "Redact")
+		})
+	}
+}
+
+// errZoneAnswer stands in for the OAuth error the SDK reports.
+var errZoneAnswer = errors.New("oauth error access_denied: no policy grants the resource")
+
+// TestExchangeErrorKeepsTheClassAndCarriesTheDetail pins that an
+// ExchangeError matches its class with errors.Is, exposes its cause, and
+// hands the proxy a detail that any other error lacks.
+func TestExchangeErrorKeepsTheClassAndCarriesTheDetail(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		err        error
+		wantIs     []error
+		wantText   string
+		wantDetail string
+	}{
+		"a refusal with its cause": {
+			err: &credential.ExchangeError{
+				Class: credential.ErrExchangeDenied, Detail: "no policy grants the resource", Cause: errZoneAnswer,
+			},
+			wantIs:     []error{credential.ErrExchangeDenied, errZoneAnswer},
+			wantText:   "the authorization server denied the exchange: oauth error access_denied: no policy grants the resource",
+			wantDetail: "no policy grants the resource",
+		},
+		"a failure with no cause": {
+			err:        &credential.ExchangeError{Class: credential.ErrExchangeFailed, Detail: "the zone answered 502"},
+			wantIs:     []error{credential.ErrExchangeFailed},
+			wantText:   "the token exchange failed: the zone answered 502",
+			wantDetail: "the zone answered 502",
+		},
+		"a wrapped exchange error": {
+			err: fmt.Errorf("resource x: %w",
+				&credential.ExchangeError{Class: credential.ErrExchangeFailed, Detail: "the zone answered 502"}),
+			wantIs:     []error{credential.ErrExchangeFailed},
+			wantText:   "resource x: the token exchange failed: the zone answered 502",
+			wantDetail: "the zone answered 502",
+		},
+		"a plain class error": {
+			err:      credential.ErrExchangeDenied,
+			wantIs:   []error{credential.ErrExchangeDenied},
+			wantText: "the authorization server denied the exchange",
+		},
+		"no error": {},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+			for _, want := range tc.wantIs {
+				r.ErrorIs(tc.err, want, "the chain keeps %v", want)
+			}
+			if tc.err != nil {
+				r.Equal(tc.wantText, tc.err.Error(), "the error text")
+			}
+			r.Equal(tc.wantDetail, credential.Detail(tc.err), "the detail")
 		})
 	}
 }

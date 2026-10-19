@@ -1,0 +1,121 @@
+# Per-application identity end to end with the built binary: two
+# applications and one sandbox share one proxy. An assertion whose app claim
+# names an application gets that application's credential whatever sandbox
+# sent it, an app claim naming an application the document does not list is
+# refused before it leaves and the mapped sandbox it came from does not
+# rescue it, and every request record names the application beside the
+# sandbox.
+#
+# The credential source is a static file with per-application and
+# per-sandbox entries, which the process announces as a selector of both.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+chmod 0777 $ADMIN_DIR
+expand credentials.yaml
+chmod 0600 credentials.yaml
+
+assertkey keys
+
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt
+env EGRESS_PROXY_CREDENTIAL_STATIC_FILE=$WORK/credentials.yaml
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket counts both maps and holds no credential.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"credential_source": "2 application and 1 sandbox identities selected by assertion"'
+! stdout 'sekrit'
+
+# A sandbox id is new on every create, so the research assertion names a
+# sandbox the document does not list. The application still answers. The
+# review assertion also names who created its sandbox; the research one
+# carries no owner.
+assertion -app review-agent -owner troy.barnes keys REVIEW keycard-demo
+assertion -app research-agent keys RESEARCH sandbox-7f3a
+assertion -app chang-agent keys CHANG keycard-demo
+
+# Each application gets its own credential, and the placeholder the
+# workload sent is replaced.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$REVIEW -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/header/review
+stdout '^hello from upstream /header/review$'
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$RESEARCH https://localhost:$UPSTREAM_PORT/header/research
+stdout '^hello from upstream /header/research$'
+
+# An app claim naming an application the document does not list is refused
+# with 403, and the mapped sandbox it came from does not rescue it.
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$CHANG https://localhost:$UPSTREAM_PORT/header/chang
+stdout '^403$'
+
+# What the upstream saw: each application's credential, an empty assertion
+# header on every request, and nothing for the refusal. The sandbox's own
+# credential is never written, because the document lists applications.
+grep 'request GET /header/review host=localhost:\d+ authorization="Bearer review-sekrit" assertion=""' upstream/requests.log
+grep 'request GET /header/research host=localhost:\d+ authorization="Bearer research-sekrit" assertion=""' upstream/requests.log
+! grep 'demo-sekrit' upstream/requests.log
+! grep '/header/chang' upstream/requests.log
+grep -count=2 '^request ' upstream/requests.log
+
+sigterm
+wait proxy
+
+# The process announces both maps on every start.
+stderr '"msg":"credential source"'
+stderr '2 application and 1 sandbox identities selected by assertion'
+
+# Request records name the application, the sandbox and its runtime id, and
+# the owner only where the assertion carried one.
+audit stdout scope=request request.path=/header/review decision.reason=endpoint_allowed application=review-agent sandbox_id=keycard-demo sandbox_uuid=uuid-keycard-demo on_behalf_of=troy.barnes outcome.status=200
+audit stdout scope=request request.path=/header/research decision.reason=endpoint_allowed application=research-agent sandbox_id=sandbox-7f3a sandbox_uuid=uuid-sandbox-7f3a outcome.status=200
+! audit stdout scope=request request.path=/header/research 'on_behalf_of~.'
+audit stdout scope=request request.path=/header/chang decision.verdict=deny decision.reason=application_unknown application=chang-agent sandbox_id=keycard-demo sandbox_uuid=uuid-keycard-demo
+
+# No credential and no assertion reaches the audit stream or the log. A JWT
+# begins with the base64 of '{"', which is eyJ.
+! stdout 'sekrit'
+! stderr 'sekrit'
+! stdout 'eyJ'
+! stderr 'eyJ'
+
+-- config.yaml --
+version: 1
+# The upstream is on loopback, which the platform deny list covers.
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/key.pub
+applications:
+  - name: review-agent
+  - name: research-agent
+sandboxes:
+  - name: keycard-demo
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/header/
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+
+-- credentials.yaml --
+version: 1
+credentials:
+  - resource: https://localhost:$UPSTREAM_PORT/header/
+    application: review-agent
+    value: review-sekrit
+  - resource: https://localhost:$UPSTREAM_PORT/header/
+    application: research-agent
+    value: research-sekrit
+  - resource: https://localhost:$UPSTREAM_PORT/header/
+    sandbox: keycard-demo
+    value: demo-sekrit

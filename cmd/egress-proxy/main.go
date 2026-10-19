@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/keycardai/egress-proxy/internal/admin"
+	"github.com/keycardai/egress-proxy/internal/assertion"
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/ca"
 	"github.com/keycardai/egress-proxy/internal/config"
@@ -73,6 +74,7 @@ type flags struct {
 	dnsPortSet            bool
 	dnsForwardTo          []string
 	admin                 string
+	connectAuthFile       string
 	netsetupReceipt       string
 	caOutDir              string
 	caStateDir            string
@@ -103,6 +105,7 @@ func (f flags) overrides() config.Overrides {
 		DNSPortSet:            f.dnsPortSet,
 		DNSForwardTo:          f.dnsForwardTo,
 		Admin:                 f.admin,
+		ConnectAuthFile:       f.connectAuthFile,
 		NetsetupReceipt:       f.netsetupReceipt,
 		CAOutDir:              f.caOutDir,
 		CAStateDir:            f.caStateDir,
@@ -140,6 +143,8 @@ func flagSet(opts *flags) []cli.Flag {
 			"path of the file holding the application credential secret (identity.client_secret_file)"),
 		stringFlag("credential-static-file", "CREDENTIAL_STATIC_FILE", &opts.credentialStaticFile,
 			"file of credentials by resource, for tests and development (credentials.static_file)"),
+		stringFlag("connect-auth-file", "CONNECT_AUTH_FILE", &opts.connectAuthFile,
+			"file holding the user:password every CONNECT must present (listen.connect_auth_file)"),
 		&cli.DurationFlag{
 			Name: "leaf-ttl", Destination: &opts.leafTTL, Sources: env("LEAF_TTL"),
 			Usage: "lifetime of a minted leaf (ca.leaf_ttl)",
@@ -254,6 +259,9 @@ type process struct {
 	matcher     *policy.Matcher
 	authority   *ca.Authority
 	credentials credential.Source
+	// selector holds the per-sandbox sources when the proxy identifies
+	// sandboxes. credentials is nil then.
+	selector    *credential.Selector
 	server      *proxy.Server
 	admin       *admin.Server
 	transparent *transparent.Frontend
@@ -310,7 +318,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, err
 	}
-	credentials, err := credentialSource(cfg, deny, roots)
+	identities, err := identitySources(cfg, deny, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -325,9 +333,11 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	server, err := proxy.New(proxy.Options{
 		Matcher:               matcher,
 		Certificates:          store,
+		ConnectAuth:           identities.connectAuth,
+		Sandboxes:             identities.sandboxes,
 		Audit:                 sink,
 		UpstreamRoots:         roots,
-		Credentials:           credentials,
+		Credentials:           identities.credentials,
 		Logger:                logger,
 		MaxConnections:        cfg.Limits.MaxConnections,
 		IdleTimeout:           cfg.Limits.IdleTimeout.Duration(),
@@ -339,7 +349,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	}
 	proc := &process{
 		cfg: cfg, logger: logger, matcher: matcher, authority: authority,
-		credentials: credentials, server: server, certPath: certPath,
+		credentials: identities.credentials, selector: identities.selector, server: server, certPath: certPath,
 	}
 	if err := proc.buildFrontends(ctx, sink); err != nil {
 		return nil, err
@@ -415,54 +425,256 @@ func (p *process) announce() {
 		p.logger.Warn("deny list exception: the platform deny list does not cover this range",
 			slog.String("range", exception.String()))
 	}
-	if p.credentials == nil {
+	if p.credentials == nil && p.selector == nil {
 		p.logger.Warn("no credential source; every endpoint that names a credential denies " +
 			"with credential_unavailable")
 		return
 	}
-	p.logger.Warn("credential source", slog.String("source", p.credentials.Describe()))
+	p.logger.Warn("credential source", slog.String("source", p.describeSource()))
+}
+
+// describeSource names the credential source in force: the process source,
+// or the per-sandbox selector.
+func (p *process) describeSource() string {
+	switch {
+	case p.selector != nil:
+		return p.selector.Describe()
+	case p.credentials != nil:
+		return p.credentials.Describe()
+	default:
+		return "none"
+	}
 }
 
 // errCredentials names a credential source that this build cannot construct.
 var errCredentials = errors.New("credentials")
 
-// credentialSource builds the configured source. It returns nil when none is set.
-//
-//nolint:ireturn // delegating the constructor to the configured source is intentional
-func credentialSource(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (credential.Source, error) {
+// connectAuthFor loads listen.connect_auth_file. Nil means every client may
+// CONNECT.
+func connectAuthFor(cfg *config.Config) (*proxy.ConnectAuth, error) {
+	if cfg.Listen.ConnectAuthFile == "" {
+		return nil, nil //nolint:nilnil // no file means no credential, which Options reads as nil
+	}
+	auth, err := proxy.LoadConnectAuth(cfg.Listen.ConnectAuthFile)
+	if err != nil {
+		return nil, fmt.Errorf("connect auth: %w", err)
+	}
+	return auth, nil
+}
+
+// identities is what the document says about who the proxy acts as and who
+// may reach it: one process source, or a selector of one source per sandbox
+// with the assertion check that selects from it, and the connect credential.
+// A field is nil where the document names nothing for it.
+type identities struct {
+	credentials credential.Source
+	selector    *credential.Selector
+	sandboxes   *proxy.SandboxIdentification
+	connectAuth *proxy.ConnectAuth
+}
+
+// identitySources builds the identities from the document.
+func identitySources(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (identities, error) {
+	var (
+		ids identities
+		err error
+	)
 	switch kind := cfg.CredentialSource(); kind {
 	case config.SourceNone:
-		return nil, nil //nolint:nilnil // no source is a posture, not a failure
 	case config.SourceStaticFile:
-		source, err := credential.LoadStaticFile(cfg.Credentials.StaticFile)
-		if err != nil {
-			return nil, fmt.Errorf("credentials: %w", err)
-		}
-		return source, nil
+		ids.credentials, ids.selector, err = staticSources(cfg)
 	case config.SourceExchange:
-		return tokenExchange(cfg, deny, roots)
+		ids.credentials, ids.selector, err = exchangeSources(cfg, deny, roots)
 	default:
-		return nil, fmt.Errorf("%w: %q is not a source this build reads", errCredentials, kind)
+		err = fmt.Errorf("%w: %q is not a source this build reads", errCredentials, kind)
 	}
+	if err != nil {
+		return identities{}, err
+	}
+	if ids.sandboxes, err = sandboxIdentification(cfg, ids.selector); err != nil {
+		return identities{}, err
+	}
+	if ids.connectAuth, err = connectAuthFor(cfg); err != nil {
+		return identities{}, err
+	}
+	return ids, nil
+}
+
+// staticSources reads credentials.static_file: the file itself for one
+// sandbox, or one view per sandbox and application entry. The process
+// source reads the shared entries alone, so a scoped entry in a document
+// that maps nothing is refused rather than ignored.
+//
+//nolint:ireturn // the process source is the interface the proxy consumes
+func staticSources(cfg *config.Config) (credential.Source, *credential.Selector, error) {
+	file, err := credential.LoadStaticFile(cfg.Credentials.StaticFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("credentials: %w", err)
+	}
+	if len(cfg.Sandboxes) == 0 && len(cfg.Applications) == 0 {
+		if scoped := file.Scoped(); scoped > 0 {
+			return nil, nil, fmt.Errorf("%w: credentials.static_file: %d entries are scoped to a sandbox or application, "+
+				"which needs sandbox_assertion and sandboxes or applications in the document", errCredentials, scoped)
+		}
+		return file, nil, nil
+	}
+	selector := credential.NewSelector()
+	if err := addStaticSandboxes(selector, file, cfg); err != nil {
+		return nil, nil, err
+	}
+	if err := addStaticApplications(selector, file, cfg); err != nil {
+		return nil, nil, err
+	}
+	return nil, selector, nil
+}
+
+// addStaticSandboxes maps each sandbox entry to its view of the file.
+func addStaticSandboxes(selector *credential.Selector, file *credential.StaticFile, cfg *config.Config) error {
+	// A static entry selects by sandbox name alone, so a name that repeats
+	// across workspaces could not be told apart. Zone mode has no such
+	// limit, because each entry names its own identity.
+	byName := make(map[string]struct{}, len(cfg.Sandboxes))
+	for _, entry := range cfg.Sandboxes {
+		if _, repeated := byName[entry.Name]; repeated {
+			return fmt.Errorf("%w: sandbox name %q repeats across workspaces; "+
+				"a static credential file selects by name alone", errCredentials, entry.Name)
+		}
+		byName[entry.Name] = struct{}{}
+		key := credential.SandboxKey{Name: entry.Name, Workspace: entry.Workspace}
+		if err := selector.Add(key, credential.Selected{Source: file.ForSandbox(entry.Name)}); err != nil {
+			return fmt.Errorf("credentials: %w", err)
+		}
+	}
+	return refuseUnmapped(cfg, "sandbox", "sandboxes", file.Sandboxes(), byName)
+}
+
+// addStaticApplications maps each application entry to its view of the
+// file.
+func addStaticApplications(selector *credential.Selector, file *credential.StaticFile, cfg *config.Config) error {
+	byName := make(map[string]struct{}, len(cfg.Applications))
+	for _, entry := range cfg.Applications {
+		byName[entry.Name] = struct{}{}
+		selected := credential.Selected{Source: file.ForApplication(entry.Name)}
+		if err := selector.AddApplication(entry.Name, selected); err != nil {
+			return fmt.Errorf("credentials: %w", err)
+		}
+	}
+	return refuseUnmapped(cfg, "application", "applications", file.Applications(), byName)
+}
+
+// refuseUnmapped refuses a file entry scoped to a name the document does not
+// map. Such an entry would never answer, and the name would read the shared
+// credential instead.
+func refuseUnmapped(cfg *config.Config, what, list string, named []string, mapped map[string]struct{}) error {
+	for _, name := range named {
+		if _, ok := mapped[name]; !ok {
+			return fmt.Errorf("%w: %s holds entries for %s %q, which %s does not name",
+				errCredentials, cfg.Credentials.StaticFile, what, name, list)
+		}
+	}
+	return nil
+}
+
+// exchangeSources builds the exchange for the top-level identity, or one
+// exchange per sandbox and application entry.
+//
+//nolint:ireturn // the process source is the interface the proxy consumes
+func exchangeSources(
+	cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool,
+) (credential.Source, *credential.Selector, error) {
+	if cfg.Identity != nil {
+		source, err := tokenExchange(cfg.Identity, cfg, deny, roots)
+		return source, nil, err
+	}
+	selector := credential.NewSelector()
+	for _, entry := range cfg.Sandboxes {
+		selected, err := entrySource(entry.Identity, cfg, deny, roots)
+		if err != nil {
+			return nil, nil, fmt.Errorf("sandbox %q: %w", entry.Name, err)
+		}
+		key := credential.SandboxKey{Name: entry.Name, Workspace: entry.Workspace}
+		if err := selector.Add(key, selected); err != nil {
+			return nil, nil, fmt.Errorf("credentials: %w", err)
+		}
+	}
+	for _, entry := range cfg.Applications {
+		selected, err := entrySource(entry.Identity, cfg, deny, roots)
+		if err != nil {
+			return nil, nil, fmt.Errorf("application %q: %w", entry.Name, err)
+		}
+		if err := selector.AddApplication(entry.Name, selected); err != nil {
+			return nil, nil, fmt.Errorf("credentials: %w", err)
+		}
+	}
+	return nil, selector, nil
+}
+
+// entrySource builds the source one entry's identity names: the exchange as
+// the asserted sandbox when the identity names the assertion as its client,
+// or else the exchange as the identity's own application credential.
+func entrySource(
+	identity *config.Identity, cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool,
+) (credential.Selected, error) {
+	if identity.ClientAssertion == config.ClientAssertionSandbox {
+		source, err := exchange.NewAssertionSource(exchange.AssertionOptions{
+			ZoneURL:  identity.ZoneURL,
+			Timeout:  cfg.Limits.ExchangeTimeout.Duration(),
+			Roots:    roots,
+			DenyAddr: deny.DeniesAddr,
+		})
+		if err != nil {
+			return credential.Selected{}, fmt.Errorf("credentials: %w", err)
+		}
+		return credential.Selected{Source: source, SubjectIsClient: true}, nil
+	}
+	source, err := tokenExchange(identity, cfg, deny, roots)
+	if err != nil {
+		return credential.Selected{}, err
+	}
+	return credential.Selected{Source: source, ClientID: identity.ClientID}, nil
+}
+
+// sandboxIdentification builds the per-request sandbox check from
+// sandbox_assertion. Nil when the document has none.
+func sandboxIdentification(cfg *config.Config, selector *credential.Selector) (*proxy.SandboxIdentification, error) {
+	if cfg.SandboxAssertion == nil {
+		return nil, nil //nolint:nilnil // one sandbox per process is the default posture
+	}
+	settings := cfg.SandboxAssertion
+	pemBytes, err := os.ReadFile(settings.IssuerKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox assertion: %w", err)
+	}
+	var opts []assertion.Option
+	if settings.Issuer != "" {
+		opts = append(opts, assertion.WithIssuer(settings.Issuer))
+	}
+	verifier, err := assertion.NewVerifier(pemBytes, settings.Audience, settings.MaxAge.Duration(), opts...)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox assertion: %w", err)
+	}
+	return &proxy.SandboxIdentification{Header: settings.Header, Verifier: verifier, Selector: selector}, nil
 }
 
 // tokenExchange builds a source that mints a credential for each request
 // against the zone. It reads the client secret once, so a rotated secret
 // takes effect after restart.
-func tokenExchange(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool) (*exchange.Source, error) {
+func tokenExchange(
+	identity *config.Identity, cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool,
+) (*exchange.Source, error) {
 	var secret string
-	if cfg.Identity.ClientSecretFile != "" {
-		read, err := credential.ReadSecretFile(cfg.Identity.ClientSecretFile)
+	if identity.ClientSecretFile != "" {
+		read, err := credential.ReadSecretFile(identity.ClientSecretFile)
 		if err != nil {
 			return nil, fmt.Errorf("credentials: %w", err)
 		}
 		secret = read
 	}
 	source, err := exchange.New(exchange.Options{
-		ZoneURL:           cfg.Identity.ZoneURL,
-		ClientID:          cfg.Identity.ClientID,
-		ImpersonateUser:   cfg.Identity.Impersonate.User,
-		WorkloadTokenFile: cfg.Identity.WorkloadTokenFile,
+		ZoneURL:           identity.ZoneURL,
+		ClientID:          identity.ClientID,
+		ImpersonateUser:   identity.Impersonate.User,
+		WorkloadTokenFile: identity.WorkloadTokenFile,
 		ClientSecret:      secret,
 		Timeout:           cfg.Limits.ExchangeTimeout.Duration(),
 		Roots:             roots,
@@ -477,10 +689,7 @@ func tokenExchange(cfg *config.Config, deny *policy.DenyList, roots *x509.CertPo
 // info is what the admin socket reports at /info.
 func (p *process) info() any {
 	deny := p.matcher.DenyList()
-	source := "none"
-	if p.credentials != nil {
-		source = p.credentials.Describe()
-	}
+	source := p.describeSource()
 	return map[string]any{
 		"version":              version(),
 		"sandbox_id":           p.cfg.Sandbox.ID,

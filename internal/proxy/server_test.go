@@ -288,6 +288,12 @@ type harnessOptions struct {
 	endpoints func(port int) []policy.Endpoint
 	// credentials is the source for endpoint credentials. Nil means no source.
 	credentials credential.Source
+	// connectAuth requires a Proxy-Authorization on every CONNECT. Nil
+	// accepts every client.
+	connectAuth *proxy.ConnectAuth
+	// sandboxes identifies the sandbox behind each request. Nil serves one
+	// sandbox with credentials.
+	sandboxes *proxy.SandboxIdentification
 }
 
 func start(t *testing.T, opts harnessOptions) *harness {
@@ -320,6 +326,8 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		Matcher:      matcher,
 		Certificates: store,
 		Credentials:  opts.credentials,
+		ConnectAuth:  opts.connectAuth,
+		Sandboxes:    opts.sandboxes,
 		Logger:       slog.New(slog.NewJSONHandler(logs, nil)),
 		Audit: audit.NewStamped(sink, audit.Stamp{
 			SandboxID: "sbx-test", DocumentDigest: "sha256:doc", ConfigDigest: "sha256:cfg",
@@ -462,6 +470,55 @@ func (h *harness) connect(t *testing.T, conn net.Conn, reader *bufio.Reader, aut
 	t.Helper()
 	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, authority)
 	return readConnect(t, reader)
+}
+
+// connectWithAuth sends a CONNECT carrying a Proxy-Authorization value.
+func (h *harness) connectWithAuth(
+	t *testing.T, conn net.Conn, reader *bufio.Reader, authority, proxyAuthorization string,
+) reply {
+	t.Helper()
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n",
+		authority, authority, proxyAuthorization)
+	return readConnect(t, reader)
+}
+
+// TestConnectRequiresTheCredential pins the connection-level credential: a
+// CONNECT without the configured Proxy-Authorization is refused with 407
+// before any decision, and one with it proceeds to the decision.
+func TestConnectRequiresTheCredential(t *testing.T) {
+	t.Parallel()
+	auth, err := proxy.LoadConnectAuth(writeConnectAuth(t, "openshell:human-being", 0o600))
+	require.NoError(t, err)
+	h := start(t, harnessOptions{connectAuth: auth})
+	authority := upstreamHost + ":" + strconv.Itoa(h.upstream.port)
+
+	t.Run("without the credential", func(t *testing.T) {
+		t.Parallel()
+		conn := h.dial(t)
+		answer := h.connect(t, conn, bufio.NewReader(conn), authority)
+		assert.Equal(t, http.StatusProxyAuthRequired, answer.status, "CONNECT status")
+		assert.Equal(t, policy.ReasonProxyUnauthenticated, answer.reason(), "CONNECT reason")
+		assert.Equal(t, `Basic realm="keycard"`, answer.header.Get("Proxy-Authenticate"), "the challenge")
+		require.NotEmpty(t, answer.id(), "the refusal holds a connection id")
+		record := h.sink.find(t, "refusal", byConnection(answer.id(), policy.ReasonProxyUnauthenticated))
+		assert.Equal(t, audit.ScopeConnection, record.Scope, "record scope")
+		assert.Equal(t, upstreamHost, record.Destination.Host, "record host")
+		assert.Zero(t, h.store.Mints(), "an unauthenticated connection minted a leaf")
+	})
+
+	t.Run("with the wrong password", func(t *testing.T) {
+		t.Parallel()
+		conn := h.dial(t)
+		answer := h.connectWithAuth(t, conn, bufio.NewReader(conn), authority, basic("openshell:troy"))
+		assert.Equal(t, http.StatusProxyAuthRequired, answer.status, "CONNECT status")
+	})
+
+	t.Run("with the credential", func(t *testing.T) {
+		t.Parallel()
+		conn := h.dial(t)
+		answer := h.connectWithAuth(t, conn, bufio.NewReader(conn), authority, basic("openshell:human-being"))
+		assert.Equal(t, http.StatusOK, answer.status, "CONNECT status")
+	})
 }
 
 // readConnect reads the answer to a CONNECT. A 200 has no body, and what

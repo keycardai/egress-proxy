@@ -1,0 +1,193 @@
+# Sandbox assertions as workload identity end to end with the built binary:
+# two applications share one proxy that holds no credential of its own. The
+# proxy presents each request's assertion to the zone as the client
+# assertion of a client_credentials grant, the zone discovers the issuer's
+# key from the assertion, matches the subject against its per-application
+# patterns, and issues that application's token. A sandbox whose subject
+# matches no pattern is refused by the zone before it reaches the upstream,
+# an assertion whose subject contradicts its claims is refused by the proxy
+# before any exchange, and a second request for one subject and resource
+# is served from the cache.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+chmod 0777 $ADMIN_DIR
+
+# The issuer publishes the key the assertions are signed with. The zone
+# accepts subjects of two applications and nothing else.
+assertkey keys
+issuer keys ISSUER
+fakeas -workload 'openshell:review-agent:*=review-agent' -workload 'openshell:research-agent:*=research-agent' zone https://localhost:$UPSTREAM_PORT/granted/=zone-issued-sekrit
+
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt,$WORK/zone/ca.crt
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket counts the applications and holds no credential.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"credential_source": "3 application identities selected by assertion, 3 exchanged as the sandbox"'
+! stdout 'sekrit'
+
+# Each assertion names the issuer, the proxy and the zone's token endpoint
+# as audiences, and a fixed sandbox id so the subject is known. The chang
+# assertion verifies but matches no pattern in the zone.
+assertion -app review-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 7f3a keys REVIEW keycard-demo
+assertion -app research-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 8b4c keys RESEARCH study-group
+assertion -app chang-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 9c5d keys CHANG keycard-demo
+assertion -app review-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 7f3a -sub openshell:research-agent:7f3a keys MIXED keycard-demo
+
+# Each application gets the token the zone issued for it, and the
+# placeholder the workload sent is replaced.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$REVIEW -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/granted/review
+stdout '^hello from upstream /granted/review$'
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$RESEARCH https://localhost:$UPSTREAM_PORT/granted/research
+stdout '^hello from upstream /granted/research$'
+
+# A second request for the same subject and resource is served from the
+# cache, so the zone sees no second token request for it.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$REVIEW https://localhost:$UPSTREAM_PORT/granted/review-again
+stdout '^hello from upstream /granted/review-again$'
+
+# The zone refuses a subject no pattern covers with invalid_client, which
+# the proxy denies with 403 as exchange_denied. The request never reaches
+# the upstream. The refusal carries the zone's error_description.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$CHANG https://localhost:$UPSTREAM_PORT/granted/chang
+stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: exchange_denied'
+stdout 'X-Keycard-Deny-Detail: no application credential matches openshell:chang-agent:9c5d'
+
+# An assertion whose subject names another application than its app claim
+# is refused by the proxy as sandbox_unidentified. No exchange is made, so
+# the zone never sees a subject the signer contradicted.
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$MIXED https://localhost:$UPSTREAM_PORT/granted/mixed
+stdout '^403$'
+
+# What the upstream saw: each application's token, an empty assertion
+# header on every request, and nothing for the refusal.
+grep 'request GET /granted/review host=localhost:\d+ authorization="Bearer review-agent:zone-issued-sekrit" assertion=""' upstream/requests.log
+grep 'request GET /granted/research host=localhost:\d+ authorization="Bearer research-agent:zone-issued-sekrit" assertion=""' upstream/requests.log
+grep 'request GET /granted/review-again host=localhost:\d+ authorization="Bearer review-agent:zone-issued-sekrit" assertion=""' upstream/requests.log
+! grep '/granted/chang' upstream/requests.log
+! grep '/granted/mixed' upstream/requests.log
+grep -count=3 '^request ' upstream/requests.log
+
+# What the zone saw: no client_id on any request, the subject as the actor,
+# one token request per subject and resource, and the refusal.
+grep 'exchange client= actor="openshell:review-agent:7f3a" subject= resource=https://localhost:[0-9]+/granted/ error=""' zone/requests.log
+grep 'exchange client= actor="openshell:research-agent:8b4c" subject= resource=https://localhost:[0-9]+/granted/ error=""' zone/requests.log
+grep 'exchange client= actor="openshell:chang-agent:9c5d" subject= resource=https://localhost:[0-9]+/granted/ error="invalid_client"' zone/requests.log
+grep -count=1 'actor="openshell:review-agent:7f3a"' zone/requests.log
+grep -count=3 '^exchange ' zone/requests.log
+
+sigterm
+wait proxy
+
+# The process announces the mechanism on every start.
+stderr '"msg":"credential source"'
+stderr '3 application identities selected by assertion, 3 exchanged as the sandbox'
+
+# Request records name the application, the sandbox, its id and the
+# subject as the client the zone knew.
+audit stdout scope=request request.path=/granted/review decision.reason=endpoint_allowed application=review-agent sandbox_id=keycard-demo sandbox_uuid=7f3a identity.client_id=openshell:review-agent:7f3a outcome.status=200
+audit stdout scope=request request.path=/granted/research decision.reason=endpoint_allowed application=research-agent sandbox_id=study-group sandbox_uuid=8b4c identity.client_id=openshell:research-agent:8b4c outcome.status=200
+audit stdout scope=request request.path=/granted/review-again decision.reason=endpoint_allowed identity.client_id=openshell:review-agent:7f3a outcome.status=200
+audit stdout scope=request request.path=/granted/chang decision.verdict=deny decision.reason=exchange_denied application=chang-agent sandbox_id=keycard-demo sandbox_uuid=9c5d identity.client_id=openshell:chang-agent:9c5d 'decision.error~invalid_client: no application credential matches openshell:chang-agent:9c5d'
+stderr '"reason":"exchange_denied","detail":"no application credential matches openshell:chang-agent:9c5d"'
+audit stdout scope=request request.path=/granted/mixed decision.verdict=deny decision.reason=sandbox_unidentified sandbox_id=acceptance 'decision.error~sub'
+
+# No token, no assertion and no issued credential reaches the audit stream
+# or the log. A JWT begins with the base64 of '{"', which is eyJ.
+! stdout 'sekrit'
+! stderr 'sekrit'
+! stdout 'eyJ'
+! stderr 'eyJ'
+
+# A second proxy pins the issuer: an assertion under the default issuer is
+# refused as sandbox_unidentified, and one under the pinned issuer is
+# served. The zone sees the pinned request, because the cache is per
+# process.
+freeport PINNED_PROXY_PORT
+shortdir PINNED_ADMIN_DIR
+chmod 0777 $PINNED_ADMIN_DIR
+expand pinned.yaml
+assertion -app review-agent -id 7f3a keys UNPINNED keycard-demo
+
+env EGRESS_PROXY_CONFIG=pinned.yaml
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PINNED_PROXY_PORT
+env EGRESS_PROXY_ADMIN=$PINNED_ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/pinned-ca
+exec egress-proxy &pinnedproxy&
+waitfile pinned-ca/ca.crt
+waitport 127.0.0.1:$PINNED_PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PINNED_PROXY_PORT
+exec curl -sS --cacert pinned-ca/ca.crt -D - -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$UNPINNED https://localhost:$UPSTREAM_PORT/granted/unpinned
+stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: sandbox_unidentified'
+! stdout 'X-Keycard-Deny-Detail'
+exec curl -sS --cacert pinned-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$REVIEW https://localhost:$UPSTREAM_PORT/granted/pinned
+stdout '^hello from upstream /granted/pinned$'
+
+sigterm
+wait pinnedproxy
+audit stdout scope=request request.path=/granted/unpinned decision.verdict=deny decision.reason=sandbox_unidentified 'decision.error~issuer'
+audit stdout scope=request request.path=/granted/pinned decision.reason=endpoint_allowed identity.client_id=openshell:review-agent:7f3a outcome.status=200
+grep -count=2 'actor="openshell:review-agent:7f3a"' zone/requests.log
+! stdout 'eyJ'
+! stderr 'eyJ'
+
+-- config.yaml --
+version: 1
+# The upstream and the zone are on loopback, which the platform deny list
+# covers.
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/key.pub
+applications:
+  - name: review-agent
+    identity:
+      zone_url: "https://localhost:$ZONE_PORT"
+      client_assertion: sandbox
+  - name: research-agent
+    identity:
+      zone_url: "https://localhost:$ZONE_PORT"
+      client_assertion: sandbox
+  - name: chang-agent
+    identity:
+      zone_url: "https://localhost:$ZONE_PORT"
+      client_assertion: sandbox
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/granted/
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+
+-- pinned.yaml --
+version: 1
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/key.pub
+  issuer: $ISSUER
+applications:
+  - name: review-agent
+    identity:
+      zone_url: "https://localhost:$ZONE_PORT"
+      client_assertion: sandbox
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/granted/
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

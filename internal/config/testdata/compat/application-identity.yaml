@@ -1,0 +1,41 @@
+# The first document with applications beside sandboxes: an assertion whose
+# app claim names an application selects that application's identity, and
+# one without the claim selects by sandbox name. Kept so a later schema
+# still parses it.
+version: 1
+
+sandbox:
+  id: "openshell-local"
+
+sandbox_assertion:
+  issuer_key_file: "/etc/keycard/middleware.pub"
+
+applications:
+  - name: review-agent
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "review-application"
+      client_secret_file: "/run/secrets/review-agent"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+  - name: research-agent
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "research-application"
+      client_secret_file: "/run/secrets/research-agent"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+
+sandboxes:
+  - name: keycard-demo
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "demo-application"
+      client_secret_file: "/run/secrets/keycard-demo"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+
+endpoints:
+  - url: "https://api.github.com/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

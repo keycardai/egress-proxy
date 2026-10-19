@@ -100,6 +100,9 @@ func TestAcceptance(t *testing.T) {
 			"linuxbin":     cmdLinuxBin,
 			"tlscert":      cmdTLSCert,
 			"sandboximage": cmdSandboxImage,
+			"assertkey":    cmdAssertKey,
+			"assertion":    cmdAssertion,
+			"issuer":       cmdIssuer,
 		},
 	})
 }
@@ -247,17 +250,28 @@ var zoneForger = sync.OnceValues(func() (*fakeas.Signer, error) {
 
 // cmdFakeAS starts a fake Keycard zone over TLS in the test process:
 //
-//	fakeas DIR RESOURCE=CREDENTIAL...
+//	fakeas [-workload PATTERN=APPLICATION]... DIR RESOURCE=CREDENTIAL...
 //
 // It grants each named resource the credential beside it and refuses other
 // resources with access_denied. It verifies a client assertion against the
-// key satoken signs with. It writes its CA certificate to DIR/ca.crt,
-// appends one line per token request to DIR/requests.log, and exports its port
-// as $ZONE_PORT. It exports the known client as $ZONE_CLIENT_ID and
-// $ZONE_CLIENT_SECRET. It stops when the script ends.
+// key satoken signs with. Each -workload maps a subject pattern to the
+// application a sandbox assertion with that subject acts as, the way a
+// token credential does in the zone. It writes its CA certificate to
+// DIR/ca.crt, appends one line per token request to DIR/requests.log, and
+// exports its port as $ZONE_PORT. It exports the known client as
+// $ZONE_CLIENT_ID and $ZONE_CLIENT_SECRET. It stops when the script ends.
 func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
+	workloads := make(map[string]string)
+	for len(args) >= 2 && args[0] == "-workload" {
+		pattern, application, ok := strings.Cut(args[1], "=")
+		if !ok {
+			ts.Fatalf("fakeas: %q is not PATTERN=APPLICATION", args[1])
+		}
+		workloads[pattern] = application
+		args = args[2:]
+	}
 	if neg || len(args) < 2 {
-		ts.Fatalf("usage: fakeas DIR RESOURCE=CREDENTIAL...")
+		ts.Fatalf("usage: fakeas [-workload PATTERN=APPLICATION]... DIR RESOURCE=CREDENTIAL...")
 	}
 	dir := ts.MkAbs(args[0])
 	grants := make(map[string]string, len(args)-1)
@@ -284,6 +298,7 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 		ClientSecrets:    map[string]string{zoneClientID: zoneClientSecret},
 		AssertionClients: []string{zoneClientID},
 		Assertions:       signer.Verifier(),
+		WorkloadSubjects: workloads,
 	})
 	server := httptest.NewUnstartedServer(fakeas.LogExchanges(zone, requests))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}
@@ -346,8 +361,9 @@ const (
 // request to requests.
 func upstreamHandler(requests io.Writer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(requests, "request %s %s host=%s authorization=%q\n",
-			r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("Authorization"))
+		fmt.Fprintf(requests, "request %s %s host=%s authorization=%q assertion=%q\n",
+			r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("Authorization"),
+			r.Header.Get("X-Keycard-Sandbox-Assertion"))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		switch {
 		case r.URL.Path == "/header/bad-trailer":

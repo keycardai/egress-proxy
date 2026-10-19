@@ -220,6 +220,7 @@ func flagsWithNoDefault() map[string]bool {
 		"ca-state-dir":           true,
 		"client-secret-file":     true,
 		"credential-static-file": true,
+		"connect-auth-file":      true,
 		"upstream-ca-file":       true,
 	}
 }

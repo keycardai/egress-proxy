@@ -53,14 +53,19 @@ stdout '^hello from upstream /granted/repos$'
 
 # No zone policy grants this endpoint resource. The zone answers
 # access_denied, the proxy denies with exchange_denied, and the request never
-# reaches the upstream.
-exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
+# reaches the upstream. The refusal carries the zone's error_description.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
 stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: exchange_denied'
+stdout 'X-Keycard-Deny-Detail: no policy grants https://localhost:[0-9]+/refused/'
 
 # The proxy denies this path before an exchange. The zone receives no request.
-# The count below proves it.
-exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/unlisted/thing
+# The count below proves it. A refusal with no exchange behind it carries no
+# detail.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/unlisted/thing
 stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: no_matching_endpoint'
+! stdout 'X-Keycard-Deny-Detail'
 
 # The upstream received only the granted request with the issued credential.
 grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-issued-sekrit"' upstream/requests.log
@@ -81,9 +86,13 @@ stderr '"msg":"credential source"'
 stderr 'a Keycard token exchange at https://localhost:'
 ! stderr 'acceptance-client-secret'
 
-# Each decision has a record. The two failure classes have separate reasons.
+# The refusal log line carries the zone's reason beside the code.
+stderr '"msg":"refused a request","request_id":"[A-Z0-9]+","reason":"exchange_denied","detail":"no policy grants https://localhost:[0-9]+/refused/"'
+
+# Each decision has a record. The two failure classes have separate reasons,
+# and the refused exchange keeps the zone's answer in decision.error.
 audit stdout scope=request request.path=/granted/repos decision.reason=endpoint_allowed outcome.status=200
-audit stdout scope=request request.path=/refused/thing decision.verdict=deny decision.reason=exchange_denied decision.endpoint=localhost:$UPSTREAM_PORT/refused/
+audit stdout scope=request request.path=/refused/thing decision.verdict=deny decision.reason=exchange_denied decision.endpoint=localhost:$UPSTREAM_PORT/refused/ 'decision.error~access_denied: no policy grants https://localhost:[0-9]+/refused/'
 audit stdout scope=request request.path=/unlisted/thing decision.verdict=deny decision.reason=no_matching_endpoint
 
 # The audit stream and log contain no credential or secret.
@@ -108,12 +117,16 @@ exec egress-proxy &deadproxy&
 waitfile dead-ca/ca.crt
 waitport 127.0.0.1:$DEAD_PROXY_PORT
 
+# The zone described nothing, so the refusal carries the class of failure.
 env HTTPS_PROXY=http://127.0.0.1:$DEAD_PROXY_PORT
-exec curl -sS --cacert dead-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
+exec curl -sS --cacert dead-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
 stdout '^502$'
+stdout 'X-Keycard-Deny-Reason: exchange_failed'
+stdout 'X-Keycard-Deny-Detail: the exchange did not complete'
 
 sigterm
 wait deadproxy
+stderr '"reason":"exchange_failed","detail":"the exchange did not complete"'
 audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_failed
 
 -- config.yaml --

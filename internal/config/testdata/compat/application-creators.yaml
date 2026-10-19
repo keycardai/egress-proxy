@@ -1,0 +1,34 @@
+# The first document with creators on an application entry. The proxy
+# accepts the list and does not read it. Kept so a later schema still
+# parses it.
+version: 1
+
+sandbox:
+  id: "openshell-local"
+
+sandbox_assertion:
+  issuer_key_file: "/etc/keycard/middleware.pub"
+
+applications:
+  - name: review-agent
+    creators:
+      - "troy.barnes@greendale.edu"
+      - "abed.nadir@greendale.edu"
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "review-application"
+      client_secret_file: "/run/secrets/review-agent"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+  - name: research-agent
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "research-application"
+      client_secret_file: "/run/secrets/research-agent"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+
+endpoints:
+  - url: "https://api.github.com/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

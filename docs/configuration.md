@@ -91,9 +91,26 @@ document that contains both.
 | `workload_token_file` | `EGRESS_PROXY_WORKLOAD_TOKEN_FILE` | The absolute path of the projected ServiceAccount token. The kubelet rewrites the token once it passes 80% of its lifetime, which defaults to one hour, or once it is older than 24 hours, and does not restart the pod. The application reloads the token itself, so the proxy reads the file again for every exchange. See [Launch a Pod using service account token projection](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#launch-a-pod-using-service-account-token-projection). A rewrite revokes nothing. The previous token stays valid until its own `exp`, which is the remaining 20% of its lifetime. The kubelet writes the new token to a timestamped directory and renames the `..data` symlink onto it, so a read never sees a partial write. See [`AtomicWriter.Write`](https://github.com/kubernetes/kubernetes/blob/v1.34.5/pkg/volume/util/atomic_writer.go#L86-L140). A read that fails or finds an empty file denies the request. The file must be a regular file no larger than 64 KiB. The proxy refuses any other kind of file at start-up, because a read of one can block past the exchange budget. |
 | `client_secret_file` | `EGRESS_PROXY_CLIENT_SECRET_FILE` | The absolute path of a file that holds the application credential secret. The proxy reads it once at start-up, so restart the process after a rotation. The file must be readable by its owner alone. The proxy refuses a file with any group or other permission bit. |
 | `impersonate.user` | `EGRESS_PROXY_IMPERSONATE_USER` | The IAM user public ID for each exchange. The ServiceAccount has the same name, so a manifest sets this value from `spec.serviceAccountName`. |
+| `client_assertion` | none | `sandbox` is the one value. The proxy holds no credential for this identity. It presents each request's sandbox assertion to the zone as the client assertion of a `client_credentials` grant, and the zone's own policy decides which application the sandbox is and what it receives. `zone_url` is required and `client_id`, `client_secret_file`, `workload_token_file` and `impersonate.user` must be empty. The key is allowed under `applications[].identity` and `sandboxes[].identity` and refused on this top-level section, because there is no per-request assertion without `sandbox_assertion`. |
+
+With `client_assertion: sandbox`, the proxy sends `grant_type=client_credentials`,
+`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
+the assertion as `client_assertion`, and the endpoint resource. It sends no
+`client_id` and no scope. The zone discovers the assertion's issuer, finds the
+key by `kid`, verifies the signature, and matches `sub` against the token
+credentials of its applications. The proxy caches the access token per
+subject and resource until 30 seconds before `expires_in` runs out, and
+caches nothing from a response without `expires_in`, so the zone opens one
+session per sandbox and resource rather than one per request. The cache
+holds at most 4096 entries. The zone answers `invalid_client` when no
+credential matches the subject, when it does not know the issuer, and when
+the signature or the expiry fails, and the proxy denies each with
+`exchange_denied`, because a retry gets the same answer. The request record
+names the assertion's subject as `identity.client_id`, which is what the
+zone calls the client.
 
 The document must set exactly one of `workload_token_file` and
-`client_secret_file`. The two mechanisms use different forms of client
+`client_secret_file` unless `client_assertion` is set. The two mechanisms use different forms of client
 authentication. Workload identity sends the projected token as an RFC 7523
 client assertion. The zone reads the ServiceAccount subject from that token,
 so its policy can allow one user for one ServiceAccount. Use workload identity
@@ -132,6 +149,7 @@ that the endpoint list denies.
 | `transparent_port` | unset | `--transparent-port`, `EGRESS_PROXY_TRANSPARENT_PORT` | The redirect target. The netsetup init container sends captured TCP here, so clients reach the proxy without a proxy variable. The frontend binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every captured connection to loopback. Other pods cannot connect to it. Unset or 0 disables the transparent frontend. Keep the port below `net.ipv4.ip_unprivileged_port_start` so an unprivileged workload cannot bind it during a sidecar restart. The proxy reads that sysctl at start-up and refuses to start when it is at or below the higher of this port and `listen.dns_port`. containerd 2.0 and later sets the sysctl to 0, so set it to `1024` in the pod's `securityContext.sysctls`. The proxy binds the port with `NET_BIND_SERVICE` from a file capability. Add `NET_BIND_SERVICE` to the sidecar and run the binary as its entrypoint. Linux only. |
 | `cleartext_ports` | `[80]` | | The captured ports the frontend reads as cleartext HTTP. It gets the destination from the `Host` header. It reads every other captured port as TLS and gets the destination from the ClientHello. Endpoints name HTTPS destinations, so the proxy reads a cleartext connection and then refuses it. `config.digest` includes this setting only when `transparent_port` is set. |
 | `dns_port` | unset | `--dns-port`, `EGRESS_PROXY_DNS_PORT` | The port of the allowlist resolver. The netsetup init container redirects UDP and TCP port 53 here. A name the document does not declare answers `NXDOMAIN` and does not reach the cluster resolver. The resolver binds this port on 127.0.0.1 and ::1 and no other address, because REDIRECT sends every query to loopback. Other pods cannot reach it. Unset or 0 disables the resolver, and the init container must then run with `--dns-port 0`. The proxy refuses to start when the two disagree. Keep the port below `net.ipv4.ip_unprivileged_port_start` for the reason `transparent_port` gives. Linux only. |
+| `connect_auth_file` | unset | `--connect-auth-file`, `EGRESS_PROXY_CONNECT_AUTH_FILE` | An absolute path to a file holding `user:password`, readable by its owner alone. With it set, every CONNECT must carry `Proxy-Authorization: Basic` with that pair, compared in constant time, or the proxy answers 407 with reason `proxy_unauthenticated` before any decision or leaf. The credential is one per proxy, so it proves that the client is a sandbox runtime this proxy was deployed for and nothing finer; `sandbox_assertion` identifies the sandbox. Unset accepts every client. |
 | `admin` | `/run/egress/admin/admin.sock` | `--admin`, `EGRESS_PROXY_ADMIN` | The admin socket as an absolute file system path. Its directory must belong to the proxy uid, which sets it to mode `0700`. The default uses a separate subdirectory of the receipt volume. Use a Unix socket, never a port. The proxy shares the pod network namespace with the workload, so a loopback port would be reachable by that workload. `egress-proxy probe` does not read the document, so set a socket path other than the default with the variable. |
 
 The admin socket answers `GET /healthz` with `ok` while the process is
@@ -257,6 +275,105 @@ Each entry uses the same resource URL as an endpoint. A request to an endpoint
 whose resource the file omits is denied with `credential_unavailable`. The
 proxy refuses repeated resources, empty credentials, and credentials with a
 control character. A control character would split the request head.
+
+With `sandboxes` present, an entry may name a `sandbox`, and the source
+answers a request with the entry whose `sandbox` matches the asserted
+sandbox name. With `applications` present, an entry may name an
+`application` instead, and the source answers a request whose assertion
+carries that `app` claim with it. An entry names at most one of the two. An
+entry naming neither answers every sandbox and application that has no
+entry of its own for that resource. An entry scoped to a name the document
+does not list stops the process, so a misspelled scope cannot fall back to
+the shared credential unnoticed.
+
+### `sandbox_assertion`
+
+One proxy serves one sandbox unless this section is present. With it, the
+proxy serves several sandboxes that share a runtime, and each request must
+prove which sandbox sent it. A component the runtime trusts, such as a
+supervisor middleware, signs a short-lived JWT naming the sandbox and places
+it in a request header. The proxy verifies the signature with the public key
+below, selects the entry the assertion names, brokers the credential as
+that identity, removes the header, and names the sandbox on the request
+record. The `app` claim wins: an assertion that carries one selects that
+application's entry in `applications`, and an assertion without one
+selects its sandbox's entry in `sandboxes`. A request without a valid
+assertion is denied with `sandbox_unidentified`. A valid assertion naming
+an application the first map does not list is denied with
+`application_unknown`, and one naming no application and a sandbox the
+second map does not list is denied with `sandbox_unknown`. Nothing in this
+section has a variable: an audit record has to name the maps that were in
+force.
+
+| Key | Default | Description |
+|---|---|---|
+| `header` | `X-Keycard-Sandbox-Assertion` | The request header that carries the assertion. Exactly one value is accepted. The proxy removes the header before the request leaves, on every endpoint. |
+| `issuer_key_file` | required | An absolute path to a PEM file holding the issuer's P-256 public key in PKIX form. The proxy reads it once at start-up, refuses to start without it, and refuses any other key type or curve. |
+| `issuer` | unset | The `iss` claim every assertion must carry, as an absolute URL. Unset accepts any issuer, and the key alone says who signed. Set it when the zone verifies the same assertion, so the proxy refuses a token minted for another issuer before any exchange. |
+| `audience` | `keycard-egress-proxy` | The audience the assertion must carry. `aud` may hold several values, such as the zone's token endpoint beside this one, and the proxy requires its own among them. |
+| `max_age` | `30s` | The longest lifetime an assertion may claim, between `1s` and `5m`. An assertion whose `exp` lies farther from its `iat` is refused whatever its signature, so a leaked issuer key cannot mint a durable one. |
+
+The assertion is a JWT signed with `ES256` and no other algorithm. Its
+header carries `kid`, the RFC 7638 thumbprint of the signing key, and
+`typ: JWT`. These claims are required: `iss`, the signer's issuer URL;
+`sub`, which must equal `openshell:<app>:<sandbox_id>` built from the two
+claims it names; `aud`, holding the audience above; `iat`, `exp` and `jti`;
+`app`, the application the sandbox is an instance of; `sandbox`, the
+sandbox name; and `sandbox_id`, the runtime's identifier for the sandbox.
+`workspace` names the OpenShell workspace and `exec_path` the binary that
+made the request, where the runtime knows them. `owner` is optional: the
+principal who created the sandbox, as the OpenShell gateway authenticated
+them, such as `openshell-client` for a client-certificate user or an OIDC
+subject. A token whose `sub` does not name its own `app` and `sandbox_id`
+is refused, so a signer cannot name one application to the proxy and
+another to the zone. The request record reports `sandbox` as `sandbox_id`,
+the runtime identifier as `sandbox_uuid`, `app` as `application` and
+`owner` as `on_behalf_of`, which is absent when the token carried none. A
+connection record cannot name a sandbox, because a CONNECT carries no
+header, so it keeps `sandbox.id` from the document.
+
+### `sandboxes`
+
+Each entry maps one sandbox to the identity the proxy acts as for its
+requests. The list requires `sandbox_assertion` and comes from the document
+alone.
+
+| Key | Default | Description |
+|---|---|---|
+| `name` | required | The sandbox name the assertion's `sandbox` claim carries. Non-empty, without whitespace. |
+| `workspace` | `default` | The workspace the assertion's `workspace` claim carries. A name may repeat across workspaces and not within one. |
+| `identity` | unset | The identity for this sandbox, with the keys and rules of the top-level `identity`. Every entry names one when the proxy exchanges for credentials, and none when `credentials.static_file` supplies them. |
+
+The top-level `identity`, `sandboxes` and `applications` are three ways to
+name an exchange identity. A document holds the top-level `identity` alone
+or any mix of the two lists. Every assertion names an application, so this
+list answers only for a document that lists no `applications`: with both
+lists present, the `app` claim selects from `applications` and an
+application that list does not name is refused whatever sandbox sent it.
+`config.digest` covers the assertion settings and every entry of both.
+
+### `applications`
+
+Each entry maps one application, the kind of sandbox, to the identity the
+proxy acts as for its requests. A sandbox id is new on every create, so a
+fleet that runs many sandboxes of one kind maps the kind once here rather
+than every instance in `sandboxes`. The list requires `sandbox_assertion`
+and comes from the document alone. An assertion that carries an `app`
+claim selects from this list and never from `sandboxes`.
+
+| Key | Default | Description |
+|---|---|---|
+| `name` | required | The application name the assertion's `app` claim carries. Non-empty, without whitespace, unique in the list. |
+| `identity` | unset | The identity for this application, with the keys and rules of the top-level `identity`. Every entry names one when the proxy exchanges for credentials, and none when `credentials.static_file` supplies them. |
+| `creators` | `[]` | The principal subjects allowed to create a sandbox of this application. Each entry is a non-empty string, unique in the list. |
+
+The proxy accepts `creators` and does not read it. The document is shared
+with the sandbox runtime, whose extension reads the list to decide who may
+create a sandbox for the application. No proxy decision depends on who
+created a sandbox, so `config.digest` excludes the list: two proxies whose
+documents differ only in `creators` share a digest. The proxy still refuses
+an empty or repeated entry, so a typo in the list stops the start rather
+than reaching the runtime unnoticed.
 
 ### `limits`
 
@@ -418,14 +535,24 @@ identifies a captured connection in the audit stream.
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a path that escapes an unreserved character or uses lowercase hex, a path that changes or ties the selected endpoint after percent-decoding, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
-| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, or the writer reported an error. `decision.error` identifies the cause. |
-| `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
+| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
+| `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. For an identity with `client_assertion: sandbox`, `invalid_client` is a refusal too: no token credential matches the sandbox's subject. A retry gets the same answer. |
 | `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it refused the exchange for a reason that is not its policy, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
 | `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and no request crosses the tunnel. |
+| `proxy_unauthenticated` | deny | connection | `listen.connect_auth_file` is set and the CONNECT carried no matching `Proxy-Authorization`. The proxy answers 407 with `Proxy-Authenticate: Basic` before any decision or leaf. |
+| `sandbox_unidentified` | deny | request | `sandbox_assertion` is configured and the request carried no assertion, more than one, or one the proxy could not verify: a bad signature, the wrong audience or issuer, an expired or over-long lifetime, a missing claim, or a `sub` that does not name the token's own `app` and `sandbox_id`. The record says which in `decision.error`, never quoting the token. |
+| `sandbox_unknown` | deny | request | The assertion verified, carries no `app` claim, and names a sandbox that no entry in `sandboxes` maps. |
+| `application_unknown` | deny | request | The assertion verified and its `app` claim names an application that no entry in `applications` maps. The sandbox it names is not consulted. |
 
 A refusal names its reason in the `X-Keycard-Deny-Reason` header. It holds
-the connection or request ID in `X-Keycard-Request-Id`. The proxy uses status
+the connection or request ID in `X-Keycard-Request-Id`. An `exchange_denied`
+or `exchange_failed` refusal also carries `X-Keycard-Deny-Detail`: the zone's
+`error_description`, or the class of failure when the zone described none,
+such as `the zone answered 404` or `the exchange ran past its budget`. The
+value is prose with control characters removed, at most 512 bytes. No other
+reason sets it. The refusal log line carries the same text as `detail`, and
+the request record keeps the full error in `decision.error`. The proxy uses status
 403 for a policy refusal, 400 for a malformed or non-proxy request, and 502 when
 a dependency fails. `upstream_failed` and `exchange_failed` both answer 502
 because a retry can succeed. A refused handshake does not have a response to put
