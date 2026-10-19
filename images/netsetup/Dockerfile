@@ -10,7 +10,7 @@
 #
 # The build stage runs on the build platform and cross-compiles for the
 # target, so a multi-platform build emulates only the apt step.
-FROM --platform=$BUILDPLATFORM golang:1.27-trixie@sha256:2f84bc93ecfb2689f782b153fdcd368b5a7ab96c1386c65cdaccf35e726d6a44 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -20,7 +20,7 @@ COPY . .
 # CGO off, so the binary runs on any base image.
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/egress-netsetup ./cmd/egress-netsetup
 
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 # egress-netsetup refuses any iptables binary that reports the nf_tables
 # backend, so it resolves the legacy binaries. The iptables package holds
 # iptables-legacy, ip6tables-legacy and their restore binaries, and the
