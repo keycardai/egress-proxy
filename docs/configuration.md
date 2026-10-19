@@ -579,5 +579,26 @@ a dependency fails. `upstream_failed` and `exchange_failed` both answer 502
 because a retry can succeed. A refused handshake does not have a response to put
 a header on. The client sees a TLS failure, and the record names the reason.
 
+The body of a refusal is a problem details document ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)),
+`Content-Type: application/problem+json`, that says what the headers say:
+
+```json
+{
+  "type": "https://keycard.ai/egress-proxy/deny/exchange_denied",
+  "title": "The zone refused to issue a credential",
+  "status": 403,
+  "detail": "no policy grants https://api.github.com/",
+  "instance": "urn:keycard:request:01HZX3Q4K7M9N2P5R8T1V4W7Y0",
+  "reason": "exchange_denied"
+}
+```
+
+`type` ends in the reason code and `reason` repeats it, so a client switches
+on the code without parsing the URI. `title` is a fixed sentence per reason.
+`detail` is the text of `X-Keycard-Deny-Detail` and is absent when that header
+is. `instance` names the ID in `X-Keycard-Request-Id` and is absent when the
+refusal has none. The document has no other members and never holds a
+credential: the detail is the same redacted text as the header.
+
 The proxy writes JSON logs to stderr. These logs contain no decision. The
 audit stream on stdout contains the decision record.

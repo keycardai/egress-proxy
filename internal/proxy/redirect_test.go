@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -199,6 +200,11 @@ func TestRedirectedConnectionsAreRefused(t *testing.T) {
 			assert.Equal(t, string(tc.wantReason), resp.Header.Get(proxy.HeaderReason), "the reason header")
 			assert.Equal(t, record.ConnectionID, resp.Header.Get(proxy.HeaderRequestID),
 				"the refusal names the record")
+			assert.Equal(t, "application/problem+json", resp.Header.Get("Content-Type"), "the refusal content type")
+			var problem map[string]any
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&problem), "the refusal body parses as JSON")
+			assert.Equal(t, string(tc.wantReason), problem["reason"], "the reason in the body")
+			assert.Equal(t, "urn:keycard:request:"+record.ConnectionID, problem["instance"], "the instance in the body")
 		})
 	}
 }

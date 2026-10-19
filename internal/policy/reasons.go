@@ -99,3 +99,52 @@ const (
 	// ReasonEndpointAllowed is the reason on every allow, at both scopes.
 	ReasonEndpointAllowed Reason = "endpoint_allowed"
 )
+
+// Title is the sentence a refusal body carries for the reason, for a human
+// reading it off a client that shows the body and nothing else. It is short
+// and ends without a period. The code is the contract; a title may be
+// reworded.
+//
+//nolint:cyclop // one arm per reason code, so exhaustive fails the build on a code with no title
+func (r Reason) Title() string {
+	switch r {
+	case ReasonDenyAlways:
+		return "The destination is on the platform deny list"
+	case ReasonNoMatchingEndpoint:
+		return "No endpoint in the document matches this request"
+	case ReasonHostMismatch:
+		return "The request names two different hosts"
+	case ReasonNoSNI:
+		return "The TLS handshake named no server"
+	case ReasonCleartextNotForwarded:
+		return "The proxy forwards no cleartext HTTP"
+	case ReasonNotRedirected:
+		return "The connection was opened to the proxy itself"
+	case ReasonMalformedRequest:
+		return "The request has no well-formed host and path"
+	case ReasonNotAProxyRequest:
+		return "The proxy listener serves no requests of its own"
+	case ReasonCredentialUnavailable:
+		return "No credential is available for this endpoint"
+	case ReasonExchangeDenied:
+		return "The zone refused to issue a credential"
+	case ReasonExchangeFailed:
+		return "The token exchange did not complete"
+	case ReasonUpstreamFailed:
+		return "The upstream produced no response"
+	case ReasonCertificateUnavailable:
+		return "The proxy could not mint a certificate for this server"
+	case ReasonProxyUnauthenticated:
+		return "The CONNECT carried no valid proxy credential"
+	case ReasonSandboxUnidentified:
+		return "The request carried no verifiable sandbox assertion"
+	case ReasonSandboxUnknown:
+		return "The assertion names a sandbox the proxy does not know"
+	case ReasonApplicationUnknown:
+		return "The assertion names an application the proxy does not know"
+	case ReasonEndpointAllowed:
+		return "The request is allowed"
+	default:
+		return "The request was refused"
+	}
+}

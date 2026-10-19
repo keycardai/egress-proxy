@@ -473,12 +473,21 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 
 			logged := h.logs.String()
 			require.Contains(t, logged, "refused a request", "the refusal is logged")
+			// The body carries the same detail as the header, or none, so
+			// the body can hold nothing the header redaction removed.
+			assert.Equal(t, "application/problem+json", answer.header.Get("Content-Type"), "the refusal content type")
+			var problem map[string]any
+			require.NoError(t, json.Unmarshal([]byte(answer.body), &problem), "the refusal body parses as JSON")
+			assert.Equal(t, string(tc.wantReason), problem["reason"], "the reason in the body")
+			assert.Equal(t, "urn:keycard:request:"+answer.id(), problem["instance"], "the instance in the body")
 			if tc.wantDetail == "" {
 				assert.Empty(t, answer.header.Values(proxy.HeaderDetail), "a refusal with no detail sets no header")
+				assert.NotContains(t, problem, "detail", "a refusal with no detail has no detail member")
 				assert.NotContains(t, logged, `"detail":`, "a refusal with no detail logs none")
 				return
 			}
 			assert.Equal(t, []string{tc.wantDetail}, answer.header.Values(proxy.HeaderDetail), "the detail header")
+			assert.Equal(t, tc.wantDetail, problem["detail"], "the detail in the body")
 			encoded, err := json.Marshal(tc.wantDetail)
 			require.NoError(t, err, "encode the detail")
 			assert.Contains(t, logged, `"detail":`+string(encoded), "the log line carries the detail")

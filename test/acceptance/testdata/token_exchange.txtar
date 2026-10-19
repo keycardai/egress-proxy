@@ -53,19 +53,25 @@ stdout '^hello from upstream /granted/repos$'
 
 # No zone policy grants this endpoint resource. The zone answers
 # access_denied, the proxy denies with exchange_denied, and the request never
-# reaches the upstream. The refusal carries the zone's error_description.
-exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
+# reaches the upstream. The refusal carries the zone's error_description in
+# the header and in the body, a problem details document (RFC 9457) that
+# audit reads as one JSON record.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o refused.json -w '%{http_code}' https://localhost:$UPSTREAM_PORT/refused/thing
 stdout '^403$'
+stdout 'Content-Type: application/problem\+json'
 stdout 'X-Keycard-Deny-Reason: exchange_denied'
 stdout 'X-Keycard-Deny-Detail: no policy grants https://localhost:[0-9]+/refused/'
+audit -all refused.json type=https://keycard.ai/egress-proxy/deny/exchange_denied 'title=The zone refused to issue a credential' status=403 reason=exchange_denied 'detail~^no policy grants https://localhost:[0-9]+/refused/$' 'instance~^urn:keycard:request:[A-Z0-9]+$'
 
 # The proxy denies this path before an exchange. The zone receives no request.
 # The count below proves it. A refusal with no exchange behind it carries no
-# detail.
-exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/unlisted/thing
+# detail, in the header or in the body.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o unlisted.json -w '%{http_code}' https://localhost:$UPSTREAM_PORT/unlisted/thing
 stdout '^403$'
 stdout 'X-Keycard-Deny-Reason: no_matching_endpoint'
 ! stdout 'X-Keycard-Deny-Detail'
+audit -all unlisted.json type=https://keycard.ai/egress-proxy/deny/no_matching_endpoint 'title=No endpoint in the document matches this request' status=403 reason=no_matching_endpoint 'instance~^urn:keycard:request:[A-Z0-9]+$'
+! audit unlisted.json 'detail~.'
 
 # The upstream received only the granted request with the issued credential.
 grep 'request GET /granted/repos host=localhost:\d+ authorization="Bearer zone-issued-sekrit"' upstream/requests.log

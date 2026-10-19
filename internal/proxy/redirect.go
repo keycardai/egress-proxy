@@ -1,12 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
-	"strings"
 	"time"
 
 	"github.com/keycardai/egress-proxy/internal/audit"
@@ -110,14 +110,14 @@ func (s *Server) redirectedDecision(dst Redirected) policy.Decision {
 // writeDenyConn writes a refusal to a raw connection, for a cleartext client
 // that sent no request the proxy will answer through net/http.
 func (s *Server) writeDenyConn(conn net.Conn, status int, reason policy.Reason, connectionID string) {
-	body := "egress-proxy: " + string(reason) + "\n"
+	body := denyBody(status, reason, connectionID, "")
 	resp := &http.Response{
 		StatusCode:    status,
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 		Header:        make(http.Header),
-		Body:          io.NopCloser(strings.NewReader(body)),
+		Body:          io.NopCloser(bytes.NewReader(body)),
 		ContentLength: int64(len(body)),
 		Close:         true,
 	}

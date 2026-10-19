@@ -29,7 +29,6 @@ const (
 	httpsPort = 443
 
 	connectEstablished = "HTTP/1.1 200 Connection established\r\n\r\n"
-	contentTypeText    = "text/plain; charset=utf-8"
 )
 
 var (
@@ -709,7 +708,7 @@ func denyDetail(decision policy.Decision) string {
 // denyHeaders sets the refusal headers. An empty detail sets no detail
 // header.
 func denyHeaders(header http.Header, reason policy.Reason, requestID, detail string) {
-	header.Set("Content-Type", contentTypeText)
+	header.Set("Content-Type", contentTypeProblem)
 	header.Set(HeaderReason, string(reason))
 	if requestID != "" {
 		header.Set(HeaderRequestID, requestID)
@@ -722,13 +721,14 @@ func denyHeaders(header http.Header, reason policy.Reason, requestID, detail str
 func writeDeny(w http.ResponseWriter, status int, reason policy.Reason, requestID, detail string) {
 	denyHeaders(w.Header(), reason, requestID, detail)
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, "egress-proxy: "+string(reason)+"\n")
+	//nolint:gosec // G705: the detail is JSON-encoded, HTML-escaped, and served as application/problem+json
+	_, _ = w.Write(denyBody(status, reason, requestID, detail))
 }
 
 // denyResponse is the refusal goproxy writes to the client, on a rejected
 // CONNECT or a cleartext request.
 func denyResponse(r *http.Request, status int, reason policy.Reason, requestID string) *http.Response {
-	resp := goproxy.NewResponse(r, contentTypeText, status, "egress-proxy: "+string(reason)+"\n")
+	resp := goproxy.NewResponse(r, contentTypeProblem, status, string(denyBody(status, reason, requestID, "")))
 	denyHeaders(resp.Header, reason, requestID, "")
 	if status == http.StatusProxyAuthRequired {
 		resp.Header.Set("Proxy-Authenticate", `Basic realm="keycard"`)

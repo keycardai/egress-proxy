@@ -3,6 +3,7 @@ package policy_test
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -569,6 +570,55 @@ func TestCanonicalEscapes(t *testing.T) {
 		t.Run(tc.path, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, policy.CanonicalEscapes(tc.path), "CanonicalEscapes(%q)", tc.path)
+		})
+	}
+}
+
+// TestEveryReasonHasATitle pins the sentence a refusal body carries for each
+// reason code. A title is short and ends without a period, so it reads as a
+// line on its own.
+func TestEveryReasonHasATitle(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		reason policy.Reason
+		want   string
+	}{
+		"deny_always":             {policy.ReasonDenyAlways, "The destination is on the platform deny list"},
+		"no_matching_endpoint":    {policy.ReasonNoMatchingEndpoint, "No endpoint in the document matches this request"},
+		"host_mismatch":           {policy.ReasonHostMismatch, "The request names two different hosts"},
+		"no_sni":                  {policy.ReasonNoSNI, "The TLS handshake named no server"},
+		"cleartext_not_forwarded": {policy.ReasonCleartextNotForwarded, "The proxy forwards no cleartext HTTP"},
+		"not_redirected":          {policy.ReasonNotRedirected, "The connection was opened to the proxy itself"},
+		"malformed_request":       {policy.ReasonMalformedRequest, "The request has no well-formed host and path"},
+		"not_a_proxy_request":     {policy.ReasonNotAProxyRequest, "The proxy listener serves no requests of its own"},
+		"credential_unavailable":  {policy.ReasonCredentialUnavailable, "No credential is available for this endpoint"},
+		"exchange_denied":         {policy.ReasonExchangeDenied, "The zone refused to issue a credential"},
+		"exchange_failed":         {policy.ReasonExchangeFailed, "The token exchange did not complete"},
+		"upstream_failed":         {policy.ReasonUpstreamFailed, "The upstream produced no response"},
+		"certificate_unavailable": {
+			policy.ReasonCertificateUnavailable,
+			"The proxy could not mint a certificate for this server",
+		},
+		"proxy_unauthenticated": {policy.ReasonProxyUnauthenticated, "The CONNECT carried no valid proxy credential"},
+		"sandbox_unidentified": {
+			policy.ReasonSandboxUnidentified,
+			"The request carried no verifiable sandbox assertion",
+		},
+		"sandbox_unknown": {policy.ReasonSandboxUnknown, "The assertion names a sandbox the proxy does not know"},
+		"application_unknown": {
+			policy.ReasonApplicationUnknown,
+			"The assertion names an application the proxy does not know",
+		},
+		"endpoint_allowed": {policy.ReasonEndpointAllowed, "The request is allowed"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+			r.Equal(name, string(tc.reason), "the case is named for its code")
+			r.Equal(tc.want, tc.reason.Title(), "the title")
+			r.NotEmpty(tc.want, "a reason has a title")
+			r.False(strings.HasSuffix(tc.want, "."), "a title ends without a period")
 		})
 	}
 }
