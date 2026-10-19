@@ -248,8 +248,8 @@ const ClientAssertionSandbox = "sandbox"
 //
 // With ClientAssertion set, the proxy holds no credential of its own: the
 // sandbox assertion on each request authenticates the client, and the zone's
-// policy decides which application the sandbox is. ZoneURL is then the only
-// other field allowed.
+// policy decides which application the sandbox is. ZoneURL and
+// Impersonate.SandboxOwner are then the only other fields allowed.
 type Identity struct {
 	ZoneURL           string `json:"zone_url"`
 	ClientID          string `json:"client_id"`
@@ -264,9 +264,12 @@ type Identity struct {
 }
 
 // Impersonate identifies the user subject this proxy impersonates in every
-// Keycard token exchange.
+// Keycard token exchange. User names one user for the process. SandboxOwner
+// names the owner of the asserted sandbox, so it needs ClientAssertion and
+// cannot be set with User.
 type Impersonate struct {
-	User string `json:"user"`
+	User         string `json:"user"`
+	SandboxOwner bool   `json:"sandbox_owner,omitempty"`
 }
 
 // Listen is where the egress proxy process accepts connections.
@@ -1192,11 +1195,16 @@ func (id *Identity) validate(where string, found *problems) {
 	if strings.TrimSpace(id.Impersonate.User) == "" {
 		found.addf("%s.impersonate.user is empty", where)
 	}
+	if id.Impersonate.SandboxOwner {
+		found.addf("%s.impersonate.sandbox_owner needs client_assertion: %s", where, ClientAssertionSandbox)
+	}
 }
 
 // validateClientAssertion refuses any credential the proxy would hold
 // beside the assertion. The assertion is the whole client authentication,
-// and the zone names the client by its subject.
+// and the zone names the client by its subject. impersonate.user is refused
+// with it: the one user such an identity can act for is the sandbox owner
+// the assertion names.
 func (id *Identity) validateClientAssertion(where string, found *problems) {
 	if id.ClientAssertion != ClientAssertionSandbox {
 		found.addf("%s.client_assertion %q is not %q", where, id.ClientAssertion, ClientAssertionSandbox)

@@ -390,9 +390,9 @@ func (refusingSource) Describe() string { return "a source that refuses every re
 
 // TestASourceFailureClassIsItsDenialReason checks the mapping used by audit
 // queries and error handling. A source reports the failure class, and the
-// proxy does not read its message to choose a reason. An exchange failure
-// also carries the zone's reason, which the refusal puts in the detail
-// header and the log line, made safe for a header value.
+// proxy does not read its message to choose a reason. A source that says
+// why also carries that reason, which the refusal puts in the detail header
+// and the log line, made safe for a header value.
 func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 	t.Parallel()
 	const zoneProse = `Application "review-agent" is not allowed to access "GitHub API"`
@@ -443,6 +443,12 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 		{
 			name: "the source holds nothing for the resource", err: credential.ErrUnavailable,
 			wantReason: policy.ReasonCredentialUnavailable, wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "the source made no exchange and said why",
+			err:        &credential.ExchangeError{Class: credential.ErrUnavailable, Detail: "the assertion names no owner"},
+			wantReason: policy.ReasonCredentialUnavailable, wantStatus: http.StatusForbidden,
+			wantDetail: "the assertion names no owner",
 		},
 		{
 			name: "a failure in no class at all", err: errSomethingElse,

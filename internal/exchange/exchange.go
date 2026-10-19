@@ -11,16 +11,16 @@
 // ServiceAccount, so a zone that accepts it permits impersonation based on the
 // secret alone. Use workload identity in a Kubernetes cluster deployment.
 //
-// AssertionSource is the other mechanism: a client_credentials grant that the
-// request's sandbox assertion authenticates, with no credential held by the
-// proxy.
+// AssertionSource is the other mechanism, with no credential held by the
+// proxy: a client_credentials grant that the request's sandbox assertion
+// authenticates, or a token exchange for the sandbox owner the assertion
+// names, authenticated the same way.
 package exchange
 
 import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,10 +36,6 @@ import (
 
 	"github.com/keycardai/egress-proxy/internal/credential"
 )
-
-// substituteUserHeader is the JOSE header for the unsigned substitute-user
-// token. The type is the vendor media type that the zone reads.
-const substituteUserHeader = `{"typ":"vnd.kc.su+jwt","alg":"none"}`
 
 // These are the OAuth error codes that mean the zone refused on policy. The
 // zone returns access_denied when its policy does not grant the resource,
@@ -128,9 +124,8 @@ func New(opts Options) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
-	subject, err := substituteUserToken(opts.ImpersonateUser)
-	if err != nil {
-		return nil, err
+	if opts.ImpersonateUser == "" {
+		return nil, fmt.Errorf("%w: it names no user to impersonate", errConfigure)
 	}
 	timeout := opts.Timeout
 	if timeout == 0 {
@@ -145,7 +140,7 @@ func New(opts Options) (*Source, error) {
 	return &Source{
 		client:      oauth.NewTokenExchangeClient(opts.ZoneURL, clientOpts...),
 		application: application,
-		subject:     subject,
+		subject:     substituteUserToken(opts.ImpersonateUser),
 		timeout:     timeout,
 		describe: fmt.Sprintf("a Keycard token exchange at %s impersonating %s, %s",
 			opts.ZoneURL, opts.ImpersonateUser, describe),
@@ -385,19 +380,4 @@ func refusedOnPolicy(code string) bool {
 	default:
 		return false
 	}
-}
-
-// substituteUserToken builds the unsigned JWT that names the impersonated
-// user. The trailing dot marks the absent signature segment.
-func substituteUserToken(user string) (string, error) {
-	if user == "" {
-		return "", fmt.Errorf("%w: it names no user to impersonate", errConfigure)
-	}
-	payload, err := json.Marshal(struct {
-		Sub string `json:"sub"`
-	}{Sub: user})
-	if err != nil {
-		return "", fmt.Errorf("%w: encode the substitute-user token: %w", errConfigure, err)
-	}
-	return oauth.Base64URLEncode([]byte(substituteUserHeader)) + "." + oauth.Base64URLEncode(payload) + ".", nil
 }

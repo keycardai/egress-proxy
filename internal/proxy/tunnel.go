@@ -271,9 +271,11 @@ type forward struct {
 	// sandbox's source when the proxy identifies sandboxes.
 	source credential.Source
 	// sandbox is the asserted sandbox, nil when none was verified. clientID
-	// is the identity the source exchanges as, empty for a static source.
+	// is the identity the source exchanges as, empty for a static source,
+	// and user the owner it exchanges for, empty unless it impersonates one.
 	sandbox  *assertion.Claims
 	clientID string
+	user     string
 	// token is the verified assertion as the request carried it. The
 	// source that exchanges as the sandbox presents it to the zone. It is
 	// a credential: NEVER log it or put it on a record.
@@ -688,13 +690,10 @@ func statusFor(reason policy.Reason) int {
 }
 
 // denyDetail is the text the detail header and the log line carry for a
-// refusal. Only an exchange refusal carries one. Control characters are
-// dropped, because a header value cannot hold them, and the text is cut at
-// maxDetail bytes on a rune boundary.
+// refusal. Only a refusal whose source said why carries one. Control
+// characters are dropped, because a header value cannot hold them, and the
+// text is cut at maxDetail bytes on a rune boundary.
 func denyDetail(decision policy.Decision) string {
-	if decision.Reason != policy.ReasonExchangeDenied && decision.Reason != policy.ReasonExchangeFailed {
-		return ""
-	}
 	detail := strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1

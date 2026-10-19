@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -98,10 +99,17 @@ func appToken(t *testing.T, key *ecdsa.PrivateKey, sandbox, application string) 
 // the sandbox. An empty owner leaves the claim out.
 func ownedToken(t *testing.T, key *ecdsa.PrivateKey, sandbox, application, owner string) string {
 	t.Helper()
+	return ownerIDToken(t, key, sandbox, application, owner, "")
+}
+
+// ownerIDToken signs an assertion that names the owner and the Keycard user
+// id the runtime resolved for them. An empty id leaves the claim out.
+func ownerIDToken(t *testing.T, key *ecdsa.PrivateKey, sandbox, application, owner, ownerID string) string {
+	t.Helper()
 	claims := assertion.Claims{
 		Issuer: "https://extension.greendale.example", Application: application,
 		Sandbox: sandbox, Workspace: "default", SandboxUUID: "uuid-" + sandbox, ExecPath: "/usr/bin/curl",
-		Owner: owner,
+		Owner: owner, OwnerID: ownerID,
 	}
 	signed, err := assertion.Sign(key, claims, []string{assertionAudience}, time.Now(), 30*time.Second)
 	require.NoError(t, err)
@@ -345,3 +353,66 @@ func TestSandboxIdentityLeavesConnectionRecordsAlone(t *testing.T) {
 	assert.Empty(t, connection.SandboxUUID)
 	assert.Nil(t, connection.Identity)
 }
+
+// TestOwnerImpersonationNamesTheUser pins the record of an identity that
+// exchanges for the sandbox owner: identity.user is the assertion's
+// owner_id beside the subject as identity.client_id, and on_behalf_of stays
+// the owner as the runtime named them. A source that acts as the sandbox
+// alone records no user, whatever the assertion carries.
+func TestOwnerImpersonationNamesTheUser(t *testing.T) {
+	t.Parallel()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	pemBytes, err := assertion.MarshalPublicKey(&priv.PublicKey)
+	require.NoError(t, err)
+	verifier, err := assertion.NewVerifier(pemBytes, assertionAudience, 30*time.Second)
+	require.NoError(t, err)
+	selector := credential.NewSelector()
+	require.NoError(t, selector.AddApplication("review-agent", credential.Selected{
+		Source: fixedSource{reviewSecret}, SubjectIsClient: true, ImpersonatesOwner: true,
+	}))
+	require.NoError(t, selector.AddApplication("study-group", credential.Selected{
+		Source: fixedSource{studySecret}, SubjectIsClient: true,
+	}))
+	h := start(t, harnessOptions{
+		upstream: httpbinUpstream(), endpoints: credentialEndpoints,
+		sandboxes: &proxy.SandboxIdentification{Header: assertionHeader, Verifier: verifier, Selector: selector},
+	})
+	tests := map[string]struct {
+		application string
+		ownerID     string
+		path        string
+		wantUser    string
+	}{
+		"the owner is impersonated": {
+			application: "review-agent", ownerID: "igmua2g0fwapl21qll7tczdw7t", path: "/anything/header/owner",
+			wantUser: "igmua2g0fwapl21qll7tczdw7t",
+		},
+		"the sandbox acts as itself": {
+			application: "study-group", ownerID: "igmua2g0fwapl21qll7tczdw7t", path: "/anything/header/sandbox",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			header := http.Header{assertionHeader: []string{
+				ownerIDToken(t, priv, "keycard-demo", tc.application, "troy.barnes", tc.ownerID),
+			}}
+			answer := fetch(t, h, origin(h)+tc.path, header)
+			require.Equal(t, http.StatusOK, answer.status, "status: %s", answer.body)
+
+			record := h.sink.find(t, name, byPath(tc.path))
+			assert.Equal(t, "troy.barnes", record.OnBehalfOf, "record on behalf of")
+			require.NotNil(t, record.Identity, "record identity")
+			assert.Equal(t, "openshell:"+tc.application+":uuid-keycard-demo", record.Identity.ClientID)
+			assert.Equal(t, tc.wantUser, record.Identity.User, "record identity user")
+		})
+	}
+}
+
+// fixedSource answers one credential for every resource.
+type fixedSource struct{ value string }
+
+func (s fixedSource) Credential(context.Context, string) (string, error) { return s.value, nil }
+
+func (fixedSource) Describe() string { return "one credential for every resource" }

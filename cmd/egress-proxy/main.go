@@ -610,22 +610,26 @@ func exchangeSources(
 }
 
 // entrySource builds the source one entry's identity names: the exchange as
-// the asserted sandbox when the identity names the assertion as its client,
-// or else the exchange as the identity's own application credential.
+// the asserted sandbox, or for its owner, when the identity names the
+// assertion as its client, or else the exchange as the identity's own
+// application credential.
 func entrySource(
 	identity *config.Identity, cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool,
 ) (credential.Selected, error) {
 	if identity.ClientAssertion == config.ClientAssertionSandbox {
 		source, err := exchange.NewAssertionSource(exchange.AssertionOptions{
-			ZoneURL:  identity.ZoneURL,
-			Timeout:  cfg.Limits.ExchangeTimeout.Duration(),
-			Roots:    roots,
-			DenyAddr: deny.DeniesAddr,
+			ZoneURL:          identity.ZoneURL,
+			Timeout:          cfg.Limits.ExchangeTimeout.Duration(),
+			Roots:            roots,
+			DenyAddr:         deny.DeniesAddr,
+			ImpersonateOwner: identity.Impersonate.SandboxOwner,
 		})
 		if err != nil {
 			return credential.Selected{}, fmt.Errorf("credentials: %w", err)
 		}
-		return credential.Selected{Source: source, SubjectIsClient: true}, nil
+		return credential.Selected{
+			Source: source, SubjectIsClient: true, ImpersonatesOwner: identity.Impersonate.SandboxOwner,
+		}, nil
 	}
 	source, err := tokenExchange(identity, cfg, deny, roots)
 	if err != nil {

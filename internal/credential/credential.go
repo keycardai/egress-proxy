@@ -58,12 +58,13 @@ var (
 	ErrExchangeFailed = errors.New("the token exchange failed")
 )
 
-// ExchangeError is an exchange failure with the reason that the refusal
-// carries. Class is ErrExchangeDenied or ErrExchangeFailed, so errors.Is
-// still picks the denial reason. Detail is prose for the response header
-// and the log line: the zone's error_description, or the class of failure
-// when the zone described none. Cause is the underlying error, which the
-// audit record keeps in full.
+// ExchangeError is a source failure with the reason that the refusal
+// carries. Class is ErrExchangeDenied, ErrExchangeFailed or ErrUnavailable,
+// so errors.Is still picks the denial reason. Detail is prose for the
+// response header and the log line: the zone's error_description, the class
+// of failure when the zone described none, or why the source made no
+// exchange. Cause is the underlying error, which the audit record keeps in
+// full.
 //
 // NEVER put a credential or a token in Detail or in Cause.
 type ExchangeError struct {

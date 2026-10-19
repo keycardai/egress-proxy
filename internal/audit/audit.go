@@ -69,9 +69,14 @@ type Record struct {
 	Outcome *Outcome `json:"outcome,omitempty"`
 }
 
-// Identity names the application the proxy exchanged as for a request.
+// Identity names the application the proxy exchanged as for a request, and
+// the user it exchanged for.
 type Identity struct {
 	ClientID string `json:"client_id,omitempty"`
+	// User is the Keycard user id the exchange impersonated: the asserted
+	// sandbox's owner_id, where the identity impersonates the sandbox
+	// owner. Absent where the identity acts as itself.
+	User string `json:"user,omitempty"`
 }
 
 // DocumentRef identifies the document by its digest, "sha256:<hex>" over the

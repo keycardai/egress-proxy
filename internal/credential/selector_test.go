@@ -205,8 +205,10 @@ func TestSelectorDescribe(t *testing.T) {
 		sandboxes    []string
 		applications []string
 		// asSandbox names the applications that exchange as the asserted
-		// sandbox.
+		// sandbox, and forOwner those among them that exchange for its
+		// owner.
 		asSandbox []string
+		forOwner  []string
 		want      string
 	}{
 		"nothing mapped": {
@@ -216,6 +218,13 @@ func TestSelectorDescribe(t *testing.T) {
 			applications: []string{"review-agent", "research-agent"},
 			asSandbox:    []string{"review-agent"},
 			want:         "2 application identities selected by assertion, 1 exchanged as the sandbox",
+		},
+		"applications exchanged for the sandbox owner": {
+			applications: []string{"review-agent", "research-agent"},
+			asSandbox:    []string{"review-agent", "research-agent"},
+			forOwner:     []string{"review-agent"},
+			want: "2 application identities selected by assertion, 2 exchanged as the sandbox, " +
+				"1 of them for the sandbox owner",
 		},
 		"sandboxes alone": {
 			sandboxes: []string{"keycard-demo", "troy-research"},
@@ -242,7 +251,9 @@ func TestSelectorDescribe(t *testing.T) {
 			}
 			for _, application := range tc.applications {
 				selected := credential.Selected{
-					Source: file.ForApplication(application), SubjectIsClient: slices.Contains(tc.asSandbox, application),
+					Source:            file.ForApplication(application),
+					SubjectIsClient:   slices.Contains(tc.asSandbox, application),
+					ImpersonatesOwner: slices.Contains(tc.forOwner, application),
 				}
 				r.NoError(selector.AddApplication(application, selected))
 			}

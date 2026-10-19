@@ -76,6 +76,9 @@ func (s *Server) identify(r *http.Request, fwd *forward) (policy.Decision, bool)
 	if selected.SubjectIsClient {
 		fwd.clientID = claims.Subject
 	}
+	if selected.ImpersonatesOwner {
+		fwd.user = claims.OwnerID
+	}
 	return policy.Decision{}, false
 }
 
@@ -107,8 +110,8 @@ func refuse(reason policy.Reason, err error) policy.Decision {
 }
 
 // stampSandbox names the asserted sandbox, its application, its owner and
-// the identity on a request record. A record with no asserted sandbox keeps
-// the process-level sandbox.id.
+// the identity on a request record, with the user the identity exchanged
+// for. A record with no asserted sandbox keeps the process-level sandbox.id.
 func stampSandbox(record *audit.Record, fwd *forward) {
 	if fwd.sandbox == nil {
 		return
@@ -118,6 +121,6 @@ func stampSandbox(record *audit.Record, fwd *forward) {
 	record.Application = fwd.sandbox.Application
 	record.OnBehalfOf = fwd.sandbox.Owner
 	if fwd.clientID != "" {
-		record.Identity = &audit.Identity{ClientID: fwd.clientID}
+		record.Identity = &audit.Identity{ClientID: fwd.clientID, User: fwd.user}
 	}
 }

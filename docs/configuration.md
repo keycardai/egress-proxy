@@ -92,6 +92,7 @@ document that contains both.
 | `client_secret_file` | `EGRESS_PROXY_CLIENT_SECRET_FILE` | The absolute path of a file that holds the application credential secret. The proxy reads it once at start-up, so restart the process after a rotation. The file must be readable by its owner alone. The proxy refuses a file with any group or other permission bit. |
 | `impersonate.user` | `EGRESS_PROXY_IMPERSONATE_USER` | The IAM user public ID for each exchange. The ServiceAccount has the same name, so a manifest sets this value from `spec.serviceAccountName`. |
 | `client_assertion` | none | `sandbox` is the one value. The proxy holds no credential for this identity. It presents each request's sandbox assertion to the zone as the client assertion of a `client_credentials` grant, and the zone's own policy decides which application the sandbox is and what it receives. `zone_url` is required and `client_id`, `client_secret_file`, `workload_token_file` and `impersonate.user` must be empty. The key is allowed under `applications[].identity` and `sandboxes[].identity` and refused on this top-level section, because there is no per-request assertion without `sandbox_assertion`. |
+| `impersonate.sandbox_owner` | none | `true` has the identity exchange for the owner of the asserted sandbox instead of acting as the sandbox itself. It needs `client_assertion: sandbox` and cannot be set with `impersonate.user`. Each request's exchange is then an RFC 8693 token exchange whose subject is the substitute-user token for the assertion's `owner_id`, authenticated by the assertion, and the zone's own policy decides whether that application may act for that user. A request whose assertion carries no `owner_id` is denied with `credential_unavailable` and the detail `the assertion names no owner`, before any exchange. |
 
 With `client_assertion: sandbox`, the proxy sends `grant_type=client_credentials`,
 `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
@@ -108,6 +109,20 @@ the signature or the expiry fails, and the proxy denies each with
 `exchange_denied`, because a retry gets the same answer. The request record
 names the assertion's subject as `identity.client_id`, which is what the
 zone calls the client.
+
+With `impersonate.sandbox_owner: true` beside it, the proxy sends
+`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+`subject_token_type=urn:keycard:params:oauth:token-type:substitute-user`,
+the unsigned substitute-user token whose `sub` is the assertion's `owner_id`
+as `subject_token`, the assertion as `client_assertion` with the same
+`client_assertion_type`, and the endpoint resource. It still sends no
+`client_id` and no scope. The zone authenticates the sandbox the same way and
+then applies its impersonation policy: `access_denied`, `unauthorized_client`
+and `invalid_grant` deny with `exchange_denied` and the zone's
+`error_description`, and any other failure with `exchange_failed`. The cache
+is per subject, owner and resource. The request record names the owner id as
+`identity.user` beside `identity.client_id`, and `on_behalf_of` stays the
+`owner` claim as the runtime named them.
 
 The document must set exactly one of `workload_token_file` and
 `client_secret_file` unless `client_assertion` is set. The two mechanisms use different forms of client
@@ -324,13 +339,17 @@ sandbox name; and `sandbox_id`, the runtime's identifier for the sandbox.
 made the request, where the runtime knows them. `owner` is optional: the
 principal who created the sandbox, as the OpenShell gateway authenticated
 them, such as `openshell-client` for a client-certificate user or an OIDC
-subject. A token whose `sub` does not name its own `app` and `sandbox_id`
+subject. `owner_id` is optional too: the Keycard user public id of that
+owner, as the runtime resolved it. An identity with
+`impersonate.sandbox_owner` exchanges for it and refuses a token without
+it. A token whose `sub` does not name its own `app` and `sandbox_id`
 is refused, so a signer cannot name one application to the proxy and
 another to the zone. The request record reports `sandbox` as `sandbox_id`,
 the runtime identifier as `sandbox_uuid`, `app` as `application` and
-`owner` as `on_behalf_of`, which is absent when the token carried none. A
-connection record cannot name a sandbox, because a CONNECT carries no
-header, so it keeps `sandbox.id` from the document.
+`owner` as `on_behalf_of`, which is absent when the token carried none.
+`owner_id` reaches the record as `identity.user` only where the identity
+exchanged for it. A connection record cannot name a sandbox, because a
+CONNECT carries no header, so it keeps `sandbox.id` from the document.
 
 ### `sandboxes`
 
@@ -549,9 +568,11 @@ A refusal names its reason in the `X-Keycard-Deny-Reason` header. It holds
 the connection or request ID in `X-Keycard-Request-Id`. An `exchange_denied`
 or `exchange_failed` refusal also carries `X-Keycard-Deny-Detail`: the zone's
 `error_description`, or the class of failure when the zone described none,
-such as `the zone answered 404` or `the exchange ran past its budget`. The
-value is prose with control characters removed, at most 512 bytes. No other
-reason sets it. The refusal log line carries the same text as `detail`, and
+such as `the zone answered 404` or `the exchange ran past its budget`. A
+`credential_unavailable` refusal carries it when the source made no exchange
+and said why, such as `the assertion names no owner`. The value is prose with
+control characters removed, at most 512 bytes. No other reason sets it. The
+refusal log line carries the same text as `detail`, and
 the request record keeps the full error in `decision.error`. The proxy uses status
 403 for a policy refusal, 400 for a malformed or non-proxy request, and 502 when
 a dependency fails. `upstream_failed` and `exchange_failed` both answer 502

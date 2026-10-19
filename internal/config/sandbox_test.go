@@ -254,9 +254,15 @@ const workloadDoc = "applications:\n" +
 	"  - name: review-agent\n    identity:\n      zone_url: https://z\n      client_assertion: sandbox\n" +
 	"  - name: research-agent\n    identity:\n      zone_url: https://z\n      client_assertion: sandbox\n"
 
+// ownerDoc maps one application to the sandbox assertion and has the proxy
+// exchange for the sandbox owner the assertion names.
+const ownerDoc = "applications:\n" +
+	"  - name: review-agent\n    identity:\n      zone_url: https://z\n      client_assertion: sandbox\n" +
+	"      impersonate: {sandbox_owner: true}\n"
+
 // TestParseClientAssertion pins the workload identity shape: an application
-// identity made of a zone and client_assertion: sandbox alone, and an
-// optional issuer the assertion must name.
+// identity made of a zone and client_assertion: sandbox alone, an optional
+// issuer the assertion must name, and the owner impersonation beside it.
 func TestParseClientAssertion(t *testing.T) {
 	t.Parallel()
 	doc := minimal + "sandbox_assertion:\n  issuer_key_file: /etc/keycard/extension.pub\n" +
@@ -269,7 +275,13 @@ func TestParseClientAssertion(t *testing.T) {
 	r.Len(cfg.Applications, 2)
 	assert.Equal(t, config.ClientAssertionSandbox, cfg.Applications[0].Identity.ClientAssertion)
 	assert.Empty(t, cfg.Applications[0].Identity.ClientID)
+	assert.False(t, cfg.Applications[0].Identity.Impersonate.SandboxOwner, "the owner is not impersonated by default")
 	assert.Equal(t, config.SourceExchange, cfg.CredentialSource(), "the assertion exchange is an exchange")
+
+	owner, err := config.Parse([]byte(minimal+assertionDoc+ownerDoc), config.Overrides{})
+	require.NoError(t, err, "Parse the owner document")
+	r.Len(owner.Applications, 1)
+	assert.True(t, owner.Applications[0].Identity.Impersonate.SandboxOwner, "the owner is impersonated")
 }
 
 func TestParseRefusesInvalidClientAssertion(t *testing.T) {
@@ -312,6 +324,26 @@ func TestParseRefusesInvalidClientAssertion(t *testing.T) {
 			wantErr: `applications[0].identity.zone_url "" must be an absolute https URL`,
 		},
 		{
+			name: "the owner impersonated without the assertion",
+			doc: minimal + assertionDoc + "applications:\n  - name: review-agent\n    identity:\n" +
+				"      zone_url: https://z\n      client_id: review\n      client_secret_file: /s\n" +
+				"      impersonate: {user: troy, sandbox_owner: true}\n",
+			wantErr: "applications[0].identity.impersonate.sandbox_owner needs client_assertion: sandbox",
+		},
+		{
+			name: "the owner and a user impersonated beside the assertion",
+			doc: minimal + assertionDoc + "applications:\n  - name: review-agent\n    identity:\n" +
+				"      zone_url: https://z\n      client_assertion: sandbox\n" +
+				"      impersonate: {user: troy, sandbox_owner: true}\n",
+			wantErr: "applications[0].identity.impersonate.user cannot be set with client_assertion",
+		},
+		{
+			name: "the owner impersonated on the top-level identity",
+			doc: minimal + "identity:\n  zone_url: https://z\n  client_id: review\n  client_secret_file: /s\n" +
+				"  impersonate: {sandbox_owner: true}\n",
+			wantErr: "identity.impersonate.sandbox_owner needs client_assertion: sandbox",
+		},
+		{
 			name:    "the assertion on the top-level identity",
 			doc:     minimal + "identity:\n  zone_url: https://z\n  client_assertion: sandbox\n",
 			wantErr: "identity.client_assertion needs a per-request sandbox assertion; use it under applications",
@@ -325,8 +357,8 @@ func TestParseRefusesInvalidClientAssertion(t *testing.T) {
 	})
 }
 
-// TestConfigDigestCoversClientAssertion pins that the mechanism and the
-// pinned issuer are in the config digest.
+// TestConfigDigestCoversClientAssertion pins that the mechanism, the
+// pinned issuer and the owner impersonation are in the config digest.
 func TestConfigDigestCoversClientAssertion(t *testing.T) {
 	t.Parallel()
 	digestOf := func(t *testing.T, doc string) string {
@@ -351,6 +383,11 @@ func TestConfigDigestCoversClientAssertion(t *testing.T) {
 		"a pinned issuer": {
 			doc: minimal + "sandbox_assertion:\n  issuer_key_file: /etc/keycard/middleware.pub\n" +
 				"  issuer: https://extension.greendale.example\n" + workloadDoc,
+			wantSame: false,
+		},
+		"the owner impersonated": {
+			doc: minimal + assertionDoc + ownerDoc +
+				"  - name: research-agent\n    identity:\n      zone_url: https://z\n      client_assertion: sandbox\n",
 			wantSame: false,
 		},
 	}

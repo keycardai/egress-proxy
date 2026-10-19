@@ -92,15 +92,32 @@ func (z *assertionZone) source(t *testing.T) *exchange.AssertionSource {
 	return source
 }
 
-// sandboxToken signs an assertion for a review-agent sandbox. The source
-// reads only the subject, so the key is fresh every time.
+// ownerSource builds the source that exchanges for the sandbox owner.
+func (z *assertionZone) ownerSource(t *testing.T) *exchange.AssertionSource {
+	t.Helper()
+	source, err := exchange.NewAssertionSource(exchange.AssertionOptions{
+		ZoneURL: z.url, Roots: z.roots, ImpersonateOwner: true,
+	})
+	require.NoError(t, err)
+	return source
+}
+
+// sandboxToken signs an assertion for a review-agent sandbox that names no
+// owner. The source reads only the claims, so the key is fresh every time.
 func sandboxToken(t *testing.T, sandboxUUID string) string {
+	t.Helper()
+	return ownedToken(t, sandboxUUID, "")
+}
+
+// ownedToken signs an assertion for a review-agent sandbox whose owner has
+// the Keycard user id ownerID. An empty id leaves the claim out.
+func ownedToken(t *testing.T, sandboxUUID, ownerID string) string {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	token, err := assertion.Sign(key, assertion.Claims{
 		Issuer: "https://extension.greendale.example", Application: "review-agent",
-		Sandbox: "keycard-demo", SandboxUUID: sandboxUUID,
+		Sandbox: "keycard-demo", SandboxUUID: sandboxUUID, Owner: "troy.barnes", OwnerID: ownerID,
 	}, []string{"keycard-egress-proxy"}, time.Now(), 30*time.Second)
 	require.NoError(t, err)
 	return token
@@ -245,4 +262,125 @@ func TestAssertionSourceDescribe(t *testing.T) {
 	zone := newAssertionZone(t, tokenAnswer{status: http.StatusOK, expiresIn: 300})
 	assert.Equal(t, "sandbox assertions exchanged at "+zone.url+" as the sandbox (client_credentials, jwt-bearer)",
 		zone.source(t).Describe())
+}
+
+// TestOwnerSourceSendsTheForm pins the wire form of the exchange for the
+// sandbox owner: a token exchange whose subject is the substitute-user
+// token for the assertion's owner_id, the assertion as a jwt-bearer client
+// assertion, the resource, and no client_id, scope or actor_token.
+func TestOwnerSourceSendsTheForm(t *testing.T) {
+	t.Parallel()
+	zone := newAssertionZone(t, tokenAnswer{status: http.StatusOK, expiresIn: 300})
+	token := ownedToken(t, "7f3a", user)
+	got, err := zone.ownerSource(t).Credential(assertion.WithToken(t.Context(), token), resource)
+	require.NoError(t, err)
+	assert.Equal(t, "issued-for-"+resource, got)
+	form := zone.last.get()
+	assert.Equal(t, []string{"urn:ietf:params:oauth:grant-type:token-exchange"}, form["grant_type"])
+	assert.Equal(t, []string{substituteUser(t, user)}, form["subject_token"])
+	assert.Equal(t, []string{"urn:keycard:params:oauth:token-type:substitute-user"}, form["subject_token_type"])
+	assert.Equal(t, []string{jwtBearer}, form["client_assertion_type"])
+	assert.Equal(t, []string{token}, form["client_assertion"])
+	assert.Equal(t, []string{resource}, form["resource"])
+	assert.NotContains(t, form, "client_id")
+	assert.NotContains(t, form, "scope")
+	assert.NotContains(t, form, "actor_token")
+}
+
+// TestOwnerSourceRefusesAnAssertionWithoutAnOwner pins that an assertion
+// with no owner_id is refused before any exchange as credential_unavailable,
+// with a detail that says so.
+func TestOwnerSourceRefusesAnAssertionWithoutAnOwner(t *testing.T) {
+	t.Parallel()
+	zone := newAssertionZone(t, tokenAnswer{status: http.StatusOK, expiresIn: 300})
+	_, err := zone.ownerSource(t).Credential(assertion.WithToken(t.Context(), sandboxToken(t, "7f3a")), resource)
+	require.ErrorIs(t, err, credential.ErrUnavailable)
+	require.NotErrorIs(t, err, credential.ErrExchangeDenied)
+	require.NotErrorIs(t, err, credential.ErrExchangeFailed)
+	assert.Equal(t, "the assertion names no owner", credential.Detail(err), "the detail the refusal carries")
+	assert.NotContains(t, err.Error(), "eyJ", "the error never quotes the token")
+	assert.Zero(t, zone.hits.Load(), "an assertion without an owner reaches no zone")
+}
+
+// TestOwnerSourceCachesPerOwner pins that the cache keys on the owner as
+// well as the subject and the resource.
+func TestOwnerSourceCachesPerOwner(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		second   string
+		owner    string
+		wantHits int64
+	}{
+		"the same subject and owner":      {second: "7f3a", owner: user, wantHits: 1},
+		"the same subject, another owner": {second: "7f3a", owner: "abed", wantHits: 2},
+		"another subject, the same owner": {second: "8b4c", owner: user, wantHits: 2},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			zone := newAssertionZone(t, tokenAnswer{status: http.StatusOK, expiresIn: 300})
+			source := zone.ownerSource(t)
+			_, err := source.Credential(assertion.WithToken(t.Context(), ownedToken(t, "7f3a", user)), resource)
+			require.NoError(t, err)
+			_, err = source.Credential(assertion.WithToken(t.Context(), ownedToken(t, tc.second, tc.owner)), resource)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantHits, zone.hits.Load(), "token requests the zone saw")
+		})
+	}
+}
+
+// TestOwnerSourceFailures pins that a zone refusal of the owner exchange
+// keeps the two classes: the impersonation codes are policy refusals, and
+// anything else is a failure.
+func TestOwnerSourceFailures(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		answer     tokenAnswer
+		want       error
+		wantDetail string
+	}{
+		"unauthorized_client is a policy refusal": {
+			answer: tokenAnswer{
+				status: http.StatusForbidden,
+				body:   map[string]any{"error": "unauthorized_client", "error_description": "review-agent cannot act for troy"},
+			},
+			want: credential.ErrExchangeDenied, wantDetail: "review-agent cannot act for troy",
+		},
+		"invalid_grant is a policy refusal": {
+			answer: tokenAnswer{
+				status: http.StatusBadRequest,
+				body:   map[string]any{"error": "invalid_grant", "error_description": "no such user"},
+			},
+			want: credential.ErrExchangeDenied, wantDetail: "no such user",
+		},
+		"invalid_client is a policy refusal": {
+			answer: tokenAnswer{
+				status: http.StatusUnauthorized,
+				body:   map[string]any{"error": "invalid_client", "error_description": "no subject matches"},
+			},
+			want: credential.ErrExchangeDenied, wantDetail: "no subject matches",
+		},
+		"a server error is a failure": {
+			answer: tokenAnswer{status: http.StatusInternalServerError, body: map[string]any{"error": "server_error"}},
+			want:   credential.ErrExchangeFailed, wantDetail: "server_error",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			zone := newAssertionZone(t, tc.answer)
+			_, err := zone.ownerSource(t).Credential(assertion.WithToken(t.Context(), ownedToken(t, "7f3a", user)), resource)
+			require.ErrorIs(t, err, tc.want)
+			assert.Equal(t, tc.wantDetail, credential.Detail(err), "the detail the refusal carries")
+			assert.NotContains(t, err.Error(), "eyJ", "the error never quotes the token")
+		})
+	}
+}
+
+// TestOwnerSourceDescribe pins the announcement for the owner exchange.
+func TestOwnerSourceDescribe(t *testing.T) {
+	t.Parallel()
+	zone := newAssertionZone(t, tokenAnswer{status: http.StatusOK, expiresIn: 300})
+	assert.Equal(t, "sandbox assertions exchanged at "+zone.url+" for the sandbox owner (token-exchange, jwt-bearer)",
+		zone.ownerSource(t).Describe())
 }

@@ -26,6 +26,9 @@ type Selected struct {
 	// assertion as its client, so the record names the assertion's subject
 	// as the client id.
 	SubjectIsClient bool
+	// ImpersonatesOwner reports that the source exchanges for the owner
+	// the assertion names, so the record names the owner id as the user.
+	ImpersonatesOwner bool
 }
 
 // Selector maps each sandbox and each application the proxy serves to its
@@ -93,7 +96,8 @@ func (s *Selector) SelectApplication(name string) (Selected, bool) {
 // socket. An empty map is left out, so a proxy serving sandboxes alone
 // never mentions applications. It says how many entries exchange as the
 // asserted sandbox, so an operator can see the proxy holds no credential
-// for them. It names no credential.
+// for them, and how many of those exchange for the sandbox owner. It names
+// no credential.
 func (s *Selector) Describe() string {
 	var counts []string
 	if n := len(s.byApplication); n > 0 {
@@ -106,23 +110,25 @@ func (s *Selector) Describe() string {
 		return "no identities selected by assertion"
 	}
 	described := strings.Join(counts, " and ") + " identities selected by assertion"
-	if n := s.subjectClients(); n > 0 {
+	if n := s.count(func(selected Selected) bool { return selected.SubjectIsClient }); n > 0 {
 		described += fmt.Sprintf(", %d exchanged as the sandbox", n)
+	}
+	if n := s.count(func(selected Selected) bool { return selected.ImpersonatesOwner }); n > 0 {
+		described += fmt.Sprintf(", %d of them for the sandbox owner", n)
 	}
 	return described
 }
 
-// subjectClients counts the entries whose source presents the assertion as
-// its client.
-func (s *Selector) subjectClients() int {
+// count is how many entries in both maps match.
+func (s *Selector) count(match func(Selected) bool) int {
 	count := 0
 	for _, selected := range s.byApplication {
-		if selected.SubjectIsClient {
+		if match(selected) {
 			count++
 		}
 	}
 	for _, selected := range s.bySandbox {
-		if selected.SubjectIsClient {
+		if match(selected) {
 			count++
 		}
 	}
