@@ -79,6 +79,23 @@ const (
 	// a server name the policy allowed. The handshake fails and no request
 	// crosses the tunnel.
 	ReasonCertificateUnavailable Reason = "certificate_unavailable"
+	// ReasonProxyUnauthenticated means the CONNECT carried no
+	// Proxy-Authorization matching listen.connect_auth_file. The proxy
+	// answers 407 before any decision or leaf.
+	ReasonProxyUnauthenticated Reason = "proxy_unauthenticated"
+	// ReasonSandboxUnidentified means sandbox_assertion is configured and
+	// the request carried no assertion, more than one, or one the proxy
+	// could not verify: a bad signature, the wrong audience, an expired or
+	// over-long lifetime, or a missing claim.
+	ReasonSandboxUnidentified Reason = "sandbox_unidentified"
+	// ReasonSandboxUnknown means the assertion verified, names no
+	// application, and names a sandbox that no entry in sandboxes maps to
+	// an identity.
+	ReasonSandboxUnknown Reason = "sandbox_unknown"
+	// ReasonApplicationUnknown means the assertion verified and its app
+	// claim names an application that no entry in applications maps to an
+	// identity. The sandbox map is not consulted for such a request.
+	ReasonApplicationUnknown Reason = "application_unknown"
 	// ReasonEndpointAllowed is the reason on every allow, at both scopes.
 	ReasonEndpointAllowed Reason = "endpoint_allowed"
 )

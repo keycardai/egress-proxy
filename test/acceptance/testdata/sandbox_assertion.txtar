@@ -1,0 +1,158 @@
+# Per-sandbox identity end to end with the built binary: two sandboxes share
+# one proxy, each request proves its sandbox with a signed assertion, the
+# proxy brokers each sandbox's own credential and names the sandbox on the
+# record, a request with no verifiable assertion or for an unmapped sandbox
+# is refused before it leaves, and the assertion header never reaches the
+# upstream. The document lists no applications, so the sandbox map answers
+# whatever application each assertion names.
+#
+# The credential source is a static file with per-sandbox entries, which the
+# process announces as a selector of sandbox identities.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+chmod 0777 $ADMIN_DIR
+expand credentials.yaml
+chmod 0600 credentials.yaml
+
+# The issuer's key, and another key the proxy does not trust.
+assertkey keys
+assertkey otherkeys
+
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt
+env EGRESS_PROXY_CREDENTIAL_STATIC_FILE=$WORK/credentials.yaml
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket names the selector and holds no credential.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"credential_source": "2 sandbox identities selected by assertion"'
+! stdout 'sekrit'
+
+assertion -app review-agent keys DEMO keycard-demo
+assertion -app review-agent keys RESEARCH troy-research
+assertion -app review-agent keys PIERCE pierce
+assertion -app review-agent -ttl -5m keys STALE keycard-demo
+assertion -app review-agent otherkeys FORGED keycard-demo
+
+# Each sandbox gets its own credential. The placeholder the workload sent is
+# replaced, and the assertion header does not reach the upstream.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$DEMO -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/header/demo
+stdout '^hello from upstream /header/demo$'
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$RESEARCH https://localhost:$UPSTREAM_PORT/header/research
+stdout '^hello from upstream /header/research$'
+
+# An endpoint with no credential still strips the assertion.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$DEMO -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/nocred/simple
+stdout '^hello from upstream /nocred/simple$'
+
+# No assertion, a forged value, one expired past the clock leeway, one under another key, and
+# one for a sandbox the map does not name are all refused with 403, and none
+# reaches the upstream.
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/header/noassertion
+stdout '^403$'
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' -H 'X-Keycard-Sandbox-Assertion: keycard-demo' https://localhost:$UPSTREAM_PORT/header/garbage
+stdout '^403$'
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$STALE https://localhost:$UPSTREAM_PORT/header/stale
+stdout '^403$'
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$FORGED https://localhost:$UPSTREAM_PORT/header/forged
+stdout '^403$'
+exec curl -sS --cacert shared-ca/ca.crt -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$PIERCE https://localhost:$UPSTREAM_PORT/header/pierce
+stdout '^403$'
+
+# What the upstream saw: each sandbox's credential, the placeholder left
+# alone where no endpoint names one, an empty assertion header on every
+# request, and nothing for the refusals.
+grep 'request GET /header/demo host=localhost:\d+ authorization="Bearer demo-sekrit" assertion=""' upstream/requests.log
+grep 'request GET /header/research host=localhost:\d+ authorization="Bearer research-sekrit" assertion=""' upstream/requests.log
+grep 'request GET /nocred/simple host=localhost:\d+ authorization="Bearer placeholder" assertion=""' upstream/requests.log
+! grep '/header/noassertion' upstream/requests.log
+! grep '/header/garbage' upstream/requests.log
+! grep '/header/stale' upstream/requests.log
+! grep '/header/forged' upstream/requests.log
+! grep '/header/pierce' upstream/requests.log
+grep -count=3 '^request ' upstream/requests.log
+
+sigterm
+wait proxy
+
+# The process announces the selector on every start.
+stderr '"msg":"credential source"'
+stderr '2 sandbox identities selected by assertion'
+
+# Request records name the asserted sandbox, its runtime id and the reason.
+# Connection records keep the process sandbox, because a CONNECT carries no
+# assertion.
+audit stdout scope=request request.path=/header/demo decision.reason=endpoint_allowed sandbox_id=keycard-demo sandbox_uuid=uuid-keycard-demo outcome.status=200
+audit stdout scope=request request.path=/header/research decision.reason=endpoint_allowed sandbox_id=troy-research sandbox_uuid=uuid-troy-research outcome.status=200
+audit stdout scope=request request.path=/nocred/simple decision.reason=endpoint_allowed sandbox_id=keycard-demo outcome.status=200
+audit stdout scope=request request.path=/header/noassertion decision.verdict=deny decision.reason=sandbox_unidentified sandbox_id=acceptance
+audit stdout scope=request request.path=/header/garbage decision.verdict=deny decision.reason=sandbox_unidentified sandbox_id=acceptance
+audit stdout scope=request request.path=/header/stale decision.verdict=deny decision.reason=sandbox_unidentified 'decision.error~expired'
+audit stdout scope=request request.path=/header/forged decision.verdict=deny decision.reason=sandbox_unidentified 'decision.error~signature'
+audit stdout scope=request request.path=/header/pierce decision.verdict=deny decision.reason=sandbox_unknown sandbox_id=pierce sandbox_uuid=uuid-pierce
+audit stdout scope=connection decision.reason=endpoint_allowed sandbox_id=acceptance
+
+# No credential and no assertion reaches the audit stream or the log. A JWT
+# begins with the base64 of '{"', which is eyJ.
+! stdout 'sekrit'
+! stderr 'sekrit'
+! stdout 'eyJ'
+! stderr 'eyJ'
+
+# The proxy refuses to start without the issuer key.
+env EGRESS_PROXY_CONFIG=nokey-config.yaml
+expand nokey-config.yaml
+! exec egress-proxy
+stderr 'sandbox assertion'
+
+-- config.yaml --
+version: 1
+# The upstream is on loopback, which the platform deny list covers.
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/key.pub
+sandboxes:
+  - name: keycard-demo
+  - name: troy-research
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/header/
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+  - url: https://localhost:$UPSTREAM_PORT/nocred/
+
+-- nokey-config.yaml --
+version: 1
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/missing.pub
+sandboxes:
+  - name: keycard-demo
+  - name: troy-research
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/header/
+
+-- credentials.yaml --
+version: 1
+credentials:
+  - resource: https://localhost:$UPSTREAM_PORT/header/
+    sandbox: keycard-demo
+    value: demo-sekrit
+  - resource: https://localhost:$UPSTREAM_PORT/header/
+    sandbox: troy-research
+    value: research-sekrit

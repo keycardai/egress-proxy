@@ -10,6 +10,10 @@
 // client secret uses client_secret_basic without any binding to the
 // ServiceAccount, so a zone that accepts it permits impersonation based on the
 // secret alone. Use workload identity in a Kubernetes cluster deployment.
+//
+// AssertionSource is the other mechanism: a client_credentials grant that the
+// request's sandbox assertion authenticates, with no credential held by the
+// proxy.
 package exchange
 
 import (
@@ -24,6 +28,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -116,7 +121,7 @@ type Source struct {
 // New builds the source without reading from the network. If the zone is
 // unreachable at start-up, requests fail instead of stopping the process.
 func New(opts Options) (*Source, error) {
-	if err := opts.checkZoneURL(); err != nil {
+	if err := checkZoneURL(opts.ZoneURL); err != nil {
 		return nil, err
 	}
 	application, describe, err := opts.application()
@@ -131,15 +136,7 @@ func New(opts Options) (*Source, error) {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	httpClient := &http.Client{
-		Transport: guard{base: opts.transport()},
-		Timeout:   timeout,
-		// Discovery names the token endpoint. A redirect away from it would
-		// move client authentication to another host.
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			return fmt.Errorf("%w to %s", errRedirect, req.URL.Redacted())
-		},
-	}
+	httpClient := newHTTPClient(timeout, opts.Roots, opts.DenyAddr)
 	clientOpts := []oauth.TokenExchangeClientOption{oauth.WithTokenExchangeHTTPClient(httpClient)}
 	// A client secret authenticates with its basic-auth pair.
 	if auth := application.Auth(opts.ZoneURL); auth != nil {
@@ -156,17 +153,31 @@ func New(opts Options) (*Source, error) {
 }
 
 // checkZoneURL refuses a zone that the exchange must not authenticate to.
-// internal/config applies the same rule, and this check covers a Source that
+// internal/config applies the same rule, and this check covers a source that
 // another caller builds.
-func (o Options) checkZoneURL() error {
-	parsed, err := url.Parse(o.ZoneURL)
+func checkZoneURL(zone string) error {
+	parsed, err := url.Parse(zone)
 	if err != nil {
 		return fmt.Errorf("%w: identity.zone_url does not parse: %w", errConfigure, err)
 	}
 	if parsed.Scheme != schemeHTTPS {
-		return fmt.Errorf("%w: %w, not %q", errConfigure, errCleartext, o.ZoneURL)
+		return fmt.Errorf("%w: %w, not %q", errConfigure, errCleartext, zone)
 	}
 	return nil
+}
+
+// newHTTPClient is the client every exchange reaches the zone with: the
+// guarded transport, the budget, and no redirects. Discovery names the token
+// endpoint, and a redirect away from it would move client authentication to
+// another host.
+func newHTTPClient(timeout time.Duration, roots *x509.CertPool, denyAddr func(netip.Addr) bool) *http.Client {
+	return &http.Client{
+		Transport: guard{base: transport(roots, denyAddr)},
+		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("%w to %s", errRedirect, req.URL.Redacted())
+		},
+	}
 }
 
 // application builds the client credential and the description text. It
@@ -216,8 +227,7 @@ func (o Options) workloadIdentity() (oauth.ApplicationCredential, string, error)
 
 // transport connects to the zone with TLS 1.2 or later, the configured roots,
 // no proxy, and the deny list on every resolved address.
-func (o Options) transport() *http.Transport {
-	denyAddr := o.DenyAddr
+func transport(roots *x509.CertPool, denyAddr func(netip.Addr) bool) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout: dialTimeout,
 		ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
@@ -234,7 +244,7 @@ func (o Options) transport() *http.Transport {
 	return &http.Transport{
 		Proxy:               nil,
 		DialContext:         dialer.DialContext,
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: o.Roots},
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 }
@@ -302,7 +312,7 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 	// Both mechanisms ignore the prepare options, so they are nil.
 	request, err := s.application.PrepareTokenExchangeRequest(ctx, s.subject, resource, nil)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)
+		return "", failed("the client authentication was not prepared", err)
 	}
 	// PrepareTokenExchangeRequest types the subject as an access token. This
 	// exchange sends the substitute-user type.
@@ -310,7 +320,7 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 
 	response, err := s.client.ExchangeToken(ctx, *request)
 	if err != nil {
-		return "", classify(err)
+		return "", classify(err, refusedOnPolicy)
 	}
 	return response.AccessToken, nil
 }
@@ -321,16 +331,49 @@ func (s *Source) Describe() string {
 	return s.describe
 }
 
-// classify maps an exchange failure to the Source error vocabulary. A zone
-// policy refusal is exchange_denied, which denies with 403, because a retry
-// gets the same answer. Every other failure is exchange_failed, which denies
-// with 502. The proxy does not know the zone's answer for those.
-func classify(err error) error {
+// classify maps an exchange failure to the source error vocabulary. A zone
+// policy refusal, which refused says by its code, is exchange_denied, which
+// denies with 403, because a retry gets the same answer. Every other failure
+// is exchange_failed, which denies with 502. The proxy does not know the
+// zone's answer for those.
+//
+// An OAuth answer carries its error_description as the detail, whichever
+// class it falls in. The description is the zone's prose about its policy
+// and never holds a credential.
+func classify(err error, refused func(code string) bool) error {
 	var oauthErr *oauth.OAuthError
-	if errors.As(err, &oauthErr) && refusedOnPolicy(oauthErr.ErrorCode) {
-		return fmt.Errorf("%w: %s", credential.ErrExchangeDenied, oauthErr.Message)
+	if !errors.As(err, &oauthErr) {
+		return failed(failureDetail(err), err)
 	}
-	return fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)
+	class := credential.ErrExchangeFailed
+	if refused(oauthErr.ErrorCode) {
+		class = credential.ErrExchangeDenied
+	}
+	return &credential.ExchangeError{Class: class, Detail: oauthErr.Message, Cause: err}
+}
+
+// failed is an exchange_failed error with the detail the refusal carries.
+func failed(detail string, cause error) error {
+	return &credential.ExchangeError{Class: credential.ErrExchangeFailed, Detail: detail, Cause: cause}
+}
+
+// failureDetail names the class of a failure the zone did not describe. It
+// gives the status of a non-token answer, the budget, or one of this
+// package's own refusals, and never an address or a response body.
+func failureDetail(err error) string {
+	var httpErr *oauth.HTTPError
+	switch {
+	case errors.As(err, &httpErr) && httpErr.Status > 0:
+		return "the zone answered " + strconv.Itoa(httpErr.Status)
+	case errors.Is(err, context.DeadlineExceeded):
+		return "the exchange ran past its budget"
+	}
+	for _, refusal := range []error{errRedirect, errCleartext, errTooLarge, errDenied} {
+		if errors.Is(err, refusal) {
+			return refusal.Error()
+		}
+	}
+	return "the exchange did not complete"
 }
 
 // refusedOnPolicy reports whether an OAuth error code means the zone read its

@@ -107,6 +107,16 @@ func TestStatusForCertificateUnavailable(t *testing.T) {
 	assert.Equal(t, 500, statusFor(policy.ReasonCertificateUnavailable), "the status for a failed mint")
 }
 
+// TestStatusForSandboxReasons pins the statuses of the connect credential
+// and sandbox assertion refusals. A 407 asks the client for a credential; the
+// sandbox refusals are policy answers.
+func TestStatusForSandboxReasons(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, 407, statusFor(policy.ReasonProxyUnauthenticated), "an unauthenticated CONNECT")
+	assert.Equal(t, 403, statusFor(policy.ReasonSandboxUnidentified), "no verifiable assertion")
+	assert.Equal(t, 403, statusFor(policy.ReasonSandboxUnknown), "an unmapped sandbox")
+}
+
 // handshakeServer builds a proxy that allows allowedHost, logs into buf, and
 // gives a tunnel handshake the budget the case asks for.
 func handshakeServer(t *testing.T, buf *bytes.Buffer, budget time.Duration, sink audit.Sink) *Server {

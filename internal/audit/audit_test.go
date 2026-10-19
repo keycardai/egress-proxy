@@ -33,6 +33,7 @@ func TestJSONSinkWritesOneLinePerRecord(t *testing.T) {
 	stamped.Emit(audit.Record{
 		ConnectionID: "c2",
 		RequestID:    "r1",
+		OnBehalfOf:   "troy.barnes",
 		Scope:        audit.ScopeRequest,
 		Destination:  audit.Destination{Host: "pypi.org", Port: 443, SNI: "pypi.org"},
 		Request:      &audit.RequestInfo{Method: "GET", Path: "/simple/", Host: "pypi.org"},
@@ -47,8 +48,8 @@ func TestJSONSinkWritesOneLinePerRecord(t *testing.T) {
 			`"config":{"digest":"sha256:def"},` +
 			`"connection_id":"c1","scope":"connection","destination":{"host":"api.github.com","port":443},` +
 			`"decision":{"verdict":"deny","reason":"no_matching_endpoint"}}`,
-		`{"ts":"2026-09-21T12:00:00Z","sandbox_id":"sbx-1","document":{"digest":"sha256:abc"},` +
-			`"config":{"digest":"sha256:def"},` +
+		`{"ts":"2026-09-21T12:00:00Z","sandbox_id":"sbx-1","on_behalf_of":"troy.barnes",` +
+			`"document":{"digest":"sha256:abc"},"config":{"digest":"sha256:def"},` +
 			`"connection_id":"c2","request_id":"r1","scope":"request",` +
 			`"destination":{"host":"pypi.org","port":443,"sni":"pypi.org"},` +
 			`"request":{"method":"GET","path":"/simple/","host":"pypi.org"},` +

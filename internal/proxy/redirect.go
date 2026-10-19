@@ -121,7 +121,7 @@ func (s *Server) writeDenyConn(conn net.Conn, status int, reason policy.Reason, 
 		ContentLength: int64(len(body)),
 		Close:         true,
 	}
-	denyHeaders(resp.Header, reason, connectionID)
+	denyHeaders(resp.Header, reason, connectionID, "")
 	if err := conn.SetWriteDeadline(time.Now().Add(denyWriteBound)); err != nil {
 		return
 	}
