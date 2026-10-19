@@ -104,20 +104,21 @@ func cmdIssuer(ts *testscript.TestScript, neg bool, args []string) {
 // cmdAssertion signs a sandbox assertion with a key assertkey wrote and
 // puts it in a script variable:
 //
-//	assertion [-ttl DURATION] [-iss URL] [-aud A,B] [-id ID] [-sub SUBJECT] [-owner SUBJECT] -app NAME \
-//	    KEYDIR VAR SANDBOX [WORKSPACE]
+//	assertion [-ttl DURATION] [-iss URL] [-aud A,B] [-id ID] [-sub SUBJECT] [-owner SUBJECT] [-owner-id ID] \
+//	    -app NAME KEYDIR VAR SANDBOX [WORKSPACE]
 //
 // The workspace defaults to "default". A negative ttl writes an assertion
 // that has already expired. -app names the application and is required.
 // -iss names the issuer, -aud the audiences, and -id the sandbox id, which
 // defaults to uuid-SANDBOX. -owner names the principal who created the
-// sandbox; without it the token carries no owner claim. The subject is
-// openshell:NAME:ID. -sub writes another subject in its place, which the
-// proxy must refuse, so the token is signed without the checks Sign makes.
+// sandbox and -owner-id their Keycard user id; without them the token
+// carries no owner or owner_id claim. The subject is openshell:NAME:ID.
+// -sub writes another subject in its place, which the proxy must refuse,
+// so the token is signed without the checks Sign makes.
 func cmdAssertion(ts *testscript.TestScript, neg bool, args []string) {
 	ttl := 30 * time.Second
 	issuer, audiences := defaultIssuer, []string{"keycard-egress-proxy"}
-	var application, id, subject, owner string
+	var application, id, subject, owner, ownerID string
 	for len(args) >= 2 && strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "-ttl":
@@ -136,6 +137,8 @@ func cmdAssertion(ts *testscript.TestScript, neg bool, args []string) {
 			subject = args[1]
 		case "-owner":
 			owner = args[1]
+		case "-owner-id":
+			ownerID = args[1]
 		default:
 			ts.Fatalf("assertion: unknown flag %s", args[0])
 		}
@@ -143,7 +146,7 @@ func cmdAssertion(ts *testscript.TestScript, neg bool, args []string) {
 	}
 	if neg || len(args) < 3 || len(args) > 4 || application == "" {
 		ts.Fatalf("usage: assertion [-ttl DURATION] [-iss URL] [-aud A,B] [-id ID] [-sub SUBJECT] [-owner SUBJECT] " +
-			"-app NAME KEYDIR VAR SANDBOX [WORKSPACE]")
+			"[-owner-id ID] -app NAME KEYDIR VAR SANDBOX [WORKSPACE]")
 	}
 	workspace := "default"
 	if len(args) == 4 {
@@ -155,7 +158,8 @@ func cmdAssertion(ts *testscript.TestScript, neg bool, args []string) {
 	key := readAssertKey(ts, filepath.Join(ts.MkAbs(args[0]), "key.pem"))
 	claims := assertion.Claims{
 		Issuer: issuer, Application: application,
-		Sandbox: args[2], Workspace: workspace, SandboxUUID: id, ExecPath: "/usr/bin/curl", Owner: owner,
+		Sandbox: args[2], Workspace: workspace, SandboxUUID: id, ExecPath: "/usr/bin/curl",
+		Owner: owner, OwnerID: ownerID,
 	}
 	if subject != "" {
 		ts.Setenv(args[1], signWithSubject(ts, key, claims, subject, audiences, ttl))

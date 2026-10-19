@@ -250,28 +250,37 @@ var zoneForger = sync.OnceValues(func() (*fakeas.Signer, error) {
 
 // cmdFakeAS starts a fake Keycard zone over TLS in the test process:
 //
-//	fakeas [-workload PATTERN=APPLICATION]... DIR RESOURCE=CREDENTIAL...
+//	fakeas [-workload PATTERN=APPLICATION]... [-user USER]... DIR RESOURCE=CREDENTIAL...
 //
 // It grants each named resource the credential beside it and refuses other
 // resources with access_denied. It verifies a client assertion against the
 // key satoken signs with. Each -workload maps a subject pattern to the
 // application a sandbox assertion with that subject acts as, the way a
-// token credential does in the zone. It writes its CA certificate to
-// DIR/ca.crt, appends one line per token request to DIR/requests.log, and
-// exports its port as $ZONE_PORT. It exports the known client as
+// token credential does in the zone, and each -user names a user such an
+// application may act for in a token exchange. It writes its CA certificate
+// to DIR/ca.crt, appends one line per token request to DIR/requests.log,
+// and exports its port as $ZONE_PORT. It exports the known client as
 // $ZONE_CLIENT_ID and $ZONE_CLIENT_SECRET. It stops when the script ends.
 func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	workloads := make(map[string]string)
-	for len(args) >= 2 && args[0] == "-workload" {
-		pattern, application, ok := strings.Cut(args[1], "=")
-		if !ok {
-			ts.Fatalf("fakeas: %q is not PATTERN=APPLICATION", args[1])
+	var users []string
+	for len(args) >= 2 && strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "-workload":
+			pattern, application, ok := strings.Cut(args[1], "=")
+			if !ok {
+				ts.Fatalf("fakeas: %q is not PATTERN=APPLICATION", args[1])
+			}
+			workloads[pattern] = application
+		case "-user":
+			users = append(users, args[1])
+		default:
+			ts.Fatalf("fakeas: unknown flag %s", args[0])
 		}
-		workloads[pattern] = application
 		args = args[2:]
 	}
 	if neg || len(args) < 2 {
-		ts.Fatalf("usage: fakeas [-workload PATTERN=APPLICATION]... DIR RESOURCE=CREDENTIAL...")
+		ts.Fatalf("usage: fakeas [-workload PATTERN=APPLICATION]... [-user USER]... DIR RESOURCE=CREDENTIAL...")
 	}
 	dir := ts.MkAbs(args[0])
 	grants := make(map[string]string, len(args)-1)
@@ -294,11 +303,12 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	signer, err := zoneSigner()
 	ts.Check(err)
 	zone := fakeas.New(fakeas.Options{
-		Credentials:      grants,
-		ClientSecrets:    map[string]string{zoneClientID: zoneClientSecret},
-		AssertionClients: []string{zoneClientID},
-		Assertions:       signer.Verifier(),
-		WorkloadSubjects: workloads,
+		Credentials:       grants,
+		ClientSecrets:     map[string]string{zoneClientID: zoneClientSecret},
+		AssertionClients:  []string{zoneClientID},
+		Assertions:        signer.Verifier(),
+		WorkloadSubjects:  workloads,
+		ImpersonableUsers: users,
 	})
 	server := httptest.NewUnstartedServer(fakeas.LogExchanges(zone, requests))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12}

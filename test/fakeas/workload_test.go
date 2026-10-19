@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -233,4 +234,113 @@ func lastRequest(t *testing.T, zone *fakeas.Server, token string) fakeas.Request
 	}
 	t.Fatalf("no record for the request")
 	return fakeas.Request{}
+}
+
+// ownerForm is the token exchange the proxy sends for a sandbox owner: the
+// sandbox assertion authenticates it and the substitute-user token names
+// the owner.
+func ownerForm(token, owner string) url.Values {
+	encode := base64.RawURLEncoding.EncodeToString
+	subjectToken := encode([]byte(`{"typ":"vnd.kc.su+jwt","alg":"none"}`)) + "." +
+		encode([]byte(`{"sub":"`+owner+`"}`)) + "."
+	return url.Values{
+		"grant_type":            {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token_type":    {"urn:keycard:params:oauth:token-type:substitute-user"},
+		"subject_token":         {subjectToken},
+		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+		"client_assertion":      {token},
+		"resource":              {resource},
+	}
+}
+
+// TestOwnerExchange pins the token exchange a sandbox assertion
+// authenticates: the client is named by the assertion's subject the way the
+// client_credentials grant names it, the matched application may act for
+// the users ImpersonableUsers lists and no one else, and the token names the
+// application.
+func TestOwnerExchange(t *testing.T) {
+	t.Parallel()
+	ext := newExtension(t)
+	zone := fakeas.New(fakeas.Options{
+		Credentials:       map[string]string{resource: credential},
+		WorkloadSubjects:  map[string]string{"openshell:review-agent:*": "review-agent"},
+		ImpersonableUsers: []string{user},
+	})
+	tests := map[string]struct {
+		form        url.Values
+		want        answer
+		wantToken   string
+		wantActor   string
+		wantSubject string
+	}{
+		"the application acts for an impersonable user": {
+			form: ownerForm(ext.token(t, reviewSubject, nil), user), want: answer{status: http.StatusOK},
+			wantToken: "review-agent:" + credential, wantActor: reviewSubject, wantSubject: user,
+		},
+		"a user the application may not act for": {
+			form: ownerForm(ext.token(t, reviewSubject, nil), "abed"),
+			want: answer{
+				status: http.StatusForbidden, code: "access_denied",
+				description: reviewSubject + " cannot act for abed",
+			},
+			wantActor: reviewSubject, wantSubject: "abed",
+		},
+		"no pattern matches": {
+			form: ownerForm(ext.token(t, "openshell:chang-agent:9c5d", nil), user),
+			want: answer{
+				status: http.StatusUnauthorized, code: "invalid_client",
+				description: "no application credential matches openshell:chang-agent:9c5d",
+			},
+			wantActor: "openshell:chang-agent:9c5d", wantSubject: user,
+		},
+		"a key the issuer does not publish": {
+			form: ownerForm(other(t).token(t, reviewSubject, func(c *jwt.Claims) { c.Issuer = ext.url }), user),
+			want: answer{status: http.StatusUnauthorized, code: "invalid_client"}, wantSubject: user,
+		},
+		"no owner": {
+			form: ownerForm(ext.token(t, reviewSubject, nil), ""),
+			want: answer{
+				status: http.StatusBadRequest, code: "invalid_grant",
+				description: "the substitute-user token has no sub claim",
+			},
+			wantActor: reviewSubject,
+		},
+		"a resource no policy grants": {
+			form: with(ownerForm(ext.token(t, reviewSubject, nil), user), "resource", "https://other.example/"),
+			want: answer{
+				status: http.StatusForbidden, code: "access_denied",
+				description: "no policy grants https://other.example/",
+			},
+			wantActor: reviewSubject, wantSubject: user,
+		},
+		"a client_id beside the assertion names a credential, not a subject": {
+			form: with(ownerForm(ext.token(t, reviewSubject, nil), user), "client_id", "review"),
+			want: answer{
+				status: http.StatusUnauthorized, code: "invalid_client",
+				description: "review may not authenticate with a client assertion",
+			},
+			wantSubject: user,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, token := post(t, zone, tc.form)
+			assert.Equal(t, tc.want.status, got.status, "status: %+v", got)
+			assert.Equal(t, tc.want.code, got.code, "error code: %+v", got)
+			if tc.want.description != "" {
+				assert.Equal(t, tc.want.description, got.description, "description")
+			}
+			assert.Equal(t, tc.wantToken, token, "the token names the application")
+			record := lastRequest(t, zone, tc.form.Get("client_assertion"))
+			assert.Equal(t, tc.wantActor, record.Actor, "the recorded actor")
+			assert.Equal(t, tc.wantSubject, record.Subject, "the recorded subject")
+		})
+	}
+}
+
+// other is an issuer whose key the extension under test does not publish.
+func other(t *testing.T) *extension {
+	t.Helper()
+	return newExtension(t)
 }
