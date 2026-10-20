@@ -306,7 +306,7 @@ func build(ctx context.Context, cfg *config.Config, logger *slog.Logger, stdout 
 	if err != nil {
 		return nil, fmt.Errorf("policy: %w", err)
 	}
-	matcher, err := policy.Compile(cfg.PolicyEndpoints(), deny)
+	matcher, err := compileMatcher(cfg, deny)
 	if err != nil {
 		return nil, fmt.Errorf("policy: %w", err)
 	}
@@ -409,6 +409,15 @@ func certificates(cfg *config.Config, logger *slog.Logger) (*ca.Authority, *ca.S
 	return authority, store, certPath, nil
 }
 
+// compileMatcher builds the matcher the document asks for: any_endpoint,
+// or the endpoint list.
+func compileMatcher(cfg *config.Config, deny *policy.DenyList) (*policy.Matcher, error) {
+	if cfg.AnyEndpoint != nil {
+		return policy.CompileAny(deny, cfg.AnyEndpointPlacement()), nil
+	}
+	return policy.Compile(cfg.PolicyEndpoints(), deny) //nolint:wrapcheck // the caller names the section
+}
+
 // announce says what the process enforces and where each setting came from,
 // on every start.
 func (p *process) announce() {
@@ -418,6 +427,7 @@ func (p *process) announce() {
 		slog.String("config_digest", p.cfg.ConfigDigest),
 		slog.String("sandbox_id", p.cfg.Sandbox.ID),
 		slog.Any("overridden", p.cfg.Overridden),
+		slog.Bool("any_endpoint", p.matcher.AllowsAny()),
 		slog.Any("endpoint_hosts", p.matcher.Hosts()),
 		slog.Int("listen_dns_port", p.cfg.Listen.DNSPort),
 		slog.Any("cluster_cidrs", deny.ClusterCIDRs()))
@@ -576,13 +586,19 @@ func refuseUnmapped(cfg *config.Config, what, list string, named []string, mappe
 }
 
 // exchangeSources builds the exchange for the top-level identity, or one
-// exchange per sandbox and application entry.
+// exchange per sandbox and application entry. A top-level identity that
+// names the assertion as its client is one source for every application,
+// selected by assertion like an entry.
 //
 //nolint:ireturn // the process source is the interface the proxy consumes
 func exchangeSources(
 	cfg *config.Config, deny *policy.DenyList, roots *x509.CertPool,
 ) (credential.Source, *credential.Selector, error) {
-	if cfg.Identity != nil {
+	switch {
+	case cfg.Identity != nil && cfg.Identity.ClientAssertion == config.ClientAssertionSandbox:
+		selector, err := everyApplicationSource(cfg, deny, roots)
+		return nil, selector, err
+	case cfg.Identity != nil:
 		source, err := tokenExchange(cfg.Identity, cfg, deny, roots)
 		return source, nil, err
 	}
@@ -607,6 +623,25 @@ func exchangeSources(
 		}
 	}
 	return nil, selector, nil
+}
+
+// everyApplicationSource builds the selector for a top-level identity that
+// names the assertion as its client: one exchange as the asserted sandbox,
+// or for its owner, answering for every application.
+func everyApplicationSource(
+	cfg *config.Config,
+	deny *policy.DenyList,
+	roots *x509.CertPool,
+) (*credential.Selector, error) {
+	selected, err := entrySource(cfg.Identity, cfg, deny, roots)
+	if err != nil {
+		return nil, fmt.Errorf("identity: %w", err)
+	}
+	selector := credential.NewSelector()
+	if err := selector.SetEvery(selected); err != nil {
+		return nil, fmt.Errorf("credentials: %w", err)
+	}
+	return selector, nil
 }
 
 // entrySource builds the source one entry's identity names: the exchange as
@@ -706,6 +741,7 @@ func (p *process) info() any {
 		"credential_source":    source,
 		"netsetup_receipt":     p.cfg.Netsetup.Receipt,
 		"dns":                  p.dnsInfo(),
+		"any_endpoint":         p.matcher.AllowsAny(),
 		"endpoint_hosts":       p.matcher.Hosts(),
 		"cluster_cidrs":        deny.ClusterCIDRs(),
 		"deny_list_exceptions": deny.Exceptions(),

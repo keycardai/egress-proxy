@@ -139,6 +139,10 @@ type Document struct {
 	DNS       DNS        `json:"dns"`
 	Policy    Policy     `json:"policy"`
 	Endpoints []Endpoint `json:"endpoints"`
+	// AnyEndpoint stands in for the endpoint list: every host off the
+	// platform deny list may be reached, and the request's origin is the
+	// resource. The two are exclusive.
+	AnyEndpoint *AnyEndpoint `json:"any_endpoint,omitempty"`
 	// SandboxAssertion turns on per-request sandbox identification. With it
 	// set, every request must carry a verifiable assertion naming a sandbox
 	// in Sandboxes, and the proxy brokers credentials as that sandbox.
@@ -249,7 +253,9 @@ const ClientAssertionSandbox = "sandbox"
 // With ClientAssertion set, the proxy holds no credential of its own: the
 // sandbox assertion on each request authenticates the client, and the zone's
 // policy decides which application the sandbox is. ZoneURL and
-// Impersonate.SandboxOwner are then the only other fields allowed.
+// Impersonate.SandboxOwner are then the only other fields allowed. On the
+// top-level identity it needs SandboxAssertion and answers for every
+// application an assertion names.
 type Identity struct {
 	ZoneURL           string `json:"zone_url"`
 	ClientID          string `json:"client_id"`
@@ -517,6 +523,17 @@ type Credential struct {
 	Placement Placement `json:"placement"`
 }
 
+// AnyEndpoint lets every host the platform deny list does not cover
+// through, on any port, and makes the request's origin the resource the
+// exchange asks the zone for: https://host, with the port when it is not
+// 443. Credential, when set, is written into every request at its
+// placement. A component in front of the proxy, such as a sandbox
+// runtime's own network policy, decides the hosts, and the zone decides
+// the credential on every request.
+type AnyEndpoint struct {
+	Credential *Credential `json:"credential,omitempty"`
+}
+
 // Placement is where the proxy writes a credential into a request.
 type Placement = credential.Placement
 
@@ -676,7 +693,10 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // holds rather than a document. Two binaries that deny different
 // destinations must not share a digest.
 type decisionInputs struct {
-	Endpoints          []digestEndpoint `json:"endpoints"`
+	Endpoints []digestEndpoint `json:"endpoints"`
+	// AnyEndpoint decides that every host is reachable and where the
+	// credential goes, in place of the endpoint list.
+	AnyEndpoint        *AnyEndpoint     `json:"any_endpoint,omitempty"`
 	ClusterCIDRs       []string         `json:"cluster_cidrs"`
 	DenyListExceptions []string         `json:"deny_list_exceptions"`
 	Identity           *Identity        `json:"identity,omitempty"`
@@ -801,6 +821,16 @@ func canonicalFiles(paths []string) []string {
 	return out
 }
 
+// AnyEndpointPlacement is where any_endpoint puts the credential, nil
+// without any_endpoint or when it names no credential.
+func (c *Config) AnyEndpointPlacement() *credential.Placement {
+	if c.AnyEndpoint == nil || c.AnyEndpoint.Credential == nil {
+		return nil
+	}
+	placement := c.AnyEndpoint.Credential.Placement
+	return &placement
+}
+
 // PolicyEndpoints returns the endpoints in the matcher's shape.
 func (c *Config) PolicyEndpoints() []policy.Endpoint {
 	out := make([]policy.Endpoint, 0, len(c.Endpoints))
@@ -882,6 +912,7 @@ func (c *Config) entryIdentities() bool {
 func (c *Config) digestDecisionInputs() (string, error) {
 	inputs := decisionInputs{
 		Endpoints:          canonicalEndpoints(c.Endpoints),
+		AnyEndpoint:        c.AnyEndpoint,
 		ClusterCIDRs:       canonicalPrefixes(c.ClusterCIDRs),
 		DenyListExceptions: canonicalPrefixes(c.DenyListExceptions),
 		Identity:           c.Identity,
@@ -1053,16 +1084,12 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.Sandbox.ID) == "" || strings.ContainsAny(c.Sandbox.ID, " \t\r\n") {
 		found.addf("sandbox.id %q must be a non-empty string without whitespace", c.Sandbox.ID)
 	}
-	if c.Identity != nil {
-		if c.Identity.ClientAssertion != "" {
-			found.addf("identity.client_assertion needs a per-request sandbox assertion; use it under applications")
-		}
-		c.Identity.validate("identity", &found)
-	}
+	c.validateIdentity(&found)
 	c.validateProcess(&found)
 	c.validateCredentials(&found)
 	c.validateSandboxes(&found)
 	c.validatePolicy(&found)
+	c.validateAnyEndpoint(&found)
 	seen := make(map[string]int, len(c.Endpoints))
 	for i, endpoint := range c.Endpoints {
 		endpoint.validate(i, &found)
@@ -1254,12 +1281,54 @@ func (c *Config) validateSandboxes(found *problems) {
 		}
 		return
 	}
-	if len(c.Sandboxes) == 0 && len(c.Applications) == 0 {
-		found.addf("sandbox_assertion requires at least one entry in sandboxes or applications")
+	if len(c.Sandboxes) == 0 && len(c.Applications) == 0 && !c.identityForEveryApplication() {
+		found.addf("sandbox_assertion requires at least one entry in sandboxes or applications, "+
+			"or an identity with client_assertion: %s", ClientAssertionSandbox)
 	}
 	c.SandboxAssertion.validate(found)
 	c.validateSandboxEntries(found)
 	c.validateApplicationEntries(found)
+}
+
+// validateIdentity checks the top-level identity. The assertion exchange
+// needs a per-request assertion to present, so it is refused without
+// sandbox_assertion.
+func (c *Config) validateIdentity(found *problems) {
+	if c.Identity == nil {
+		return
+	}
+	if c.Identity.ClientAssertion != "" && c.SandboxAssertion == nil {
+		found.addf("identity.client_assertion needs a per-request sandbox assertion; " +
+			"set sandbox_assertion or use it under applications")
+	}
+	c.Identity.validate("identity", found)
+}
+
+// identityForEveryApplication reports whether the top-level identity is
+// the assertion exchange, which answers for every application an assertion
+// names and needs no entry per application.
+func (c *Config) identityForEveryApplication() bool {
+	return c.Identity != nil && c.Identity.ClientAssertion == ClientAssertionSandbox
+}
+
+// validateAnyEndpoint refuses any_endpoint beside the settings it replaces
+// or cannot serve: an endpoint list, and the allowlist resolver, which
+// answers only the endpoint hosts and would answer nothing.
+func (c *Config) validateAnyEndpoint(found *problems) {
+	if c.AnyEndpoint == nil {
+		return
+	}
+	if len(c.Endpoints) > 0 {
+		found.addf("any_endpoint and endpoints both say what the sandbox can reach; configure one")
+	}
+	if c.Listen.DNSPort != 0 {
+		found.addf(
+			"any_endpoint cannot be set with listen.dns_port: the resolver answers only the endpoint hosts, and there are none",
+		)
+	}
+	if c.AnyEndpoint.Credential != nil {
+		validatePlacement(c.AnyEndpoint.Credential.Placement, "any_endpoint", found)
+	}
 }
 
 // validateSandboxEntries refuses a repeated name and workspace pair and
@@ -1461,49 +1530,52 @@ func normalizedPrefix(prefix string) bool {
 }
 
 func (c Credential) validate(i int, found *problems) {
-	validatePlacement(c.Placement, i, found)
+	validatePlacement(c.Placement, fmt.Sprintf("endpoints[%d]", i), found)
 }
 
-func validatePlacement(placement Placement, i int, found *problems) {
+// validatePlacement checks one placement. where names its place in the
+// document, such as "endpoints[2]" or "any_endpoint", so a finding points
+// at it.
+func validatePlacement(placement Placement, where string, found *problems) {
 	switch placement.Kind {
 	case PlacementHeader:
-		validateHeaderPlacement(placement, i, found)
+		validateHeaderPlacement(placement, where, found)
 	case PlacementQuery:
-		requireOnly(i, found, "query", placement.Name != "", "needs a name",
+		requireOnly(where, found, "query", placement.Name != "", "needs a name",
 			placement.Template == "" && placement.User == "", "takes no template or user")
 	case PlacementBasic:
-		requireOnly(i, found, "basic", placement.User != "", "needs a user",
+		requireOnly(where, found, "basic", placement.User != "", "needs a user",
 			placement.Name == "" && placement.Template == "", "takes no name or template")
 		if placement.User != "" && !credential.ValidBasicUser(placement.User) {
-			found.addf("endpoints[%d]: a basic placement user must not contain a colon or a control character", i)
+			found.addf("%s: a basic placement user must not contain a colon or a control character", where)
 		}
 	default:
-		found.addf("endpoints[%d]: placement.kind %q must be %s, %s or %s",
-			i, placement.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
+		found.addf("%s: placement.kind %q must be %s, %s or %s",
+			where, placement.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
 	}
 }
 
-func validateHeaderPlacement(placement Placement, i int, found *problems) {
-	requireOnly(i, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
+func validateHeaderPlacement(placement Placement, where string, found *problems) {
+	requireOnly(where, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
 	if !strings.Contains(placement.Template, credential.Token) {
-		found.addf("endpoints[%d]: a header placement template must contain %s", i, credential.Token)
+		found.addf("%s: a header placement template must contain %s", where, credential.Token)
 	}
 	if credential.BannedHeaderName(placement.Name) {
-		found.addf("endpoints[%d]: a header placement cannot name %s, "+
-			"a header the connection, the proxy or the upstream's trust depends on", i, placement.Name)
+		found.addf("%s: a header placement cannot name %s, "+
+			"a header the connection, the proxy or the upstream's trust depends on", where, placement.Name)
 	}
 }
 
 // requireOnly reports a missing required field and a field the kind does not
 // take.
 func requireOnly(
-	i int, found *problems, kind string, hasRequired bool, missing string, onlyAllowed bool, extra string,
+	where string, found *problems, kind string, hasRequired bool, missing string, onlyAllowed bool, extra string,
 ) {
 	if !hasRequired {
-		found.addf("endpoints[%d]: a %s placement %s", i, kind, missing)
+		found.addf("%s: a %s placement %s", where, kind, missing)
 	}
 	if !onlyAllowed {
-		found.addf("endpoints[%d]: a %s placement %s", i, kind, extra)
+		found.addf("%s: a %s placement %s", where, kind, extra)
 	}
 }
 

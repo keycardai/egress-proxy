@@ -286,6 +286,9 @@ type harnessOptions struct {
 	// which an endpoint names and the test learns only once the upstream is
 	// listening.
 	endpoints func(port int) []policy.Endpoint
+	// anyEndpoint replaces the endpoint list with any_endpoint: every host
+	// off the deny list, with headerPlacement as the one credential.
+	anyEndpoint bool
 	// credentials is the source for endpoint credentials. Nil means no source.
 	credentials credential.Source
 	// connectAuth requires a Proxy-Authorization on every CONNECT. Nil
@@ -316,6 +319,9 @@ func start(t *testing.T, opts harnessOptions) *harness {
 	}
 	matcher, err := policy.Compile(endpoints, deny)
 	require.NoError(t, err)
+	if opts.anyEndpoint {
+		matcher = policy.CompileAny(deny, &headerPlacement)
+	}
 	authority, err := ca.New(ca.Options{})
 	require.NoError(t, err)
 	store, err := ca.NewStore(authority, 16)

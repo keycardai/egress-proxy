@@ -344,9 +344,10 @@ func TestParseRefusesInvalidClientAssertion(t *testing.T) {
 			wantErr: "identity.impersonate.sandbox_owner needs client_assertion: sandbox",
 		},
 		{
-			name:    "the assertion on the top-level identity",
-			doc:     minimal + "identity:\n  zone_url: https://z\n  client_assertion: sandbox\n",
-			wantErr: "identity.client_assertion needs a per-request sandbox assertion; use it under applications",
+			name: "the assertion on the top-level identity",
+			doc:  minimal + "identity:\n  zone_url: https://z\n  client_assertion: sandbox\n",
+			wantErr: "identity.client_assertion needs a per-request sandbox assertion; " +
+				"set sandbox_assertion or use it under applications",
 		},
 		{
 			name: "an issuer that is not a URL",

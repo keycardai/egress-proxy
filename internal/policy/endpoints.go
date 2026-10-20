@@ -81,7 +81,40 @@ func deny(reason Reason) Decision {
 type Matcher struct {
 	byHost map[string][]Endpoint
 	deny   *DenyList
+	// any allows every host the deny list does not cover, with the
+	// request's origin as the resource and placement as where the
+	// credential goes. byHost is empty with it.
+	any       bool
+	placement *credential.Placement
 }
+
+// CompileAny builds a matcher for a document with any_endpoint: every host
+// the deny list does not cover is allowed on any port, a request's
+// resource is its origin, and placement, when not nil, is where its
+// credential goes.
+func CompileAny(deny *DenyList, placement *credential.Placement) *Matcher {
+	return &Matcher{byHost: map[string][]Endpoint{}, deny: deny, any: true, placement: placement}
+}
+
+// AllowsAny reports whether the matcher was built with CompileAny.
+func (m *Matcher) AllowsAny() bool {
+	return m.any
+}
+
+// Origin is the resource a request to host and port names under
+// any_endpoint: https://host, with the port when it is not 443. It is the
+// canonical form of an endpoint URL with no path, so a zone resource
+// created for the host matches it.
+func Origin(host string, port int) string {
+	host = NormalizeHost(host)
+	if port == defaultEndpointPort {
+		return "https://" + host
+	}
+	return "https://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// defaultEndpointPort is the port https implies, which Origin leaves out.
+const defaultEndpointPort = 443
 
 // Compile validates the endpoint list against the deny list and builds the
 // matcher. It reports every problem it finds, so one run tells an operator
@@ -160,6 +193,9 @@ func (m *Matcher) Connection(host string, port int) Decision {
 	if m.deny.DeniesHost(host) {
 		return deny(ReasonDenyAlways)
 	}
+	if m.any {
+		return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed}
+	}
 	for _, endpoint := range m.byHost[host] {
 		if endpoint.Port == port {
 			return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed}
@@ -182,6 +218,10 @@ func (m *Matcher) Request(host string, port int, requestPath string) Decision {
 	if !normalizedPath(requestPath) {
 		return deny(ReasonMalformedRequest)
 	}
+	if m.any {
+		endpoint := m.originEndpoint(NormalizeHost(host), port)
+		return Decision{Verdict: VerdictAllow, Reason: ReasonEndpointAllowed, Endpoint: &endpoint}
+	}
 	for _, endpoint := range m.byHost[NormalizeHost(host)] {
 		if endpoint.Port == port && coversPath(endpoint.PathPrefix, requestPath) {
 			if m.decodedPathConflicts(endpoint, requestPath) {
@@ -200,6 +240,7 @@ func (m *Matcher) DenyList() *DenyList {
 }
 
 // Hosts lists the hosts the document allows, sorted, for the admin socket.
+// It is empty under any_endpoint, which AllowsAny reports.
 func (m *Matcher) Hosts() []string {
 	hosts := make([]string, 0, len(m.byHost))
 	for host := range m.byHost {
@@ -207,6 +248,14 @@ func (m *Matcher) Hosts() []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+// originEndpoint is the endpoint a request to host and port matches under
+// any_endpoint.
+func (m *Matcher) originEndpoint(host string, port int) Endpoint {
+	return Endpoint{
+		Host: host, Port: port, PathPrefix: "/", Resource: Origin(host, port), Credential: m.placement,
+	}
 }
 
 func (m *Matcher) decodedPathConflicts(selected Endpoint, requestPath string) bool {

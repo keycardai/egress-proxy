@@ -33,10 +33,13 @@ type Selected struct {
 
 // Selector maps each sandbox and each application the proxy serves to its
 // credential source. The two maps are separate: an assertion names an
-// application or falls back to its sandbox, never both.
+// application or falls back to its sandbox, never both. One source can
+// instead answer for every application, when the document names one
+// identity for all of them.
 type Selector struct {
 	bySandbox     map[SandboxKey]Selected
 	byApplication map[string]Selected
+	every         *Selected
 }
 
 // NewSelector returns an empty selector.
@@ -74,6 +77,29 @@ func (s *Selector) AddApplication(name string, selected Selected) error {
 	return nil
 }
 
+// SetEvery makes one source answer for every application an assertion
+// names. It is refused beside an application map, because the map would
+// never be consulted and a record could not say which answered.
+func (s *Selector) SetEvery(selected Selected) error {
+	switch {
+	case selected.Source == nil:
+		return fmt.Errorf("%w: the source for every application is nil", errSelector)
+	case len(s.byApplication) > 0:
+		return fmt.Errorf("%w: a source for every application cannot be set beside an application map", errSelector)
+	}
+	s.every = &selected
+	return nil
+}
+
+// Every returns the source that answers for every application, and
+// whether one is set.
+func (s *Selector) Every() (Selected, bool) {
+	if s.every == nil {
+		return Selected{}, false
+	}
+	return *s.every, true
+}
+
 // Select returns the source for a sandbox, and whether the map names it.
 func (s *Selector) Select(key SandboxKey) (Selected, bool) {
 	selected, ok := s.bySandbox[key]
@@ -99,6 +125,9 @@ func (s *Selector) SelectApplication(name string) (Selected, bool) {
 // for them, and how many of those exchange for the sandbox owner. It names
 // no credential.
 func (s *Selector) Describe() string {
+	if s.every != nil {
+		return s.describeEvery()
+	}
 	var counts []string
 	if n := len(s.byApplication); n > 0 {
 		counts = append(counts, fmt.Sprintf("%d application", n))
@@ -115,6 +144,18 @@ func (s *Selector) Describe() string {
 	}
 	if n := s.count(func(selected Selected) bool { return selected.ImpersonatesOwner }); n > 0 {
 		described += fmt.Sprintf(", %d of them for the sandbox owner", n)
+	}
+	return described
+}
+
+// describeEvery is Describe for one identity serving every application.
+func (s *Selector) describeEvery() string {
+	described := "one identity for every application selected by assertion"
+	switch {
+	case s.every.ImpersonatesOwner:
+		described += ", exchanged as the sandbox for the sandbox owner"
+	case s.every.SubjectIsClient:
+		described += ", exchanged as the sandbox"
 	}
 	return described
 }

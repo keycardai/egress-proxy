@@ -622,3 +622,97 @@ func TestEveryReasonHasATitle(t *testing.T) {
 		})
 	}
 }
+
+// TestCompileAny pins the matcher a document with any_endpoint gets: every
+// host the deny list does not cover is allowed on any port, a request
+// matches an endpoint whose resource is its origin and whose credential is
+// the one placement, and the deny list and the path checks still refuse.
+func TestCompileAny(t *testing.T) {
+	t.Parallel()
+	deny, err := policy.NewDenyList(nil, nil)
+	require.NoError(t, err, "NewDenyList")
+	matcher := policy.CompileAny(deny, &headerPlacement)
+	assert.True(t, matcher.AllowsAny(), "AllowsAny")
+	assert.Empty(t, matcher.Hosts(), "Hosts: no list")
+
+	connections := []struct {
+		name       string
+		host       string
+		port       int
+		wantReason policy.Reason
+	}{
+		{name: "any host", host: "api.github.com", port: 443, wantReason: "endpoint_allowed"},
+		{name: "any port", host: "registry.internal", port: 5000, wantReason: "endpoint_allowed"},
+		{name: "the metadata address", host: "169.254.169.254", port: 80, wantReason: "deny_always"},
+		{name: "a DoH resolver", host: "dns.google", port: 443, wantReason: "deny_always"},
+		{name: "no host", host: "", port: 443, wantReason: "no_sni"},
+	}
+	for _, tc := range connections {
+		t.Run("connection to "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := matcher.Connection(tc.host, tc.port)
+			assert.Equal(t, tc.wantReason, got.Reason, "reason")
+			assert.Nil(t, got.Endpoint, "a connection decision names no endpoint")
+		})
+	}
+
+	requests := []struct {
+		name           string
+		host           string
+		port           int
+		path           string
+		wantReason     policy.Reason
+		wantResource   string
+		wantCredential *credential.Placement
+	}{
+		{
+			name: "any path on a host", host: "API.GitHub.com", port: 443, path: "/repos/x/y",
+			wantReason: "endpoint_allowed", wantResource: "https://api.github.com", wantCredential: &headerPlacement,
+		},
+		{
+			name: "a port that is not the scheme's is in the resource", host: "registry.internal", port: 5000, path: "/v2/",
+			wantReason: "endpoint_allowed", wantResource: "https://registry.internal:5000", wantCredential: &headerPlacement,
+		},
+		{name: "a dot segment", host: "api.github.com", port: 443, path: "/a/../b", wantReason: "malformed_request"},
+		{name: "a denied host", host: "169.254.169.254", port: 443, path: "/", wantReason: "deny_always"},
+	}
+	for _, tc := range requests {
+		t.Run("request for "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := matcher.Request(tc.host, tc.port, tc.path)
+			assert.Equal(t, tc.wantReason, got.Reason, "reason")
+			if tc.wantResource == "" {
+				assert.Nil(t, got.Endpoint, "a refusal names no endpoint")
+				return
+			}
+			require.NotNil(t, got.Endpoint, "an allow names the origin endpoint")
+			assert.Equal(t, tc.wantResource, got.Endpoint.Resource, "resource")
+			assert.Equal(t, "/", got.Endpoint.PathPrefix, "the prefix covers every path")
+			assert.Equal(t, tc.wantCredential, got.Endpoint.Credential, "credential")
+		})
+	}
+
+	open := policy.CompileAny(deny, nil)
+	got := open.Request("api.github.com", 443, "/")
+	require.NotNil(t, got.Endpoint)
+	assert.Nil(t, got.Endpoint.Credential, "no placement, no credential")
+}
+
+func TestOrigin(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		host string
+		port int
+		want string
+	}{
+		"the https port is left out": {host: "api.github.com", port: 443, want: "https://api.github.com"},
+		"another port is kept":       {host: "registry.internal", port: 5000, want: "https://registry.internal:5000"},
+		"the host is normalized":     {host: "API.GitHub.com.", port: 443, want: "https://api.github.com"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, policy.Origin(tc.host, tc.port))
+		})
+	}
+}

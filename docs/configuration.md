@@ -17,10 +17,11 @@ metadata. For example, `sandbox.id` from the pod name and
 `identity.impersonate.user` from `spec.serviceAccountName` through the
 Kubernetes Downward API.
 
-The document alone defines the `endpoints` and `policy` sections. These values
-decide what the proxy allows. Each audit record attributes that decision to the
-document digest. An override can hide a decision-affecting value from that
-attribution, so these values cannot come from another source.
+The document alone defines the `endpoints`, `any_endpoint` and `policy`
+sections. These values decide what the proxy allows. Each audit record
+attributes that decision to the document digest. An override can hide a
+decision-affecting value from that attribution, so these values cannot come
+from another source.
 
 Every record also holds `config.digest`, which covers the settings after an
 override applies. Read it with `document.digest` to distinguish the mounted
@@ -91,7 +92,7 @@ document that contains both.
 | `workload_token_file` | `EGRESS_PROXY_WORKLOAD_TOKEN_FILE` | The absolute path of the projected ServiceAccount token. The kubelet rewrites the token once it passes 80% of its lifetime, which defaults to one hour, or once it is older than 24 hours, and does not restart the pod. The application reloads the token itself, so the proxy reads the file again for every exchange. See [Launch a Pod using service account token projection](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#launch-a-pod-using-service-account-token-projection). A rewrite revokes nothing. The previous token stays valid until its own `exp`, which is the remaining 20% of its lifetime. The kubelet writes the new token to a timestamped directory and renames the `..data` symlink onto it, so a read never sees a partial write. See [`AtomicWriter.Write`](https://github.com/kubernetes/kubernetes/blob/v1.34.5/pkg/volume/util/atomic_writer.go#L86-L140). A read that fails or finds an empty file denies the request. The file must be a regular file no larger than 64 KiB. The proxy refuses any other kind of file at start-up, because a read of one can block past the exchange budget. |
 | `client_secret_file` | `EGRESS_PROXY_CLIENT_SECRET_FILE` | The absolute path of a file that holds the application credential secret. The proxy reads it once at start-up, so restart the process after a rotation. The file must be readable by its owner alone. The proxy refuses a file with any group or other permission bit. |
 | `impersonate.user` | `EGRESS_PROXY_IMPERSONATE_USER` | The IAM user public ID for each exchange. The ServiceAccount has the same name, so a manifest sets this value from `spec.serviceAccountName`. |
-| `client_assertion` | none | `sandbox` is the one value. The proxy holds no credential for this identity. It presents each request's sandbox assertion to the zone as the client assertion of a `client_credentials` grant, and the zone's own policy decides which application the sandbox is and what it receives. `zone_url` is required and `client_id`, `client_secret_file`, `workload_token_file` and `impersonate.user` must be empty. The key is allowed under `applications[].identity` and `sandboxes[].identity` and refused on this top-level section, because there is no per-request assertion without `sandbox_assertion`. |
+| `client_assertion` | none | `sandbox` is the one value. The proxy holds no credential for this identity. It presents each request's sandbox assertion to the zone as the client assertion of a `client_credentials` grant, and the zone's own policy decides which application the sandbox is and what it receives. `zone_url` is required and `client_id`, `client_secret_file`, `workload_token_file` and `impersonate.user` must be empty. The key is allowed under `applications[].identity` and `sandboxes[].identity`, and on this top-level section only with `sandbox_assertion`, because there is no per-request assertion without it. On the top-level section it is one identity for every application: an assertion naming any application selects it, and `applications` and `sandboxes` must be empty. |
 | `impersonate.sandbox_owner` | none | `true` has the identity exchange for the owner of the asserted sandbox instead of acting as the sandbox itself. It needs `client_assertion: sandbox` and cannot be set with `impersonate.user`. Each request's exchange is then an RFC 8693 token exchange whose subject is the substitute-user token for the assertion's `owner_id`, authenticated by the assertion, and the zone's own policy decides whether that application may act for that user. A request whose assertion carries no `owner_id` is denied with `credential_unavailable` and the detail `the assertion names no owner`, before any exchange. |
 
 With `client_assertion: sandbox`, the proxy sends `grant_type=client_credentials`,
@@ -369,7 +370,10 @@ or any mix of the two lists. Every assertion names an application, so this
 list answers only for a document that lists no `applications`: with both
 lists present, the `app` claim selects from `applications` and an
 application that list does not name is refused whatever sandbox sent it.
-`config.digest` covers the assertion settings and every entry of both.
+A top-level `identity` with `client_assertion: sandbox` answers for every
+application an assertion names, so neither list is needed and neither is
+allowed. `config.digest` covers the assertion settings, every entry of
+both lists and the top-level identity.
 
 ### `applications`
 
@@ -433,12 +437,36 @@ several, so review `deny_list_exceptions` the way you review the endpoint
 list. A sidecar announces the set it is running at start-up and reports it on
 `/info`.
 
+### `any_endpoint`
+
+The document supplies this section. No flag or environment variable can
+change it. It stands in for `endpoints`: the sandbox can reach every host
+the platform deny list does not cover, on any port, and the resource the
+exchange asks the zone for is the request's origin, `https://host`, with the
+port when it is not 443. The two sections are exclusive, and
+`listen.dns_port` is refused with it, because the allowlist resolver
+answers only the endpoint hosts and there are none.
+
+| Key | Default | Description |
+|---|---|---|
+| `credential` | unset | Where the proxy puts the credential, on every request. See `endpoints[].credential`. Unset forwards every request as written and asks the zone for nothing. |
+
+Use it where a component in front of the proxy decides the hosts and the
+zone decides the credential per request: a sandbox runtime whose own
+network policy names the hosts, and a zone whose resources are named by
+origin. The proxy then enforces the platform deny list, identifies the
+sandbox, and brokers the credential, and nothing in the document has to
+repeat what the zone knows. `config.digest` covers the section, and the
+record of an allowed request names the origin endpoint, `host:port/`. The
+start-up log and `/info` report `any_endpoint` beside an empty
+`endpoint_hosts`.
+
 ### `endpoints`
 
 The document supplies this section. No flag or environment variable can
 change it. The section lists the destinations that the sandbox can reach. The
 proxy rejects every other connection or request. An empty list rejects all
-connections and requests.
+connections and requests, unless `any_endpoint` stands in for the list.
 
 | Key | Default | Description |
 |---|---|---|

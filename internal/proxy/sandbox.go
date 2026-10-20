@@ -85,9 +85,10 @@ func (s *Server) identify(r *http.Request, fwd *forward) (policy.Decision, bool)
 // lookup selects the source the claims name. The application map answers
 // whenever the document lists applications: a sandbox id is new on every
 // create, so the identity follows the application, and a mapped sandbox
-// never rescues an application the map does not list. The sandbox map
-// answers for a document that lists no applications. The reason is the
-// code a refusal records, set whenever the error is.
+// never rescues an application the map does not list. One identity for
+// every application answers next, whatever the app claim. The sandbox map
+// answers for a document that has neither. The reason is the code a
+// refusal records, set whenever the error is.
 func (s *SandboxIdentification) lookup(claims assertion.Claims) (credential.Selected, policy.Reason, error) {
 	if s.Selector.HasApplications() {
 		selected, ok := s.Selector.SelectApplication(claims.Application)
@@ -95,6 +96,9 @@ func (s *SandboxIdentification) lookup(claims assertion.Claims) (credential.Sele
 			return credential.Selected{}, policy.ReasonApplicationUnknown,
 				fmt.Errorf("%w application %q", errApplicationUnmapped, claims.Application)
 		}
+		return selected, "", nil
+	}
+	if selected, ok := s.Selector.Every(); ok {
 		return selected, "", nil
 	}
 	selected, ok := s.Selector.Select(credential.SandboxKey{Name: claims.Sandbox, Workspace: claims.Workspace})

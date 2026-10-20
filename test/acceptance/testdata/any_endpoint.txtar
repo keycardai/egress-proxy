@@ -1,0 +1,110 @@
+# any_endpoint end to end with the built binary: the document names no
+# endpoint and one identity for every application. The proxy forwards to
+# every host the platform deny list does not cover, asks the zone for the
+# request's origin as the resource with the assertion as its client, and
+# writes the token the zone issued into Authorization. A component in
+# front of the proxy decides the hosts; the zone decides the credential
+# per application: a subject no pattern covers is refused, and the deny
+# list refuses what no document may open.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+chmod 0777 $ADMIN_DIR
+
+# The issuer publishes the key the assertions are signed with. The zone
+# accepts review-agent's subjects and holds a credential for the upstream's
+# origin, port included, which is what the proxy asks for.
+assertkey keys
+issuer keys ISSUER
+fakeas -workload 'openshell:review-agent:*=review-agent' zone https://localhost:$UPSTREAM_PORT=zone-issued-sekrit
+
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt,$WORK/zone/ca.crt
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket says every endpoint is allowed, lists no host, and
+# names the one identity.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"any_endpoint": true'
+stdout '"endpoint_hosts": \[\]'
+stdout '"credential_source": "one identity for every application selected by assertion, exchanged as the sandbox"'
+! stdout 'sekrit'
+
+assertion -app review-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 7f3a keys REVIEW keycard-demo
+assertion -app chang-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 9c5d keys CHANG keycard-demo
+
+# A path no document names reaches the upstream with the zone's token in
+# place of the placeholder.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$REVIEW -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/any/path/at/all
+stdout '^hello from upstream /any/path/at/all$'
+
+# An application the zone has no credential rule for is refused by the
+# zone, which the proxy denies with 403 as exchange_denied.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$CHANG https://localhost:$UPSTREAM_PORT/chang
+stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: exchange_denied'
+
+# The platform deny list is not a document setting, so any_endpoint does
+# not open it: the metadata address is refused at the CONNECT.
+! exec curl -sS -o /dev/null -w '%{http_connect}' https://169.254.169.254/latest/meta-data/
+stdout '^403$'
+
+# What the upstream saw: the zone's token for review-agent, no assertion,
+# and nothing for the refusal.
+grep 'request GET /any/path/at/all host=localhost:\d+ authorization="Bearer review-agent:zone-issued-sekrit" assertion=""' upstream/requests.log
+! grep '/chang' upstream/requests.log
+grep -count=1 '^request ' upstream/requests.log
+
+# What the zone saw: the origin as the resource, port included, and the
+# refusal.
+grep 'exchange client= actor="openshell:review-agent:7f3a" subject= resource=https://localhost:[0-9]+ error=""' zone/requests.log
+grep 'exchange client= actor="openshell:chang-agent:9c5d" subject= resource=https://localhost:[0-9]+ error="invalid_client"' zone/requests.log
+
+sigterm
+wait proxy
+
+# The process announces any_endpoint and the identity on every start.
+stderr '"any_endpoint":true'
+stderr 'one identity for every application selected by assertion, exchanged as the sandbox'
+
+# Request records name the origin endpoint, the application and the
+# subject as the client the zone knew.
+audit stdout scope=request request.path=/any/path/at/all decision.reason=endpoint_allowed decision.endpoint=localhost:$UPSTREAM_PORT/ application=review-agent sandbox_id=keycard-demo identity.client_id=openshell:review-agent:7f3a outcome.status=200
+audit stdout scope=request request.path=/chang decision.verdict=deny decision.reason=exchange_denied application=chang-agent identity.client_id=openshell:chang-agent:9c5d
+audit stdout scope=connection destination.host=169.254.169.254 decision.verdict=deny decision.reason=deny_always
+
+# No token, no assertion and no issued credential reaches the audit stream
+# or the log.
+! stdout 'sekrit'
+! stderr 'sekrit'
+! stdout 'eyJ'
+! stderr 'eyJ'
+
+-- config.yaml --
+version: 1
+# The upstream and the zone are on loopback, which the platform deny list
+# covers.
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/key.pub
+  issuer: $ISSUER
+identity:
+  zone_url: "https://localhost:$ZONE_PORT"
+  client_assertion: sandbox
+any_endpoint:
+  credential:
+    placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

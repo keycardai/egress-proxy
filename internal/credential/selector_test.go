@@ -291,3 +291,38 @@ func TestSelectorApplications(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, "1 application and 1 sandbox identities selected by assertion", selector.Describe())
 }
+
+// TestSelectorEvery pins one identity for every application: it answers
+// whatever the assertion names, it cannot sit beside an application map,
+// and the announcement says what it exchanges as.
+func TestSelectorEvery(t *testing.T) {
+	t.Parallel()
+	file, err := credential.LoadStaticFile(writeStatic(t, perSandboxFile))
+	require.NoError(t, err)
+
+	selector := credential.NewSelector()
+	_, ok := selector.Every()
+	assert.False(t, ok, "nothing set")
+	require.Error(t, selector.SetEvery(credential.Selected{}), "a source is required")
+	require.NoError(t, selector.SetEvery(credential.Selected{Source: file, SubjectIsClient: true}))
+	got, ok := selector.Every()
+	require.True(t, ok)
+	assert.True(t, got.SubjectIsClient)
+	assert.False(t, selector.HasApplications(), "the every source is not an application map")
+	assert.Equal(t, "one identity for every application selected by assertion, exchanged as the sandbox",
+		selector.Describe())
+
+	require.NoError(
+		t,
+		selector.SetEvery(credential.Selected{Source: file, SubjectIsClient: true, ImpersonatesOwner: true}),
+	)
+	assert.Equal(
+		t,
+		"one identity for every application selected by assertion, exchanged as the sandbox for the sandbox owner",
+		selector.Describe(),
+	)
+
+	mapped := credential.NewSelector()
+	require.NoError(t, mapped.AddApplication("review-agent", credential.Selected{Source: file}))
+	require.Error(t, mapped.SetEvery(credential.Selected{Source: file}), "refused beside an application map")
+}
