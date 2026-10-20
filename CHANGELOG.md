@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/keycardai/egress-proxy/compare/v0.2.1...v0.2.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* build with Go 1.27.3 for the crypto/x509 security fix ([#58](https://github.com/keycardai/egress-proxy/issues/58)) ([9ac82c8](https://github.com/keycardai/egress-proxy/commit/9ac82c8ded8651718475d41b2634a53fc850dee6))
+
 ## [0.2.1](https://github.com/keycardai/egress-proxy/compare/v0.2.0...v0.2.1) (2026-10-13)
 
 
