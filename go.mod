@@ -1,6 +1,6 @@
 module github.com/keycardai/egress-proxy
 
-go 1.27.2
+go 1.27.3
 
 // Build-time tools, run as `go tool <name>`. Their modules are requirements
 // of this module but no package here imports them, so they are in no binary
