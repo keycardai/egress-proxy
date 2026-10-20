@@ -6,7 +6,7 @@ Read it before changing anything. `docs/` holds the user-facing documentation.
 ## Repository facts
 
 - Module path `github.com/keycardai/egress-proxy`, licensed Apache-2.0
-  (`LICENSE`). Go 1.27.1 is the floor in `go.mod`; it is a choice, not a
+  (`LICENSE`). Go 1.27.3 is the floor in `go.mod`; it is a choice, not a
   constraint from a dependency. Dependabot does not update the `go`
   directive, so a toolchain bump is a manual change.
 - The tree builds on macOS and Linux. Linux-only syscalls go behind

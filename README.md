@@ -89,7 +89,7 @@ enforces and what it does not.
     make all        # build, test, lint, checks, acceptance
     make images     # the three images under images/, built locally
 
-Go 1.27.1 or newer. The build-time tools are `tool` directives in `go.mod`,
+Go 1.27.3 or newer. The build-time tools are `tool` directives in `go.mod`,
 built by the `go` command on first use. Nothing else needs installing.
 
 ## Contributing and security
