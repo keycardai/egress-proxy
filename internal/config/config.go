@@ -69,6 +69,18 @@ const (
 	// DefaultExchangeTimeout limits one token exchange, including discovery.
 	DefaultExchangeTimeout = 10 * time.Second
 
+	// DefaultAssertionHeader carries the sandbox assertion on a request.
+	DefaultAssertionHeader = "X-Keycard-Sandbox-Assertion"
+	// DefaultAssertionAudience is the audience an assertion names.
+	DefaultAssertionAudience = "keycard-egress-proxy"
+	// DefaultAssertionMaxAge bounds an assertion's lifetime. MaxAssertionMaxAge
+	// is the longest a document may ask for.
+	DefaultAssertionMaxAge = 30 * time.Second
+	MaxAssertionMaxAge     = 5 * time.Minute
+	// DefaultWorkspace is the OpenShell workspace a sandbox entry names when
+	// it names none.
+	DefaultWorkspace = "default"
+
 	// Version is the only document version this build reads.
 	Version = 1
 
@@ -95,6 +107,9 @@ var (
 	// hostLabelRE is one DNS label. A document's host is normalized to
 	// lowercase before it is validated.
 	hostLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+	// headerNameRE is an RFC 9110 field name: one or more token characters.
+	headerNameRE = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 )
 
 // The limits RFC 1035 section 2.3.4 sets on a name and on one label.
@@ -124,6 +139,61 @@ type Document struct {
 	DNS       DNS        `json:"dns"`
 	Policy    Policy     `json:"policy"`
 	Endpoints []Endpoint `json:"endpoints"`
+	// AnyEndpoint stands in for the endpoint list: every host off the
+	// platform deny list may be reached, and the request's origin is the
+	// resource. The two are exclusive.
+	AnyEndpoint *AnyEndpoint `json:"any_endpoint,omitempty"`
+	// SandboxAssertion turns on per-request sandbox identification. With it
+	// set, every request must carry a verifiable assertion naming a sandbox
+	// in Sandboxes, and the proxy brokers credentials as that sandbox.
+	SandboxAssertion *SandboxAssertion `json:"sandbox_assertion,omitempty"`
+	// Sandboxes maps each OpenShell sandbox to the Keycard identity it acts
+	// as. Like the endpoints, the list comes from the document alone.
+	Sandboxes []SandboxEntry `json:"sandboxes"`
+	// Applications maps each kind of sandbox to the Keycard identity it
+	// acts as. An assertion whose app claim names one selects it ahead of
+	// the sandbox map. The list comes from the document alone.
+	Applications []ApplicationEntry `json:"applications"`
+}
+
+// SandboxAssertion says how a request proves which sandbox sent it. A
+// middleware in the sandbox runtime signs an assertion with the private half
+// of the key at IssuerKeyFile and places it in Header.
+type SandboxAssertion struct {
+	Header string `json:"header"`
+	// IssuerKeyFile is a PEM file holding the issuer's P-256 public key.
+	IssuerKeyFile string `json:"issuer_key_file"`
+	// Issuer, when set, is the iss claim every assertion must carry. The
+	// zone verifies the same token by discovery on that URL.
+	Issuer   string `json:"issuer,omitempty"`
+	Audience string `json:"audience"`
+	// MaxAge bounds an assertion's lifetime. An assertion whose expiry lies
+	// farther from its issue time is refused, whatever its signature.
+	MaxAge Duration `json:"max_age"`
+}
+
+// SandboxEntry is one sandbox the proxy serves and the identity it acts as.
+// Identity is absent when credentials.static_file supplies per-sandbox
+// credentials.
+type SandboxEntry struct {
+	Name      string    `json:"name"`
+	Workspace string    `json:"workspace"`
+	Identity  *Identity `json:"identity,omitempty"`
+}
+
+// ApplicationEntry is one application the proxy serves and the identity it
+// acts as. An application is the kind of sandbox: a sandbox id is new on
+// every create, so the identity follows the application the assertion's app
+// claim names. Identity is absent when credentials.static_file supplies
+// per-application credentials.
+type ApplicationEntry struct {
+	Name     string    `json:"name"`
+	Identity *Identity `json:"identity,omitempty"`
+	// Creators are the principal subjects allowed to create a sandbox of
+	// this application. The sandbox runtime's extension reads the list from
+	// the shared document. The proxy validates its shape and never consults
+	// it: no proxy decision depends on who created the sandbox.
+	Creators []string `json:"creators,omitempty"`
 }
 
 // Credentials names the source for endpoint credentials. A document without a
@@ -156,7 +226,7 @@ func (c *Config) CredentialSource() CredentialSourceKind {
 	switch {
 	case c.Credentials.StaticFile != "":
 		return SourceStaticFile
-	case c.Identity != nil:
+	case c.Identity != nil || c.entryIdentities():
 		return SourceExchange
 	default:
 		return SourceNone
@@ -168,12 +238,24 @@ type Sandbox struct {
 	ID string `json:"id"`
 }
 
+// ClientAssertionSandbox is the one ClientAssertion value: the proxy
+// presents the request's sandbox assertion as the client assertion of a
+// client_credentials grant, so the zone authenticates the sandbox itself.
+const ClientAssertionSandbox = "sandbox"
+
 // Identity is the principal that identifies this proxy workload. It is the
 // authority with which the egress proxy authenticates with a Keycard zone and
 // performs a token exchange on the impersonated user's behalf.
 // Exactly one of WorkloadTokenFile and ClientSecretFile authenticates the
 // exchange. A workload token lets the zone read a ServiceAccount subject. A
 // client secret gives the zone no ServiceAccount subject.
+//
+// With ClientAssertion set, the proxy holds no credential of its own: the
+// sandbox assertion on each request authenticates the client, and the zone's
+// policy decides which application the sandbox is. ZoneURL and
+// Impersonate.SandboxOwner are then the only other fields allowed. On the
+// top-level identity it needs SandboxAssertion and answers for every
+// application an assertion names.
 type Identity struct {
 	ZoneURL           string `json:"zone_url"`
 	ClientID          string `json:"client_id"`
@@ -182,12 +264,18 @@ type Identity struct {
 	// never writes the secret to the document, a flag, or a variable.
 	ClientSecretFile string      `json:"client_secret_file"`
 	Impersonate      Impersonate `json:"impersonate"`
+	// ClientAssertion names what authenticates the client in place of a
+	// credential the proxy holds. The one value is ClientAssertionSandbox.
+	ClientAssertion string `json:"client_assertion,omitempty"`
 }
 
 // Impersonate identifies the user subject this proxy impersonates in every
-// Keycard token exchange.
+// Keycard token exchange. User names one user for the process. SandboxOwner
+// names the owner of the asserted sandbox, so it needs ClientAssertion and
+// cannot be set with User.
 type Impersonate struct {
-	User string `json:"user"`
+	User         string `json:"user"`
+	SandboxOwner bool   `json:"sandbox_owner,omitempty"`
 }
 
 // Listen is where the egress proxy process accepts connections.
@@ -214,6 +302,9 @@ type Listen struct {
 	CleartextPorts []int `json:"cleartext_ports"`
 	// Admin is the path of the admin Unix socket.
 	Admin string `json:"admin"`
+	// ConnectAuthFile holds the "user:password" a client must present in
+	// Proxy-Authorization on every CONNECT. Empty accepts every client.
+	ConnectAuthFile string `json:"connect_auth_file"`
 }
 
 // Netsetup contains the init container's receipt. The proxy reads it before
@@ -432,6 +523,17 @@ type Credential struct {
 	Placement Placement `json:"placement"`
 }
 
+// AnyEndpoint lets every host the platform deny list does not cover
+// through, on any port, and makes the request's origin the resource the
+// exchange asks the zone for: https://host, with the port when it is not
+// 443. Credential, when set, is written into every request at its
+// placement. A component in front of the proxy, such as a sandbox
+// runtime's own network policy, decides the hosts, and the zone decides
+// the credential on every request.
+type AnyEndpoint struct {
+	Credential *Credential `json:"credential,omitempty"`
+}
+
 // Placement is where the proxy writes a credential into a request.
 type Placement = credential.Placement
 
@@ -513,6 +615,7 @@ type Overrides struct {
 	DNSPortSet            bool
 	DNSForwardTo          []string
 	Admin                 string
+	ConnectAuthFile       string
 	NetsetupReceipt       string
 	CAOutDir              string
 	CAStateDir            string
@@ -590,7 +693,10 @@ func Parse(data []byte, overrides Overrides) (*Config, error) {
 // holds rather than a document. Two binaries that deny different
 // destinations must not share a digest.
 type decisionInputs struct {
-	Endpoints          []digestEndpoint `json:"endpoints"`
+	Endpoints []digestEndpoint `json:"endpoints"`
+	// AnyEndpoint decides that every host is reachable and where the
+	// credential goes, in place of the endpoint list.
+	AnyEndpoint        *AnyEndpoint     `json:"any_endpoint,omitempty"`
 	ClusterCIDRs       []string         `json:"cluster_cidrs"`
 	DenyListExceptions []string         `json:"deny_list_exceptions"`
 	Identity           *Identity        `json:"identity,omitempty"`
@@ -601,6 +707,42 @@ type decisionInputs struct {
 	// a port read as cleartext where the same port read as TLS uses its server
 	// name. It is empty with no transparent frontend, where nothing is captured.
 	CleartextPorts []int `json:"cleartext_ports,omitempty"`
+	// SandboxAssertion, Sandboxes and Applications decide which identity
+	// answers a request and whether a request without an assertion is
+	// served at all. applications[].creators stays out: the sandbox runtime
+	// enforces it, and the proxy answers alike with or without it.
+	SandboxAssertion *SandboxAssertion  `json:"sandbox_assertion,omitempty"`
+	Sandboxes        []SandboxEntry     `json:"sandboxes,omitempty"`
+	Applications     []ApplicationEntry `json:"applications,omitempty"`
+	// ConnectAuthFile decides whether an unauthenticated CONNECT is refused.
+	ConnectAuthFile string `json:"connect_auth_file,omitempty"`
+}
+
+// canonicalSandboxes orders entries by name and workspace. Validation rejects
+// a repeated pair, so document order changes neither the answer nor the
+// digest.
+func canonicalSandboxes(entries []SandboxEntry) []SandboxEntry {
+	out := append([]SandboxEntry(nil), entries...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Workspace < out[j].Workspace
+	})
+	return out
+}
+
+// canonicalApplications orders entries by name and drops creators.
+// Validation rejects a repeated name, so document order changes neither the
+// answer nor the digest. Creators decides nothing in the proxy, so two
+// documents that differ only in that list digest the same.
+func canonicalApplications(entries []ApplicationEntry) []ApplicationEntry {
+	out := append([]ApplicationEntry(nil), entries...)
+	for i := range out {
+		out[i].Creators = nil
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // digestEndpoint is what an endpoint contributes to the digest: the values
@@ -679,6 +821,16 @@ func canonicalFiles(paths []string) []string {
 	return out
 }
 
+// AnyEndpointPlacement is where any_endpoint puts the credential, nil
+// without any_endpoint or when it names no credential.
+func (c *Config) AnyEndpointPlacement() *credential.Placement {
+	if c.AnyEndpoint == nil || c.AnyEndpoint.Credential == nil {
+		return nil
+	}
+	placement := c.AnyEndpoint.Credential.Placement
+	return &placement
+}
+
 // PolicyEndpoints returns the endpoints in the matcher's shape.
 func (c *Config) PolicyEndpoints() []policy.Endpoint {
 	out := make([]policy.Endpoint, 0, len(c.Endpoints))
@@ -736,6 +888,22 @@ func (c *Config) DNSHosts() []string {
 	return hosts
 }
 
+// entryIdentities reports whether any sandbox or application entry names an
+// identity.
+func (c *Config) entryIdentities() bool {
+	for _, entry := range c.Sandboxes {
+		if entry.Identity != nil {
+			return true
+		}
+	}
+	for _, entry := range c.Applications {
+		if entry.Identity != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // digestDecisionInputs canonicalizes the decision inputs and hashes them.
 //
 // The digest is one way and this package exposes no reader for the input, so
@@ -744,12 +912,17 @@ func (c *Config) DNSHosts() []string {
 func (c *Config) digestDecisionInputs() (string, error) {
 	inputs := decisionInputs{
 		Endpoints:          canonicalEndpoints(c.Endpoints),
+		AnyEndpoint:        c.AnyEndpoint,
 		ClusterCIDRs:       canonicalPrefixes(c.ClusterCIDRs),
 		DenyListExceptions: canonicalPrefixes(c.DenyListExceptions),
 		Identity:           c.Identity,
 		UpstreamCAFiles:    canonicalFiles(c.TLS.UpstreamCAFiles),
 		CredentialSource:   credentialSource{Kind: c.CredentialSource(), StaticFile: c.Credentials.StaticFile},
 		DenyList:           policy.CompiledDigest(),
+		SandboxAssertion:   c.SandboxAssertion,
+		Sandboxes:          canonicalSandboxes(c.Sandboxes),
+		Applications:       canonicalApplications(c.Applications),
+		ConnectAuthFile:    c.Listen.ConnectAuthFile,
 	}
 	if c.Listen.TransparentPort != 0 {
 		inputs.CleartextPorts = sortedPorts(c.Listen.CleartextPorts)
@@ -797,6 +970,22 @@ func (c *Config) applyDefaults() {
 	}
 	for i := range c.Endpoints {
 		applyEndpointDefaults(&c.Endpoints[i])
+	}
+	c.applySandboxDefaults()
+}
+
+// applySandboxDefaults fills the assertion settings and the workspace each
+// sandbox entry leaves out.
+func (c *Config) applySandboxDefaults() {
+	if c.SandboxAssertion != nil {
+		defaultString(&c.SandboxAssertion.Header, DefaultAssertionHeader)
+		defaultString(&c.SandboxAssertion.Audience, DefaultAssertionAudience)
+		if c.SandboxAssertion.MaxAge == 0 {
+			c.SandboxAssertion.MaxAge = Duration(DefaultAssertionMaxAge)
+		}
+	}
+	for i := range c.Sandboxes {
+		defaultString(&c.Sandboxes[i].Workspace, DefaultWorkspace)
 	}
 }
 
@@ -848,6 +1037,8 @@ func (c *Config) applyOverrides(overrides Overrides) {
 	override("dns.forward_to", len(overrides.DNSForwardTo) > 0,
 		func() { c.DNS.ForwardTo = append([]string(nil), overrides.DNSForwardTo...) })
 	override("listen.admin", overrides.Admin != "", func() { c.Listen.Admin = overrides.Admin })
+	override("listen.connect_auth_file", overrides.ConnectAuthFile != "",
+		func() { c.Listen.ConnectAuthFile = overrides.ConnectAuthFile })
 	override("netsetup.receipt", overrides.NetsetupReceipt != "",
 		func() { c.Netsetup.Receipt = overrides.NetsetupReceipt })
 	override("ca.out_dir", overrides.CAOutDir != "", func() { c.CA.OutDir = overrides.CAOutDir })
@@ -893,12 +1084,12 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.Sandbox.ID) == "" || strings.ContainsAny(c.Sandbox.ID, " \t\r\n") {
 		found.addf("sandbox.id %q must be a non-empty string without whitespace", c.Sandbox.ID)
 	}
-	if c.Identity != nil {
-		c.Identity.validate(&found)
-	}
+	c.validateIdentity(&found)
 	c.validateProcess(&found)
 	c.validateCredentials(&found)
+	c.validateSandboxes(&found)
 	c.validatePolicy(&found)
+	c.validateAnyEndpoint(&found)
 	seen := make(map[string]int, len(c.Endpoints))
 	for i, endpoint := range c.Endpoints {
 		endpoint.validate(i, &found)
@@ -918,13 +1109,7 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) validateProcess(found *problems) {
-	if _, _, err := net.SplitHostPort(c.Listen.Connect); err != nil {
-		found.addf("listen.connect %q is not host:port: %v", c.Listen.Connect, err)
-	}
-	if !filepath.IsAbs(c.Listen.Admin) {
-		found.addf("listen.admin %q must be an absolute path; the admin surface is a Unix socket", c.Listen.Admin)
-	}
-	c.validateTransparent(found)
+	c.validateListen(found)
 	c.validateDNS(found)
 	c.CA.validate(found)
 	for i, file := range c.TLS.UpstreamCAFiles {
@@ -937,6 +1122,28 @@ func (c *Config) validateProcess(found *problems) {
 		}
 	}
 	c.Limits.validate(found)
+}
+
+// validateListen checks the frontend addresses, the admin socket path, the
+// connect credential path and the transparent frontend.
+func (c *Config) validateListen(found *problems) {
+	if _, _, err := net.SplitHostPort(c.Listen.Connect); err != nil {
+		found.addf("listen.connect %q is not host:port: %v", c.Listen.Connect, err)
+	}
+	if !filepath.IsAbs(c.Listen.Admin) {
+		found.addf("listen.admin %q must be an absolute path; the admin surface is a Unix socket", c.Listen.Admin)
+	}
+	if c.Listen.ConnectAuthFile != "" && !filepath.IsAbs(c.Listen.ConnectAuthFile) {
+		found.addf("listen.connect_auth_file %q must be an absolute path", c.Listen.ConnectAuthFile)
+	}
+	// A redirected connection carries no Proxy-Authorization, so the
+	// credential would guard the CONNECT frontend and not the transparent
+	// one. Refuse the pair rather than promise a boundary with a hole in it.
+	if c.Listen.ConnectAuthFile != "" && c.Listen.TransparentPort != 0 {
+		found.addf("listen.connect_auth_file cannot be set with listen.transparent_port; " +
+			"a redirected connection presents no credential")
+	}
+	c.validateTransparent(found)
 }
 
 func (c CA) validate(found *problems) {
@@ -992,41 +1199,243 @@ func (c *Config) validatePolicy(found *problems) {
 	}
 }
 
-func (id *Identity) validate(found *problems) {
+// validate checks an identity. where names its place in the document, such
+// as "identity" or "sandboxes[2].identity", so a finding points at the entry.
+func (id *Identity) validate(where string, found *problems) {
 	zone, err := url.Parse(id.ZoneURL)
 	switch {
 	case err != nil:
-		found.addf("identity.zone_url %q is not a URL: %v", id.ZoneURL, err)
+		found.addf("%s.zone_url %q is not a URL: %v", where, id.ZoneURL, err)
 	case zone.Scheme != "https" || zone.Host == "":
-		found.addf("identity.zone_url %q must be an absolute https URL", id.ZoneURL)
+		found.addf("%s.zone_url %q must be an absolute https URL", where, id.ZoneURL)
 	case zone.User != nil:
-		found.addf("identity.zone_url holds userinfo. It is an issuer and never a credential")
+		found.addf("%s.zone_url holds userinfo. It is an issuer and never a credential", where)
+	}
+	if id.ClientAssertion != "" {
+		id.validateClientAssertion(where, found)
+		return
 	}
 	if strings.TrimSpace(id.ClientID) == "" {
-		found.addf("identity.client_id is empty")
+		found.addf("%s.client_id is empty", where)
 	}
-	id.validateClientAuth(found)
+	id.validateClientAuth(where, found)
 	if strings.TrimSpace(id.Impersonate.User) == "" {
-		found.addf("identity.impersonate.user is empty")
+		found.addf("%s.impersonate.user is empty", where)
+	}
+	if id.Impersonate.SandboxOwner {
+		found.addf("%s.impersonate.sandbox_owner needs client_assertion: %s", where, ClientAssertionSandbox)
+	}
+}
+
+// validateClientAssertion refuses any credential the proxy would hold
+// beside the assertion. The assertion is the whole client authentication,
+// and the zone names the client by its subject. impersonate.user is refused
+// with it: the one user such an identity can act for is the sandbox owner
+// the assertion names.
+func (id *Identity) validateClientAssertion(where string, found *problems) {
+	if id.ClientAssertion != ClientAssertionSandbox {
+		found.addf("%s.client_assertion %q is not %q", where, id.ClientAssertion, ClientAssertionSandbox)
+	}
+	conflicts := []struct{ key, value string }{
+		{"client_id", id.ClientID},
+		{"client_secret_file", id.ClientSecretFile},
+		{"workload_token_file", id.WorkloadTokenFile},
+		{"impersonate.user", id.Impersonate.User},
+	}
+	for _, conflict := range conflicts {
+		if conflict.value != "" {
+			found.addf("%s.%s cannot be set with client_assertion", where, conflict.key)
+		}
 	}
 }
 
 // validateClientAuth requires exactly one client authentication mechanism.
 // The two mechanisms give the zone different authority, so a record must
 // identify which one the zone used.
-func (id *Identity) validateClientAuth(found *problems) {
+func (id *Identity) validateClientAuth(where string, found *problems) {
 	switch {
 	case id.WorkloadTokenFile == "" && id.ClientSecretFile == "":
-		found.addf("identity names no client authentication; set workload_token_file or client_secret_file")
+		found.addf("%s names no client authentication; set workload_token_file or client_secret_file", where)
 	case id.WorkloadTokenFile != "" && id.ClientSecretFile != "":
-		found.addf("identity.workload_token_file and identity.client_secret_file both authenticate the " +
-			"exchange; configure one")
+		found.addf("%s.workload_token_file and %s.client_secret_file both authenticate the "+
+			"exchange; configure one", where, where)
 	}
 	if id.WorkloadTokenFile != "" && !filepath.IsAbs(id.WorkloadTokenFile) {
-		found.addf("identity.workload_token_file %q must be an absolute path", id.WorkloadTokenFile)
+		found.addf("%s.workload_token_file %q must be an absolute path", where, id.WorkloadTokenFile)
 	}
 	if id.ClientSecretFile != "" && !filepath.IsAbs(id.ClientSecretFile) {
-		found.addf("identity.client_secret_file %q must be an absolute path", id.ClientSecretFile)
+		found.addf("%s.client_secret_file %q must be an absolute path", where, id.ClientSecretFile)
+	}
+}
+
+// validateSandboxes checks the assertion settings and the two maps it
+// selects from. They come together: an assertion that maps to nothing serves
+// nothing, and a map that no assertion selects from is never consulted.
+func (c *Config) validateSandboxes(found *problems) {
+	if c.SandboxAssertion == nil {
+		if len(c.Sandboxes) > 0 {
+			found.addf("sandboxes requires sandbox_assertion; nothing else selects an entry")
+		}
+		if len(c.Applications) > 0 {
+			found.addf("applications requires sandbox_assertion; nothing else selects an entry")
+		}
+		return
+	}
+	if len(c.Sandboxes) == 0 && len(c.Applications) == 0 && !c.identityForEveryApplication() {
+		found.addf("sandbox_assertion requires at least one entry in sandboxes or applications, "+
+			"or an identity with client_assertion: %s", ClientAssertionSandbox)
+	}
+	c.SandboxAssertion.validate(found)
+	c.validateSandboxEntries(found)
+	c.validateApplicationEntries(found)
+}
+
+// validateIdentity checks the top-level identity. The assertion exchange
+// needs a per-request assertion to present, so it is refused without
+// sandbox_assertion.
+func (c *Config) validateIdentity(found *problems) {
+	if c.Identity == nil {
+		return
+	}
+	if c.Identity.ClientAssertion != "" && c.SandboxAssertion == nil {
+		found.addf("identity.client_assertion needs a per-request sandbox assertion; " +
+			"set sandbox_assertion or use it under applications")
+	}
+	c.Identity.validate("identity", found)
+}
+
+// identityForEveryApplication reports whether the top-level identity is
+// the assertion exchange, which answers for every application an assertion
+// names and needs no entry per application.
+func (c *Config) identityForEveryApplication() bool {
+	return c.Identity != nil && c.Identity.ClientAssertion == ClientAssertionSandbox
+}
+
+// validateAnyEndpoint refuses any_endpoint beside the settings it replaces
+// or cannot serve: an endpoint list, and the allowlist resolver, which
+// answers only the endpoint hosts and would answer nothing.
+func (c *Config) validateAnyEndpoint(found *problems) {
+	if c.AnyEndpoint == nil {
+		return
+	}
+	if len(c.Endpoints) > 0 {
+		found.addf("any_endpoint and endpoints both say what the sandbox can reach; configure one")
+	}
+	if c.Listen.DNSPort != 0 {
+		found.addf(
+			"any_endpoint cannot be set with listen.dns_port: the resolver answers only the endpoint hosts, and there are none",
+		)
+	}
+	if c.AnyEndpoint.Credential != nil {
+		validatePlacement(c.AnyEndpoint.Credential.Placement, "any_endpoint", found)
+	}
+}
+
+// validateSandboxEntries refuses a repeated name and workspace pair and
+// checks each entry.
+func (c *Config) validateSandboxEntries(found *problems) {
+	if c.Identity != nil && len(c.Sandboxes) > 0 {
+		found.addf("identity and sandboxes both name a credential source; configure one")
+	}
+	seen := make(map[[2]string]int, len(c.Sandboxes))
+	for i, entry := range c.Sandboxes {
+		key := [2]string{entry.Name, entry.Workspace}
+		if previous, ok := seen[key]; ok {
+			found.addf("sandboxes[%d]: name %q in workspace %q repeats sandboxes[%d]",
+				i, entry.Name, entry.Workspace, previous)
+		}
+		seen[key] = i
+		where := fmt.Sprintf("sandboxes[%d]", i)
+		validateEntryName(where, entry.Name, found)
+		c.validateEntrySource(where, "the sandbox", entry.Identity, found)
+	}
+}
+
+// validateApplicationEntries refuses a repeated name and checks each entry.
+// An application has no workspace: the name is the whole key.
+func (c *Config) validateApplicationEntries(found *problems) {
+	if c.Identity != nil && len(c.Applications) > 0 {
+		found.addf("identity and applications both name a credential source; configure one")
+	}
+	seen := make(map[string]int, len(c.Applications))
+	for i, entry := range c.Applications {
+		if previous, ok := seen[entry.Name]; ok {
+			found.addf("applications[%d]: name %q repeats applications[%d]", i, entry.Name, previous)
+		}
+		seen[entry.Name] = i
+		where := fmt.Sprintf("applications[%d]", i)
+		validateEntryName(where, entry.Name, found)
+		c.validateEntrySource(where, "the application", entry.Identity, found)
+		validateCreators(where, entry.Creators, found)
+	}
+}
+
+// validateCreators refuses an empty or repeated creator. The proxy never
+// reads the list, so the check only keeps a typo from reaching the sandbox
+// runtime unnoticed.
+func validateCreators(where string, creators []string, found *problems) {
+	seen := make(map[string]int, len(creators))
+	for i, creator := range creators {
+		if strings.TrimSpace(creator) == "" {
+			found.addf("%s.creators[%d]: a creator must be a non-empty string", where, i)
+			continue
+		}
+		if previous, ok := seen[creator]; ok {
+			found.addf("%s.creators[%d]: %q repeats creators[%d]", where, i, creator, previous)
+		}
+		seen[creator] = i
+	}
+}
+
+// validateEntryName requires a name an assertion claim can carry.
+func validateEntryName(where, name string, found *problems) {
+	if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " \t\r\n") {
+		found.addf("%s: name must be a non-empty string without whitespace", where)
+	}
+}
+
+// validateEntrySource checks that an entry has exactly one credential
+// source: its own identity, or the shared static file. what names the kind
+// of entry in the finding.
+func (c *Config) validateEntrySource(where, what string, identity *Identity, found *problems) {
+	switch {
+	case identity != nil && c.Credentials.StaticFile != "":
+		found.addf("%s.identity and credentials.static_file both name a credential source; configure one", where)
+	case identity != nil:
+		identity.validate(where+".identity", found)
+	case c.Credentials.StaticFile == "":
+		found.addf("%s names no identity and credentials.static_file is unset; "+
+			"%s has no credential source", where, what)
+	}
+}
+
+func (a *SandboxAssertion) validate(found *problems) {
+	if !headerNameRE.MatchString(a.Header) {
+		found.addf("sandbox_assertion.header %q is not a header name", a.Header)
+	}
+	switch {
+	case strings.TrimSpace(a.IssuerKeyFile) == "":
+		found.addf("sandbox_assertion.issuer_key_file is empty")
+	case !filepath.IsAbs(a.IssuerKeyFile):
+		found.addf("sandbox_assertion.issuer_key_file %q must be an absolute path", a.IssuerKeyFile)
+	}
+	if strings.TrimSpace(a.Audience) == "" {
+		found.addf("sandbox_assertion.audience is empty")
+	}
+	a.validateIssuer(found)
+	if age := a.MaxAge.Duration(); age < time.Second || age > MaxAssertionMaxAge {
+		found.addf("sandbox_assertion.max_age %s must be between 1s and %s", age, MaxAssertionMaxAge)
+	}
+}
+
+// validateIssuer requires an absolute URL when the issuer is pinned. The
+// zone discovers the signer's keys at that URL.
+func (a *SandboxAssertion) validateIssuer(found *problems) {
+	if a.Issuer == "" {
+		return
+	}
+	if issuer, err := url.Parse(a.Issuer); err != nil || !issuer.IsAbs() || issuer.Host == "" {
+		found.addf("sandbox_assertion.issuer %q must be an absolute URL", a.Issuer)
 	}
 }
 
@@ -1121,49 +1530,52 @@ func normalizedPrefix(prefix string) bool {
 }
 
 func (c Credential) validate(i int, found *problems) {
-	validatePlacement(c.Placement, i, found)
+	validatePlacement(c.Placement, fmt.Sprintf("endpoints[%d]", i), found)
 }
 
-func validatePlacement(placement Placement, i int, found *problems) {
+// validatePlacement checks one placement. where names its place in the
+// document, such as "endpoints[2]" or "any_endpoint", so a finding points
+// at it.
+func validatePlacement(placement Placement, where string, found *problems) {
 	switch placement.Kind {
 	case PlacementHeader:
-		validateHeaderPlacement(placement, i, found)
+		validateHeaderPlacement(placement, where, found)
 	case PlacementQuery:
-		requireOnly(i, found, "query", placement.Name != "", "needs a name",
+		requireOnly(where, found, "query", placement.Name != "", "needs a name",
 			placement.Template == "" && placement.User == "", "takes no template or user")
 	case PlacementBasic:
-		requireOnly(i, found, "basic", placement.User != "", "needs a user",
+		requireOnly(where, found, "basic", placement.User != "", "needs a user",
 			placement.Name == "" && placement.Template == "", "takes no name or template")
 		if placement.User != "" && !credential.ValidBasicUser(placement.User) {
-			found.addf("endpoints[%d]: a basic placement user must not contain a colon or a control character", i)
+			found.addf("%s: a basic placement user must not contain a colon or a control character", where)
 		}
 	default:
-		found.addf("endpoints[%d]: placement.kind %q must be %s, %s or %s",
-			i, placement.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
+		found.addf("%s: placement.kind %q must be %s, %s or %s",
+			where, placement.Kind, PlacementHeader, PlacementQuery, PlacementBasic)
 	}
 }
 
-func validateHeaderPlacement(placement Placement, i int, found *problems) {
-	requireOnly(i, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
+func validateHeaderPlacement(placement Placement, where string, found *problems) {
+	requireOnly(where, found, "header", placement.Name != "", "needs a name", placement.User == "", "takes no user")
 	if !strings.Contains(placement.Template, credential.Token) {
-		found.addf("endpoints[%d]: a header placement template must contain %s", i, credential.Token)
+		found.addf("%s: a header placement template must contain %s", where, credential.Token)
 	}
 	if credential.BannedHeaderName(placement.Name) {
-		found.addf("endpoints[%d]: a header placement cannot name %s, "+
-			"a header the connection, the proxy or the upstream's trust depends on", i, placement.Name)
+		found.addf("%s: a header placement cannot name %s, "+
+			"a header the connection, the proxy or the upstream's trust depends on", where, placement.Name)
 	}
 }
 
 // requireOnly reports a missing required field and a field the kind does not
 // take.
 func requireOnly(
-	i int, found *problems, kind string, hasRequired bool, missing string, onlyAllowed bool, extra string,
+	where string, found *problems, kind string, hasRequired bool, missing string, onlyAllowed bool, extra string,
 ) {
 	if !hasRequired {
-		found.addf("endpoints[%d]: a %s placement %s", i, kind, missing)
+		found.addf("%s: a %s placement %s", where, kind, missing)
 	}
 	if !onlyAllowed {
-		found.addf("endpoints[%d]: a %s placement %s", i, kind, extra)
+		found.addf("%s: a %s placement %s", where, kind, extra)
 	}
 }
 

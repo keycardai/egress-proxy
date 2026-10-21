@@ -33,8 +33,21 @@ const (
 // Record is one audited decision.
 type Record struct {
 	TS time.Time `json:"ts"`
-	// SandboxID is sandbox.id from the document, on every record.
+	// SandboxID is sandbox.id from the document, on every record, unless a
+	// request's assertion named a sandbox, in which case it is that name.
 	SandboxID string `json:"sandbox_id"`
+	// SandboxUUID is the runtime's own identifier for the asserted sandbox.
+	// Absent where no assertion identified one.
+	SandboxUUID string `json:"sandbox_uuid,omitempty"`
+	// Application is the kind of sandbox the assertion named. Absent where
+	// the assertion named none.
+	Application string `json:"application,omitempty"`
+	// OnBehalfOf is the principal who created the asserted sandbox, as the
+	// runtime authenticated them. It is what the runtime asserted, not an
+	// identity the proxy verified. Absent where the assertion named none.
+	OnBehalfOf string `json:"on_behalf_of,omitempty"`
+	// Identity is the identity the proxy acted as for an asserted sandbox.
+	Identity *Identity `json:"identity,omitempty"`
 	// Document identifies the configuration document that decided, and
 	// Config the settings the process enforced. Both are needed: the
 	// document digest covers the mounted file, and the config digest covers
@@ -54,6 +67,16 @@ type Record struct {
 	Decision Decision   `json:"decision"`
 	// Outcome is what came of an allowed request.
 	Outcome *Outcome `json:"outcome,omitempty"`
+}
+
+// Identity names the application the proxy exchanged as for a request, and
+// the user it exchanged for.
+type Identity struct {
+	ClientID string `json:"client_id,omitempty"`
+	// User is the Keycard user id the exchange impersonated: the asserted
+	// sandbox's owner_id, where the identity impersonates the sandbox
+	// owner. Absent where the identity acts as itself.
+	User string `json:"user,omitempty"`
 }
 
 // DocumentRef identifies the document by its digest, "sha256:<hex>" over the
@@ -194,7 +217,11 @@ func NewStamped(next Sink, stamp Stamp, now func() time.Time) *Stamped {
 // Emit stamps and forwards the record.
 func (s *Stamped) Emit(record Record) {
 	record.TS = s.now().UTC()
-	record.SandboxID = s.stamp.SandboxID
+	// A request whose assertion named a sandbox keeps that name. The
+	// process-level sandbox fills every other record.
+	if record.SandboxID == "" {
+		record.SandboxID = s.stamp.SandboxID
+	}
 	record.Document = DocumentRef{Digest: s.stamp.DocumentDigest}
 	record.Config = ConfigRef{Digest: s.stamp.ConfigDigest}
 	s.sink.Emit(record)

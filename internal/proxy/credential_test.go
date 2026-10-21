@@ -22,6 +22,7 @@ import (
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
+	"github.com/keycardai/egress-proxy/internal/proxy"
 )
 
 // The credentials the static source holds, by resource.
@@ -389,14 +390,20 @@ func (refusingSource) Describe() string { return "a source that refuses every re
 
 // TestASourceFailureClassIsItsDenialReason checks the mapping used by audit
 // queries and error handling. A source reports the failure class, and the
-// proxy does not read its message to choose a reason.
+// proxy does not read its message to choose a reason. A source that says
+// why also carries that reason, which the refusal puts in the detail header
+// and the log line, made safe for a header value.
 func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 	t.Parallel()
+	const zoneProse = `Application "review-agent" is not allowed to access "GitHub API"`
 	tests := []struct {
 		name       string
 		err        error
 		wantReason policy.Reason
 		wantStatus int
+		// wantDetail is the detail header and the log field. Empty means
+		// the refusal carries neither.
+		wantDetail string
 	}{
 		{
 			name: "the zone's policy refused the exchange", err: credential.ErrExchangeDenied,
@@ -408,8 +415,40 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 			wantReason: policy.ReasonExchangeFailed, wantStatus: http.StatusBadGateway,
 		},
 		{
+			name:       "the zone's policy refused the exchange and said why",
+			err:        &credential.ExchangeError{Class: credential.ErrExchangeDenied, Detail: zoneProse},
+			wantReason: policy.ReasonExchangeDenied, wantStatus: http.StatusForbidden,
+			wantDetail: zoneProse,
+		},
+		{
+			name:       "the exchange did not complete and the class is known",
+			err:        &credential.ExchangeError{Class: credential.ErrExchangeFailed, Detail: "the zone answered 502"},
+			wantReason: policy.ReasonExchangeFailed, wantStatus: http.StatusBadGateway,
+			wantDetail: "the zone answered 502",
+		},
+		{
+			name: "the zone's reason holds control characters",
+			err: &credential.ExchangeError{
+				Class: credential.ErrExchangeDenied, Detail: "no grant\r\nX-Injected: 1\x00\x7f",
+			},
+			wantReason: policy.ReasonExchangeDenied, wantStatus: http.StatusForbidden,
+			wantDetail: "no grantX-Injected: 1",
+		},
+		{
+			name:       "the zone's reason is longer than the cap",
+			err:        &credential.ExchangeError{Class: credential.ErrExchangeDenied, Detail: strings.Repeat("a", 600)},
+			wantReason: policy.ReasonExchangeDenied, wantStatus: http.StatusForbidden,
+			wantDetail: strings.Repeat("a", 512),
+		},
+		{
 			name: "the source holds nothing for the resource", err: credential.ErrUnavailable,
 			wantReason: policy.ReasonCredentialUnavailable, wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "the source made no exchange and said why",
+			err:        &credential.ExchangeError{Class: credential.ErrUnavailable, Detail: "the assertion names no owner"},
+			wantReason: policy.ReasonCredentialUnavailable, wantStatus: http.StatusForbidden,
+			wantDetail: "the assertion names no owner",
 		},
 		{
 			name: "a failure in no class at all", err: errSomethingElse,
@@ -431,6 +470,28 @@ func TestASourceFailureClassIsItsDenialReason(t *testing.T) {
 			assert.Equal(t, policy.VerdictDeny, record.Decision.Verdict, "record verdict")
 			assert.Equal(t, tc.wantReason, record.Decision.Reason, "record reason")
 			assert.Zero(t, h.upstream.connections.Load(), "a request without its credential reached the upstream")
+
+			logged := h.logs.String()
+			require.Contains(t, logged, "refused a request", "the refusal is logged")
+			// The body carries the same detail as the header, or none, so
+			// the body can hold nothing the header redaction removed.
+			assert.Equal(t, "application/problem+json", answer.header.Get("Content-Type"), "the refusal content type")
+			var problem map[string]any
+			require.NoError(t, json.Unmarshal([]byte(answer.body), &problem), "the refusal body parses as JSON")
+			assert.Equal(t, string(tc.wantReason), problem["reason"], "the reason in the body")
+			assert.Equal(t, "urn:keycard:request:"+answer.id(), problem["instance"], "the instance in the body")
+			if tc.wantDetail == "" {
+				assert.Empty(t, answer.header.Values(proxy.HeaderDetail), "a refusal with no detail sets no header")
+				assert.NotContains(t, problem, "detail", "a refusal with no detail has no detail member")
+				assert.NotContains(t, logged, `"detail":`, "a refusal with no detail logs none")
+				return
+			}
+			assert.Equal(t, []string{tc.wantDetail}, answer.header.Values(proxy.HeaderDetail), "the detail header")
+			assert.Equal(t, tc.wantDetail, problem["detail"], "the detail in the body")
+			encoded, err := json.Marshal(tc.wantDetail)
+			require.NoError(t, err, "encode the detail")
+			assert.Contains(t, logged, `"detail":`+string(encoded), "the log line carries the detail")
+			assert.Contains(t, record.Decision.Error, tc.err.Error(), "the record keeps the full error")
 		})
 	}
 }

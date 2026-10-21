@@ -1,0 +1,135 @@
+# An application identity that exchanges for the sandbox owner, end to end
+# with the built binary. The proxy holds no credential of its own: each
+# request's assertion authenticates a token exchange whose subject is the
+# substitute-user token for the assertion's owner_id, and the zone's policy
+# decides whether that application may act for that user. An assertion that
+# names no owner_id is refused by the proxy before any exchange, a user the
+# zone's policy does not let the application act for is refused by the zone,
+# and a second request for one sandbox, owner and resource is served from
+# the cache.
+
+[!exec:curl] skip 'curl is not installed'
+
+upstream upstream
+freeport PROXY_PORT
+shortdir ADMIN_DIR
+chmod 0777 $ADMIN_DIR
+
+# The issuer publishes the key the assertions are signed with. The zone
+# knows one application, which may act for troy and no one else.
+assertkey keys
+issuer keys ISSUER
+fakeas -workload 'openshell:review-agent:*=review-agent' -user igmua2g0fwapl21qll7tczdw7t zone https://localhost:$UPSTREAM_PORT/granted/=zone-issued-sekrit
+
+expand config.yaml
+
+env EGRESS_PROXY_CONFIG=config.yaml
+env EGRESS_PROXY_SANDBOX_ID=acceptance
+env EGRESS_PROXY_CONNECT=127.0.0.1:$PROXY_PORT
+env EGRESS_PROXY_ADMIN=$ADMIN_DIR/admin.sock
+env EGRESS_PROXY_CA_OUT_DIR=$WORK/shared-ca
+env EGRESS_PROXY_UPSTREAM_CA_FILES=$WORK/upstream/ca.crt,$WORK/zone/ca.crt
+exec egress-proxy &proxy&
+waitfile shared-ca/ca.crt
+waitport 127.0.0.1:$PROXY_PORT
+
+env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT
+
+# The admin socket says the identity exchanges for the owner and holds no
+# credential.
+exec curl -sS --unix-socket $ADMIN_DIR/admin.sock http://admin/info
+stdout '"credential_source": "1 application identities selected by assertion, 1 exchanged as the sandbox, 1 of them for the sandbox owner"'
+! stdout 'sekrit'
+
+# Troy's sandbox names him and his Keycard user id. The orphan sandbox
+# names its owner and no id, as a runtime that resolved none would. Abed's
+# sandbox names a user the zone does not let the application act for.
+assertion -app review-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 7f3a -owner troy.barnes -owner-id igmua2g0fwapl21qll7tczdw7t keys TROY keycard-demo
+assertion -app review-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 8b4c -owner troy.barnes keys ORPHAN keycard-demo
+assertion -app review-agent -iss $ISSUER -aud keycard-egress-proxy,https://localhost:$ZONE_PORT/oauth2/token -id 9c5d -owner abed.nadir -owner-id abed keys ABED study-group
+
+# The zone issues for troy, and the placeholder the workload sent is
+# replaced by the token.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$TROY -H 'Authorization: Bearer placeholder' https://localhost:$UPSTREAM_PORT/granted/troy
+stdout '^hello from upstream /granted/troy$'
+
+# A second request for the same sandbox, owner and resource is served from
+# the cache, so the zone sees no second exchange for it.
+exec curl -sS --cacert shared-ca/ca.crt -H X-Keycard-Sandbox-Assertion:$TROY https://localhost:$UPSTREAM_PORT/granted/troy-again
+stdout '^hello from upstream /granted/troy-again$'
+
+# An assertion that names no owner_id is refused by the proxy as
+# credential_unavailable. No exchange is made, and the refusal says why.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$ORPHAN https://localhost:$UPSTREAM_PORT/granted/orphan
+stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: credential_unavailable'
+stdout 'X-Keycard-Deny-Detail: the assertion names no owner'
+
+# The zone refuses a user the application may not act for with
+# access_denied, which the proxy denies with 403 as exchange_denied. The
+# refusal carries the zone's error_description.
+exec curl -sS --cacert shared-ca/ca.crt -D - -o /dev/null -w '%{http_code}' -H X-Keycard-Sandbox-Assertion:$ABED https://localhost:$UPSTREAM_PORT/granted/abed
+stdout '^403$'
+stdout 'X-Keycard-Deny-Reason: exchange_denied'
+stdout 'X-Keycard-Deny-Detail: openshell:review-agent:9c5d cannot act for abed'
+
+# What the upstream saw: the token the zone issued for the application and
+# troy, an empty assertion header, and nothing for either refusal.
+grep 'request GET /granted/troy host=localhost:\d+ authorization="Bearer review-agent:zone-issued-sekrit" assertion=""' upstream/requests.log
+grep 'request GET /granted/troy-again host=localhost:\d+ authorization="Bearer review-agent:zone-issued-sekrit" assertion=""' upstream/requests.log
+! grep '/granted/orphan' upstream/requests.log
+! grep '/granted/abed' upstream/requests.log
+grep -count=2 '^request ' upstream/requests.log
+
+# What the zone saw: a token exchange with no client_id, the sandbox
+# subject as the actor, the owner id as the subject, one per sandbox, owner
+# and resource, and the refusal. The orphan reached no zone.
+grep 'exchange client= actor="openshell:review-agent:7f3a" subject=igmua2g0fwapl21qll7tczdw7t resource=https://localhost:[0-9]+/granted/ error=""' zone/requests.log
+grep 'exchange client= actor="openshell:review-agent:9c5d" subject=abed resource=https://localhost:[0-9]+/granted/ error="access_denied"' zone/requests.log
+! grep 'actor="openshell:review-agent:8b4c"' zone/requests.log
+grep -count=1 'actor="openshell:review-agent:7f3a"' zone/requests.log
+grep -count=2 '^exchange ' zone/requests.log
+
+sigterm
+wait proxy
+
+# The process announces the mechanism on every start.
+stderr '"msg":"credential source"'
+stderr '1 exchanged as the sandbox, 1 of them for the sandbox owner'
+
+# Request records name the subject as the client, the owner id as the user
+# the identity exchanged for, and the owner as the runtime named them.
+audit stdout scope=request request.path=/granted/troy decision.reason=endpoint_allowed application=review-agent sandbox_id=keycard-demo sandbox_uuid=7f3a identity.client_id=openshell:review-agent:7f3a identity.user=igmua2g0fwapl21qll7tczdw7t on_behalf_of=troy.barnes outcome.status=200
+audit stdout scope=request request.path=/granted/troy-again decision.reason=endpoint_allowed identity.user=igmua2g0fwapl21qll7tczdw7t outcome.status=200
+audit stdout scope=request request.path=/granted/orphan decision.verdict=deny decision.reason=credential_unavailable sandbox_uuid=8b4c identity.client_id=openshell:review-agent:8b4c on_behalf_of=troy.barnes 'decision.error~the assertion names no owner'
+! audit stdout scope=request request.path=/granted/orphan 'identity.user~.'
+audit stdout scope=request request.path=/granted/abed decision.verdict=deny decision.reason=exchange_denied sandbox_id=study-group sandbox_uuid=9c5d identity.client_id=openshell:review-agent:9c5d identity.user=abed on_behalf_of=abed.nadir 'decision.error~access_denied: openshell:review-agent:9c5d cannot act for abed'
+stderr '"reason":"credential_unavailable","detail":"the assertion names no owner"'
+stderr '"reason":"exchange_denied","detail":"openshell:review-agent:9c5d cannot act for abed"'
+
+# No token, no assertion and no issued credential reaches the audit stream
+# or the log. A JWT begins with the base64 of '{"', which is eyJ.
+! stdout 'sekrit'
+! stderr 'sekrit'
+! stdout 'eyJ'
+! stderr 'eyJ'
+
+-- config.yaml --
+version: 1
+# The upstream and the zone are on loopback, which the platform deny list
+# covers.
+policy:
+  deny_list_exceptions: ["127.0.0.0/8", "::1/128"]
+sandbox_assertion:
+  issuer_key_file: $WORK/keys/key.pub
+applications:
+  - name: review-agent
+    identity:
+      zone_url: "https://localhost:$ZONE_PORT"
+      client_assertion: sandbox
+      impersonate:
+        sandbox_owner: true
+endpoints:
+  - url: https://localhost:$UPSTREAM_PORT/granted/
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}

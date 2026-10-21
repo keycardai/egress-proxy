@@ -42,7 +42,7 @@ stdout '"subcommand": "probe"'
 # One entry per flag and no more. The endpoints and the policy section come
 # from the document alone, so a variable for either would raise this count
 # and fail here. Raise it with the flag when the binary gains a setting.
-stdout -count=24 '"env": "EGRESS_PROXY_'
+stdout -count=25 '"env": "EGRESS_PROXY_'
 
 # A duration default is a whole number of seconds, so a chart lint compares
 # it arithmetically rather than parsing Go's 24h0m0s.

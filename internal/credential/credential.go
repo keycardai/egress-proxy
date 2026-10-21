@@ -56,7 +56,53 @@ var (
 	// ErrExchangeFailed means that the exchange did not complete. The source
 	// does not know whether the credential would have been granted.
 	ErrExchangeFailed = errors.New("the token exchange failed")
+	// ErrAuthorizationRequired means that the zone would issue the
+	// credential, but the person the exchange acts for has not authorized
+	// the resource: it is an OAuth resource and they hold no grant for its
+	// provider. A retry answers the same until that person authorizes it,
+	// and then succeeds with nothing restarted.
+	ErrAuthorizationRequired = errors.New("the person has not authorized the resource")
 )
+
+// ExchangeError is a source failure with the reason that the refusal
+// carries. Class is ErrExchangeDenied, ErrExchangeFailed or ErrUnavailable,
+// so errors.Is still picks the denial reason. Detail is prose for the
+// response header and the log line: the zone's error_description, the class
+// of failure when the zone described none, or why the source made no
+// exchange. Cause is the underlying error, which the audit record keeps in
+// full.
+//
+// NEVER put a credential or a token in Detail or in Cause.
+type ExchangeError struct {
+	Class  error
+	Detail string
+	Cause  error
+}
+
+func (e *ExchangeError) Error() string {
+	if e.Cause != nil {
+		return e.Class.Error() + ": " + e.Cause.Error()
+	}
+	return e.Class.Error() + ": " + e.Detail
+}
+
+// Unwrap exposes the class and the cause to errors.Is and errors.As.
+func (e *ExchangeError) Unwrap() []error {
+	if e.Cause == nil {
+		return []error{e.Class}
+	}
+	return []error{e.Class, e.Cause}
+}
+
+// Detail returns the reason the ExchangeError on err's chain carries. It
+// returns "" for every other error, so a refusal with no exchange behind it
+// carries no detail.
+func Detail(err error) string {
+	if exchangeErr, ok := errors.AsType[*ExchangeError](err); ok {
+		return exchangeErr.Detail
+	}
+	return ""
+}
 
 // Placement is where the proxy writes a credential into a request. It is
 // the `placement` object of an endpoint's credential.

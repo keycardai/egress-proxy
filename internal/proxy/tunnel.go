@@ -15,9 +15,11 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/elazarl/goproxy"
 
+	"github.com/keycardai/egress-proxy/internal/assertion"
 	"github.com/keycardai/egress-proxy/internal/audit"
 	"github.com/keycardai/egress-proxy/internal/credential"
 	"github.com/keycardai/egress-proxy/internal/policy"
@@ -27,7 +29,6 @@ const (
 	httpsPort = 443
 
 	connectEstablished = "HTTP/1.1 200 Connection established\r\n\r\n"
-	contentTypeText    = "text/plain; charset=utf-8"
 )
 
 var (
@@ -82,10 +83,17 @@ func (s *Server) handleConnect(authority string, ctx *goproxy.ProxyCtx) (*goprox
 	state := &tunnel{connectionID: newID()}
 	var decision policy.Decision
 	host, port, ok := splitAuthority(authority)
-	if ok {
+	switch {
+	case s.opts.ConnectAuth != nil && !s.opts.ConnectAuth.Allows(ctx.Req):
+		// The credential comes before the decision, so an unauthenticated
+		// client learns nothing about the endpoint list. The record still
+		// names what was asked for, as the authority when it did not parse.
+		state.host, state.port = cmp.Or(host, authority), port
+		decision = policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonProxyUnauthenticated}
+	case ok:
 		state.host, state.port = host, port
 		decision = s.opts.Matcher.Connection(host, port)
-	} else {
+	default:
 		state.host = authority
 		decision = policy.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonMalformedRequest}
 	}
@@ -258,11 +266,25 @@ type forward struct {
 	// requestID is the id on the record for this request. A refusal the
 	// reverse proxy answers names it, so every deny names a record.
 	requestID string
-	// secret is the endpoint's credential and writer is where it goes. Both
-	// are empty for an endpoint that names none. wireForms are the secrets
-	// redact covers, from credential.WireForms.
-	writer    credential.Writer
-	secret    string
+	// source supplies the credential: the process source, or the asserted
+	// sandbox's source when the proxy identifies sandboxes.
+	source credential.Source
+	// sandbox is the asserted sandbox, nil when none was verified. clientID
+	// is the identity the source exchanges as, empty for a static source,
+	// and user the owner it exchanges for, empty unless it impersonates one.
+	sandbox  *assertion.Claims
+	clientID string
+	user     string
+	// token is the verified assertion as the request carried it. The
+	// source that exchanges as the sandbox presents it to the zone. It is
+	// a credential: NEVER log it or put it on a record.
+	token string
+	// writer and secret are the endpoint's credential and where it goes.
+	// Both are empty for an endpoint that names none.
+	writer credential.Writer
+	secret string
+	// wireForms are the secrets redact covers, from credential.WireForms,
+	// set together with secret by setCredential.
 	wireForms []string
 	// writeErr is what the credential writer reported. The round trip
 	// refuses a forward that has one.
@@ -323,12 +345,16 @@ func (s *Server) serveTunnelRequest(w http.ResponseWriter, r *http.Request) {
 	fwd := &forward{host: state.sni, port: state.port, requestID: requestID}
 	decision := s.decideRequest(r.Context(), state, r, fwd)
 	record.Decision = auditDecision(decision)
+	stampSandbox(&record, fwd)
 	if !decision.Allowed() {
 		s.opts.Audit.Emit(record)
-		s.logger.Info("refused a request",
-			slog.String("request_id", requestID),
-			slog.String("reason", string(decision.Reason)))
-		writeDeny(w, statusFor(decision.Reason), decision.Reason, requestID)
+		detail := denyDetail(decision)
+		attrs := []any{slog.String("request_id", requestID), slog.String("reason", string(decision.Reason))}
+		if detail != "" {
+			attrs = append(attrs, slog.String("detail", detail))
+		}
+		s.logger.Info("refused a request", attrs...)
+		writeDeny(w, statusFor(decision.Reason), decision.Reason, requestID, detail)
 		return
 	}
 
@@ -401,6 +427,16 @@ func (s *Server) decideRequest(
 	if refusal, refused := refuseRequestShape(state, r); refused {
 		return refusal
 	}
+	// The sandbox is identified before the endpoint decision, so every
+	// request record, a refusal included, names the sandbox that sent it,
+	// and the header is stripped on every forward.
+	if s.opts.Sandboxes != nil {
+		if refusal, refused := s.identify(r, fwd); refused {
+			return refusal
+		}
+	} else {
+		fwd.source = s.opts.Credentials
+	}
 	decision := s.opts.Matcher.Request(state.sni, state.port, r.URL.EscapedPath())
 	if !decision.Allowed() || decision.Endpoint == nil || decision.Endpoint.Credential == nil {
 		return decision
@@ -424,6 +460,8 @@ func credentialReason(err error) policy.Reason {
 		return policy.ReasonExchangeDenied
 	case errors.Is(err, credential.ErrExchangeFailed):
 		return policy.ReasonExchangeFailed
+	case errors.Is(err, credential.ErrAuthorizationRequired):
+		return policy.ReasonAuthorizationRequired
 	default:
 		return policy.ReasonCredentialUnavailable
 	}
@@ -449,14 +487,17 @@ func refuseRequestShape(state *tunnel, r *http.Request) (policy.Decision, bool) 
 // resolveCredential reads the endpoint credential and prepares its writer.
 // Any failure denies the request before it leaves with the workload value.
 func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint, fwd *forward) error {
-	if s.opts.Credentials == nil {
+	if fwd.source == nil {
 		return errNoSource
 	}
 	writer, err := credential.NewWriter(*endpoint.Credential)
 	if err != nil {
 		return err //nolint:wrapcheck // the message already names the placement
 	}
-	secret, err := s.opts.Credentials.Credential(ctx, endpoint.Resource)
+	if fwd.token != "" {
+		ctx = assertion.WithToken(ctx, fwd.token)
+	}
+	secret, err := fwd.source.Credential(ctx, endpoint.Resource)
 	if err != nil {
 		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
 	}
@@ -485,6 +526,11 @@ func (s *Server) rewrite(proxied *httputil.ProxyRequest) {
 	// URL would print it.
 	proxied.Out.URL.User = nil
 	proxied.Out.Host = proxied.In.Host
+	// The assertion is for the proxy. It never reaches an upstream, on any
+	// endpoint.
+	if s.opts.Sandboxes != nil {
+		proxied.Out.Header.Del(s.opts.Sandboxes.Header)
+	}
 	if fwd.writer == nil {
 		return
 	}
@@ -539,10 +585,10 @@ func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error
 	case isType[*credentialNotWrittenError](err):
 		fwd.denied, fwd.denyReason = true, policy.ReasonCredentialUnavailable
 	default:
-		writeDeny(w, http.StatusBadGateway, policy.ReasonUpstreamFailed, fwd.requestID)
+		writeDeny(w, http.StatusBadGateway, policy.ReasonUpstreamFailed, fwd.requestID, "")
 		return
 	}
-	writeDeny(w, statusFor(fwd.denyReason), fwd.denyReason, fwd.requestID)
+	writeDeny(w, statusFor(fwd.denyReason), fwd.denyReason, fwd.requestID, "")
 }
 
 // isType reports whether err is or wraps an error of type E.
@@ -585,7 +631,7 @@ func (s *Server) serveNonProxy(w http.ResponseWriter, r *http.Request) {
 		Request:     &audit.RequestInfo{Method: r.Method, Path: r.URL.EscapedPath(), Host: r.Host},
 		Decision:    audit.Decision{Verdict: policy.VerdictDeny, Reason: policy.ReasonNotAProxyRequest},
 	})
-	writeDeny(w, http.StatusBadRequest, policy.ReasonNotAProxyRequest, requestID)
+	writeDeny(w, http.StatusBadRequest, policy.ReasonNotAProxyRequest, requestID, "")
 }
 
 // splitAuthority splits host[:port], defaulting the port to 443. It reports
@@ -626,9 +672,13 @@ func statusFor(reason policy.Reason) int {
 		// The handshake fails before any request, so this reason reaches an
 		// audit record and never a response.
 		return http.StatusInternalServerError
+	case policy.ReasonProxyUnauthenticated:
+		// The client can retry with a credential.
+		return http.StatusProxyAuthRequired
 	case policy.ReasonDenyAlways, policy.ReasonNoMatchingEndpoint, policy.ReasonHostMismatch, policy.ReasonNoSNI,
 		policy.ReasonCleartextNotForwarded, policy.ReasonNotRedirected, policy.ReasonCredentialUnavailable,
-		policy.ReasonExchangeDenied:
+		policy.ReasonExchangeDenied, policy.ReasonAuthorizationRequired, policy.ReasonSandboxUnidentified,
+		policy.ReasonSandboxUnknown, policy.ReasonApplicationUnknown:
 		return http.StatusForbidden
 	case policy.ReasonEndpointAllowed:
 		// An allow never reaches this function. The case is here because
@@ -640,25 +690,51 @@ func statusFor(reason policy.Reason) int {
 	}
 }
 
-func denyHeaders(header http.Header, reason policy.Reason, requestID string) {
-	header.Set("Content-Type", contentTypeText)
+// denyDetail is the text the detail header and the log line carry for a
+// refusal. Only a refusal whose source said why carries one. Control
+// characters are dropped, because a header value cannot hold them, and the
+// text is cut at maxDetail bytes on a rune boundary.
+func denyDetail(decision policy.Decision) string {
+	detail := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, credential.Detail(decision.Err))
+	if len(detail) > maxDetail {
+		detail = strings.ToValidUTF8(detail[:maxDetail], "")
+	}
+	return detail
+}
+
+// denyHeaders sets the refusal headers. An empty detail sets no detail
+// header.
+func denyHeaders(header http.Header, reason policy.Reason, requestID, detail string) {
+	header.Set("Content-Type", contentTypeProblem)
 	header.Set(HeaderReason, string(reason))
 	if requestID != "" {
 		header.Set(HeaderRequestID, requestID)
 	}
+	if detail != "" {
+		header.Set(HeaderDetail, detail)
+	}
 }
 
-func writeDeny(w http.ResponseWriter, status int, reason policy.Reason, requestID string) {
-	denyHeaders(w.Header(), reason, requestID)
+func writeDeny(w http.ResponseWriter, status int, reason policy.Reason, requestID, detail string) {
+	denyHeaders(w.Header(), reason, requestID, detail)
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, "egress-proxy: "+string(reason)+"\n")
+	//nolint:gosec // G705: the detail is JSON-encoded, HTML-escaped, and served as application/problem+json
+	_, _ = w.Write(denyBody(status, reason, requestID, detail))
 }
 
 // denyResponse is the refusal goproxy writes to the client, on a rejected
 // CONNECT or a cleartext request.
 func denyResponse(r *http.Request, status int, reason policy.Reason, requestID string) *http.Response {
-	resp := goproxy.NewResponse(r, contentTypeText, status, "egress-proxy: "+string(reason)+"\n")
-	denyHeaders(resp.Header, reason, requestID)
+	resp := goproxy.NewResponse(r, contentTypeProblem, status, string(denyBody(status, reason, requestID, "")))
+	denyHeaders(resp.Header, reason, requestID, "")
+	if status == http.StatusProxyAuthRequired {
+		resp.Header.Set("Proxy-Authenticate", `Basic realm="keycard"`)
+	}
 	return resp
 }
 

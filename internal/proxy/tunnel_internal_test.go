@@ -107,6 +107,16 @@ func TestStatusForCertificateUnavailable(t *testing.T) {
 	assert.Equal(t, 500, statusFor(policy.ReasonCertificateUnavailable), "the status for a failed mint")
 }
 
+// TestStatusForSandboxReasons pins the statuses of the connect credential
+// and sandbox assertion refusals. A 407 asks the client for a credential; the
+// sandbox refusals are policy answers.
+func TestStatusForSandboxReasons(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, 407, statusFor(policy.ReasonProxyUnauthenticated), "an unauthenticated CONNECT")
+	assert.Equal(t, 403, statusFor(policy.ReasonSandboxUnidentified), "no verifiable assertion")
+	assert.Equal(t, 403, statusFor(policy.ReasonSandboxUnknown), "an unmapped sandbox")
+}
+
 // handshakeServer builds a proxy that allows allowedHost, logs into buf, and
 // gives a tunnel handshake the budget the case asks for.
 func handshakeServer(t *testing.T, buf *bytes.Buffer, budget time.Duration, sink audit.Sink) *Server {
@@ -623,7 +633,11 @@ func TestAFailedCredentialWriteDenies(t *testing.T) {
 			if tc.wantVerdict == policy.VerdictDeny {
 				assert.Equal(t, string(tc.wantReason), written.Header().Get(HeaderReason), "the deny reason header")
 				assert.Equal(t, "req-1", written.Header().Get(HeaderRequestID), "the request id header")
-				assert.Equal(t, "egress-proxy: "+string(tc.wantReason)+"\n", written.Body.String(), "the deny body")
+				assert.Equal(t, contentTypeProblem, written.Header().Get("Content-Type"), "the deny content type")
+				var problem map[string]any
+				require.NoError(t, json.Unmarshal(written.Body.Bytes(), &problem), "the deny body parses as JSON")
+				assert.Equal(t, string(tc.wantReason), problem["reason"], "the reason in the deny body")
+				assert.Equal(t, "urn:keycard:request:req-1", problem["instance"], "the instance in the deny body")
 				assert.NotEmpty(t, records[0].Decision.Error, "the record says why the write failed")
 			}
 			line, err := json.Marshal(records[0])
@@ -640,4 +654,62 @@ type workingWriter struct{}
 func (workingWriter) Write(out *http.Request, secret string) error {
 	out.Header.Set("Authorization", "Bearer "+secret)
 	return nil
+}
+
+// TestADenyBodyIsAProblemDocument pins the RFC 9457 body every refusal
+// carries, member by member: the document holds exactly what the case lists
+// and nothing else.
+func TestADenyBodyIsAProblemDocument(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		status    int
+		reason    policy.Reason
+		requestID string
+		detail    string
+		want      map[string]any
+	}{
+		"a zone refusal with the zone's sentence": {
+			status: http.StatusForbidden, reason: policy.ReasonExchangeDenied,
+			requestID: "req-1", detail: "no policy grants https://api.greendale.edu/",
+			want: map[string]any{
+				"type":     "https://keycard.ai/egress-proxy/deny/exchange_denied",
+				"title":    "The zone refused to issue a credential",
+				"status":   float64(http.StatusForbidden),
+				"detail":   "no policy grants https://api.greendale.edu/",
+				"instance": "urn:keycard:request:req-1",
+				"reason":   "exchange_denied",
+			},
+		},
+		"a refusal with no detail omits the member": {
+			status: http.StatusForbidden, reason: policy.ReasonNoMatchingEndpoint, requestID: "req-2",
+			want: map[string]any{
+				"type":     "https://keycard.ai/egress-proxy/deny/no_matching_endpoint",
+				"title":    "No endpoint in the document matches this request",
+				"status":   float64(http.StatusForbidden),
+				"instance": "urn:keycard:request:req-2",
+				"reason":   "no_matching_endpoint",
+			},
+		},
+		"a refusal with no request id omits the instance": {
+			status: http.StatusBadGateway, reason: policy.ReasonExchangeFailed, detail: "the zone answered 404",
+			want: map[string]any{
+				"type":   "https://keycard.ai/egress-proxy/deny/exchange_failed",
+				"title":  "The token exchange did not complete",
+				"status": float64(http.StatusBadGateway),
+				"detail": "the zone answered 404",
+				"reason": "exchange_failed",
+			},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+			body := denyBody(tc.status, tc.reason, tc.requestID, tc.detail)
+			r.True(bytes.HasSuffix(body, []byte("\n")), "the body ends with a newline")
+			var got map[string]any
+			r.NoError(json.Unmarshal(body, &got), "the body parses as JSON")
+			r.Equal(tc.want, got, "the members of the document")
+		})
+	}
 }

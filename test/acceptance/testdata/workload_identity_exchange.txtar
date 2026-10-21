@@ -83,8 +83,9 @@ waitfile wrong-ca/ca.crt
 waitport 127.0.0.1:$WRONG_PROXY_PORT
 
 env HTTPS_PROXY=http://127.0.0.1:$WRONG_PROXY_PORT
-exec curl -sS --cacert wrong-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
+exec curl -sS --cacert wrong-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
 stdout '^403$'
+stdout 'X-Keycard-Deny-Detail: system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t cannot act for someone-else'
 
 # The request does not reach the upstream. The zone refuses the exchange
 # instead of issuing a credential for a user that this ServiceAccount cannot
@@ -94,6 +95,7 @@ grep 'actor="system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t" subject=so
 
 sigterm
 wait wrongproxy
+stderr '"reason":"exchange_denied","detail":"system:serviceaccount:agents:igmua2g0fwapl21qll7tczdw7t cannot act for someone-else"'
 audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_denied decision.endpoint=localhost:$UPSTREAM_PORT/granted/
 
 # An assertion the zone's key set does not cover authenticates nobody. The
@@ -113,9 +115,13 @@ exec egress-proxy &forgedproxy&
 waitfile forged-ca/ca.crt
 waitport 127.0.0.1:$FORGED_PROXY_PORT
 
+# The zone's invalid_client answer carries its description, which names
+# the verification that failed and never the token.
 env HTTPS_PROXY=http://127.0.0.1:$FORGED_PROXY_PORT
-exec curl -sS --cacert forged-ca/ca.crt -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
+exec curl -sS --cacert forged-ca/ca.crt -D - -o /dev/null -w '%{http_code}' https://localhost:$UPSTREAM_PORT/granted/repos
 stdout '^502$'
+stdout 'X-Keycard-Deny-Detail: the client assertion does not verify'
+! stdout 'eyJ'
 
 # The forged assertion names no actor, because nothing verified it.
 grep 'exchange client=acceptance-app-credential actor="" subject=igmua2g0fwapl21qll7tczdw7t resource=https://localhost:[0-9]+/granted/ error="invalid_client"' zone/requests.log
@@ -123,7 +129,10 @@ grep -count=1 '^request ' upstream/requests.log
 
 sigterm
 wait forgedproxy
+stderr '"reason":"exchange_failed","detail":"the client assertion does not verify'
 audit stdout scope=request request.path=/granted/repos decision.verdict=deny decision.reason=exchange_failed decision.endpoint=localhost:$UPSTREAM_PORT/granted/
+! stdout 'eyJ'
+! stderr 'eyJ'
 
 -- config.yaml --
 version: 1

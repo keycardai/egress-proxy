@@ -3,6 +3,7 @@ package policy_test
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -569,6 +570,153 @@ func TestCanonicalEscapes(t *testing.T) {
 		t.Run(tc.path, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, policy.CanonicalEscapes(tc.path), "CanonicalEscapes(%q)", tc.path)
+		})
+	}
+}
+
+// TestEveryReasonHasATitle pins the sentence a refusal body carries for each
+// reason code. A title is short and ends without a period, so it reads as a
+// line on its own.
+func TestEveryReasonHasATitle(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		reason policy.Reason
+		want   string
+	}{
+		"deny_always":             {policy.ReasonDenyAlways, "The destination is on the platform deny list"},
+		"no_matching_endpoint":    {policy.ReasonNoMatchingEndpoint, "No endpoint in the document matches this request"},
+		"host_mismatch":           {policy.ReasonHostMismatch, "The request names two different hosts"},
+		"no_sni":                  {policy.ReasonNoSNI, "The TLS handshake named no server"},
+		"cleartext_not_forwarded": {policy.ReasonCleartextNotForwarded, "The proxy forwards no cleartext HTTP"},
+		"not_redirected":          {policy.ReasonNotRedirected, "The connection was opened to the proxy itself"},
+		"malformed_request":       {policy.ReasonMalformedRequest, "The request has no well-formed host and path"},
+		"not_a_proxy_request":     {policy.ReasonNotAProxyRequest, "The proxy listener serves no requests of its own"},
+		"credential_unavailable":  {policy.ReasonCredentialUnavailable, "No credential is available for this endpoint"},
+		"exchange_denied":         {policy.ReasonExchangeDenied, "The zone refused to issue a credential"},
+		"exchange_failed":         {policy.ReasonExchangeFailed, "The token exchange did not complete"},
+		"authorization_required": {
+			policy.ReasonAuthorizationRequired,
+			"The person this request acts for has not authorized the resource",
+		},
+		"upstream_failed": {policy.ReasonUpstreamFailed, "The upstream produced no response"},
+		"certificate_unavailable": {
+			policy.ReasonCertificateUnavailable,
+			"The proxy could not mint a certificate for this server",
+		},
+		"proxy_unauthenticated": {policy.ReasonProxyUnauthenticated, "The CONNECT carried no valid proxy credential"},
+		"sandbox_unidentified": {
+			policy.ReasonSandboxUnidentified,
+			"The request carried no verifiable sandbox assertion",
+		},
+		"sandbox_unknown": {policy.ReasonSandboxUnknown, "The assertion names a sandbox the proxy does not know"},
+		"application_unknown": {
+			policy.ReasonApplicationUnknown,
+			"The assertion names an application the proxy does not know",
+		},
+		"endpoint_allowed": {policy.ReasonEndpointAllowed, "The request is allowed"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+			r.Equal(name, string(tc.reason), "the case is named for its code")
+			r.Equal(tc.want, tc.reason.Title(), "the title")
+			r.NotEmpty(tc.want, "a reason has a title")
+			r.False(strings.HasSuffix(tc.want, "."), "a title ends without a period")
+		})
+	}
+}
+
+// TestCompileAny pins the matcher a document with any_endpoint gets: every
+// host the deny list does not cover is allowed on any port, a request
+// matches an endpoint whose resource is its origin and whose credential is
+// the one placement, and the deny list and the path checks still refuse.
+func TestCompileAny(t *testing.T) {
+	t.Parallel()
+	deny, err := policy.NewDenyList(nil, nil)
+	require.NoError(t, err, "NewDenyList")
+	matcher := policy.CompileAny(deny, &headerPlacement)
+	assert.True(t, matcher.AllowsAny(), "AllowsAny")
+	assert.Empty(t, matcher.Hosts(), "Hosts: no list")
+
+	connections := []struct {
+		name       string
+		host       string
+		port       int
+		wantReason policy.Reason
+	}{
+		{name: "any host", host: "api.github.com", port: 443, wantReason: "endpoint_allowed"},
+		{name: "any port", host: "registry.internal", port: 5000, wantReason: "endpoint_allowed"},
+		{name: "the metadata address", host: "169.254.169.254", port: 80, wantReason: "deny_always"},
+		{name: "a DoH resolver", host: "dns.google", port: 443, wantReason: "deny_always"},
+		{name: "no host", host: "", port: 443, wantReason: "no_sni"},
+	}
+	for _, tc := range connections {
+		t.Run("connection to "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := matcher.Connection(tc.host, tc.port)
+			assert.Equal(t, tc.wantReason, got.Reason, "reason")
+			assert.Nil(t, got.Endpoint, "a connection decision names no endpoint")
+		})
+	}
+
+	requests := []struct {
+		name           string
+		host           string
+		port           int
+		path           string
+		wantReason     policy.Reason
+		wantResource   string
+		wantCredential *credential.Placement
+	}{
+		{
+			name: "any path on a host", host: "API.GitHub.com", port: 443, path: "/repos/x/y",
+			wantReason: "endpoint_allowed", wantResource: "https://api.github.com", wantCredential: &headerPlacement,
+		},
+		{
+			name: "a port that is not the scheme's is in the resource", host: "registry.internal", port: 5000, path: "/v2/",
+			wantReason: "endpoint_allowed", wantResource: "https://registry.internal:5000", wantCredential: &headerPlacement,
+		},
+		{name: "a dot segment", host: "api.github.com", port: 443, path: "/a/../b", wantReason: "malformed_request"},
+		{name: "a denied host", host: "169.254.169.254", port: 443, path: "/", wantReason: "deny_always"},
+	}
+	for _, tc := range requests {
+		t.Run("request for "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := matcher.Request(tc.host, tc.port, tc.path)
+			assert.Equal(t, tc.wantReason, got.Reason, "reason")
+			if tc.wantResource == "" {
+				assert.Nil(t, got.Endpoint, "a refusal names no endpoint")
+				return
+			}
+			require.NotNil(t, got.Endpoint, "an allow names the origin endpoint")
+			assert.Equal(t, tc.wantResource, got.Endpoint.Resource, "resource")
+			assert.Equal(t, "/", got.Endpoint.PathPrefix, "the prefix covers every path")
+			assert.Equal(t, tc.wantCredential, got.Endpoint.Credential, "credential")
+		})
+	}
+
+	open := policy.CompileAny(deny, nil)
+	got := open.Request("api.github.com", 443, "/")
+	require.NotNil(t, got.Endpoint)
+	assert.Nil(t, got.Endpoint.Credential, "no placement, no credential")
+}
+
+func TestOrigin(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		host string
+		port int
+		want string
+	}{
+		"the https port is left out": {host: "api.github.com", port: 443, want: "https://api.github.com"},
+		"another port is kept":       {host: "registry.internal", port: 5000, want: "https://registry.internal:5000"},
+		"the host is normalized":     {host: "API.GitHub.com.", port: 443, want: "https://api.github.com"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, policy.Origin(tc.host, tc.port))
 		})
 	}
 }

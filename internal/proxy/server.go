@@ -51,7 +51,16 @@ import (
 const (
 	HeaderReason    = "X-Keycard-Deny-Reason"
 	HeaderRequestID = "X-Keycard-Request-Id"
+	// HeaderDetail carries the zone's reason on an exchange_denied,
+	// authorization_required or exchange_failed refusal: its
+	// error_description, or the class of failure when the zone described
+	// none. It is prose about policy and never holds a credential. Other
+	// reasons set no detail.
+	HeaderDetail = "X-Keycard-Deny-Detail"
 )
+
+// maxDetail caps the detail header and the log field in bytes.
+const maxDetail = 512
 
 const (
 	defaultReadHeaderTimeout = 10 * time.Second
@@ -98,6 +107,12 @@ type Options struct {
 	// Credentials supplies the credential an endpoint names. A nil source
 	// denies every such endpoint with credential_unavailable.
 	Credentials credential.Source
+	// ConnectAuth is the credential every CONNECT must carry. Nil accepts
+	// every client.
+	ConnectAuth *ConnectAuth
+	// Sandboxes identifies the sandbox behind each request and selects its
+	// credential source. Nil serves one sandbox from Credentials.
+	Sandboxes *SandboxIdentification
 	// Logger records the request path. A nil logger discards.
 	Logger *slog.Logger
 	// MaxConnections caps simultaneous connections on the listener. Zero
@@ -177,6 +192,11 @@ func New(opts Options) (*Server, error) {
 		return nil, errNoAudit
 	case opts.UpstreamRoots == nil:
 		return nil, errNoRoots
+	}
+	if opts.Sandboxes != nil {
+		if err := opts.Sandboxes.validate(); err != nil {
+			return nil, err
+		}
 	}
 	opts = opts.withDefaults()
 	server := &Server{opts: opts, logger: opts.Logger, intake: newIntake()}

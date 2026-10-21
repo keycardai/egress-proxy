@@ -7,6 +7,13 @@
 // refuses a request that sends both. It verifies each client assertion with
 // Options.Assertions. It never verifies the substitute-user token, which is
 // unsigned.
+//
+// It also answers the grants a sandbox assertion authenticates, the way the
+// Keycard STS does: it discovers the assertion's issuer, verifies ES256
+// against the published key, and matches the subject against
+// Options.WorkloadSubjects. That is the client_credentials grant for the
+// sandbox itself, and the token exchange for a user in
+// Options.ImpersonableUsers.
 package fakeas
 
 import (
@@ -36,6 +43,7 @@ const (
 //nolint:gosec // G101: protocol URNs, not credentials
 const (
 	grantTokenExchange     = "urn:ietf:params:oauth:grant-type:token-exchange"
+	grantClientCredentials = "client_credentials"
 	subjectTypeSubstitute  = "urn:keycard:params:oauth:token-type:substitute-user"
 	assertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 	issuedTypeAccessToken  = "urn:ietf:params:oauth:token-type:access_token"
@@ -78,6 +86,17 @@ type Options struct {
 	// Assertions checks the signature, issuer, audience and expiry of each
 	// client assertion. When it is nil, the server refuses every assertion.
 	Assertions *oidc.IDTokenVerifier
+	// WorkloadSubjects maps a subject pattern, exact or with a trailing
+	// asterisk, to the application a client_credentials assertion with a
+	// matching subject acts as. An empty map accepts no such grant.
+	WorkloadSubjects map[string]string
+	// ImpersonableUsers lists the users an application a WorkloadSubjects
+	// pattern names may act for in a token exchange. An empty slice lets
+	// such an application act for no one.
+	ImpersonableUsers []string
+	// IssuerHTTPClient fetches discovery and the key set from an
+	// assertion's issuer. Nil selects http.DefaultClient.
+	IssuerHTTPClient *http.Client
 }
 
 // Request contains one token request as the server read it.
@@ -91,6 +110,9 @@ type Request struct {
 	// Actor is the verified subject of the client assertion. It is empty when
 	// the request uses a client secret or the server refused the assertion.
 	Actor string
+	// Application is the application a WorkloadSubjects pattern matched the
+	// actor to. It is empty for every other client.
+	Application string
 	// HasBasic reports whether the request sent an Authorization header with
 	// basic credentials.
 	HasBasic bool
@@ -188,7 +210,17 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		record.ClientID = basicID
 	}
 
-	value, refusal := s.issue(r.Context(), &record, basicSecret)
+	response := map[string]any{"token_type": "Bearer", "expires_in": expiresIn}
+	var refusal *denial
+	switch r.PostForm.Get("grant_type") {
+	case grantClientCredentials:
+		refusal = s.workload(r.Context(), &record, hasBasic, response)
+	default:
+		var value string
+		value, refusal = s.issue(r.Context(), &record, basicSecret)
+		response["access_token"] = value
+		response["issued_token_type"] = issuedTypeAccessToken
+	}
 	if refusal != nil {
 		record.Error = refusal.Code
 	}
@@ -200,12 +232,111 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeDenial(w, *refusal)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token":      value,
-		"token_type":        "Bearer",
-		"expires_in":        expiresIn,
-		"issued_token_type": issuedTypeAccessToken,
+	writeJSON(w, http.StatusOK, response)
+}
+
+// workload answers the client_credentials grant a sandbox assertion
+// authenticates. It fills the response with the access token and the
+// client, which is the assertion's subject, and sets record.Actor to that
+// subject. The token is the matched application's name and the resource's
+// credential joined by a colon, so a test reads which application the zone
+// matched from what reached the upstream.
+func (s *Server) workload(ctx context.Context, record *Request, hasBasic bool, response map[string]any) *denial {
+	subject, refusal := s.workloadClient(ctx, *record, hasBasic)
+	if refusal != nil {
+		return refusal
+	}
+	record.Actor = subject
+	application, ok := s.matchSubject(subject)
+	if !ok {
+		return unknownClient("no application credential matches " + subject)
+	}
+	record.Application = application
+	value, refusal := s.grant(record.Form.Get("resource"))
+	if refusal != nil {
+		return refusal
+	}
+	response["access_token"] = application + ":" + value
+	response["client_id"] = subject
+	return nil
+}
+
+// grant is the credential the policy grants for the resource.
+func (s *Server) grant(resource string) (string, *denial) {
+	value, granted := s.opts.Credentials[resource]
+	if !granted {
+		return "", &denial{
+			status:      http.StatusForbidden,
+			Code:        codeAccessDenied,
+			Description: "no policy grants " + resource,
+		}
+	}
+	return value, nil
+}
+
+// workloadClient checks the shape of the grant and verifies its assertion.
+// The grant sends no client_id and no basic credentials: the assertion's
+// subject names the client.
+func (s *Server) workloadClient(ctx context.Context, record Request, hasBasic bool) (string, *denial) {
+	assertion := record.Form.Get("client_assertion")
+	switch {
+	case assertion == "":
+		return "", unknownClient("the client_credentials grant sends no client assertion")
+	case record.Form.Get("client_assertion_type") != assertionTypeJWTBearer:
+		return "", unknownClient("the client assertion type is not " + assertionTypeJWTBearer)
+	case record.ClientID != "" || hasBasic:
+		return "", &denial{
+			status:      http.StatusBadRequest,
+			Code:        codeInvalidRequest,
+			Description: "a client assertion names its client by its subject and sends no client_id",
+		}
+	}
+	return s.verifyWorkload(ctx, assertion)
+}
+
+// verifyWorkload verifies the assertion the way the STS does: the
+// assertion's own iss is discovered, the key is found by kid in that
+// issuer's key set, the signature must be ES256, exp must be in the future
+// and iat present, and sub must differ from iss.
+func (s *Server) verifyWorkload(ctx context.Context, assertion string) (string, *denial) {
+	issuer := unverified(assertion).Iss
+	if issuer == "" {
+		return "", unknownClient("the client assertion has no iss claim")
+	}
+	if s.opts.IssuerHTTPClient != nil {
+		ctx = oidc.ClientContext(ctx, s.opts.IssuerHTTPClient)
+	}
+	provider, err := oidc.NewProvider(ctx, issuer)
+	if err != nil {
+		return "", unknownClient("the issuer does not discover: " + err.Error())
+	}
+	verifier := provider.VerifierContext(ctx, &oidc.Config{
+		SkipClientIDCheck: true, SupportedSigningAlgs: []string{oidc.ES256},
 	})
+	token, err := verifier.Verify(ctx, assertion)
+	switch {
+	case err != nil:
+		return "", unknownClient("the client assertion does not verify: " + err.Error())
+	case token.IssuedAt.IsZero():
+		return "", unknownClient("the client assertion has no iat claim")
+	case token.Subject == "" || token.Subject == token.Issuer:
+		return "", unknownClient("the client assertion's sub must be set and differ from iss")
+	}
+	return token.Subject, nil
+}
+
+// matchSubject finds the application whose pattern covers the subject. A
+// pattern is exact, or a prefix when it ends in an asterisk.
+func (s *Server) matchSubject(subject string) (string, bool) {
+	for pattern, application := range s.opts.WorkloadSubjects {
+		if prefix, ok := strings.CutSuffix(pattern, "*"); ok && strings.HasPrefix(subject, prefix) {
+			return application, true
+		}
+		if pattern == subject {
+			return application, true
+		}
+	}
+	return "", false
 }
 
 // requestShape rejects anything other than a form POST before the server
@@ -230,15 +361,18 @@ func requestShape(r *http.Request) *denial {
 
 // issue checks client authentication, the grant shape, the impersonation rule,
 // and the resource grant before it returns the credential. It sets
-// record.Actor to the subject of a verified assertion.
+// record.Actor to the subject of a verified assertion. The token names the
+// application where a sandbox assertion authenticated the exchange, so a
+// test reads which application the zone matched from what reached the
+// upstream.
 func (s *Server) issue(ctx context.Context, record *Request, secret string) (string, *denial) {
-	actor, refusal := s.authenticate(ctx, *record, secret)
+	actor, refusal := s.authenticate(ctx, record, secret)
 	record.Actor = actor
 	if refusal != nil {
 		return "", refusal
 	}
-	if refusal := grantShape(record.Form); refusal != nil {
-		return "", refusal
+	if refused := grantShape(record.Form); refused != nil {
+		return "", refused
 	}
 	if record.Subject == "" {
 		return "", &denial{
@@ -247,27 +381,36 @@ func (s *Server) issue(ctx context.Context, record *Request, secret string) (str
 			Description: "the substitute-user token has no sub claim",
 		}
 	}
-	if refusal := s.impersonation(*record); refusal != nil {
+	if refused := s.impersonation(*record); refused != nil {
+		return "", refused
+	}
+	value, refusal := s.grant(record.Form.Get("resource"))
+	if refusal != nil {
 		return "", refusal
 	}
-	resource := record.Form.Get("resource")
-	value, granted := s.opts.Credentials[resource]
-	if !granted {
-		return "", &denial{
-			status:      http.StatusForbidden,
-			Code:        codeAccessDenied,
-			Description: "no policy grants " + resource,
-		}
+	if record.Application != "" {
+		return record.Application + ":" + value, nil
 	}
 	return value, nil
 }
 
-// impersonation applies the zone policy for user impersonation. A ServiceAccount
-// can act only for the user in its name. A request with a client secret names
-// no ServiceAccount, so this rule has nothing to check.
+// impersonation applies the zone policy for user impersonation. A sandbox
+// application can act for the users ImpersonableUsers lists. A
+// ServiceAccount can act only for the user in its name. A request with a
+// client secret names no ServiceAccount, so this rule has nothing to check.
 func (s *Server) impersonation(record Request) *denial {
-	if record.Actor == "" {
+	switch {
+	case record.Actor == "":
 		return nil
+	case record.Application != "":
+		if slices.Contains(s.opts.ImpersonableUsers, record.Subject) {
+			return nil
+		}
+		return &denial{
+			status:      http.StatusForbidden,
+			Code:        codeAccessDenied,
+			Description: record.Actor + " cannot act for " + record.Subject,
+		}
 	}
 	want := "system:serviceaccount:" + s.opts.Namespace + ":" + record.Subject
 	if record.Actor != want {
@@ -283,7 +426,7 @@ func (s *Server) impersonation(record Request) *denial {
 // authenticate accepts exactly one client authentication method and returns
 // the subject of a verified assertion. RFC 6749 section 2.3 says a client
 // must not use more than one in a request.
-func (s *Server) authenticate(ctx context.Context, record Request, secret string) (string, *denial) {
+func (s *Server) authenticate(ctx context.Context, record *Request, secret string) (string, *denial) {
 	assertion := record.Form.Get("client_assertion")
 	switch {
 	case assertion != "" && record.HasBasic:
@@ -303,11 +446,15 @@ func (s *Server) authenticate(ctx context.Context, record Request, secret string
 // assertionClient checks that the client may authenticate with an assertion,
 // verifies the assertion, and returns its subject. An assertion names its
 // client in client_id, because the token-federation credential identifies the
-// client by that parameter and not by the assertion.
-func (s *Server) assertionClient(ctx context.Context, record Request, assertion string) (string, *denial) {
+// client by that parameter and not by the assertion. A server that knows
+// subject patterns names the client of an assertion without client_id by
+// its subject instead, the way the client_credentials grant does.
+func (s *Server) assertionClient(ctx context.Context, record *Request, assertion string) (string, *denial) {
 	switch {
 	case record.Form.Get("client_assertion_type") != assertionTypeJWTBearer:
 		return "", unknownClient("the client assertion type is not " + assertionTypeJWTBearer)
+	case record.ClientID == "" && len(s.opts.WorkloadSubjects) > 0:
+		return s.sandboxClient(ctx, record, assertion)
 	case record.ClientID == "":
 		return "", unknownClient("the client assertion sends no client_id")
 	case !slices.Contains(s.opts.AssertionClients, record.ClientID):
@@ -323,6 +470,23 @@ func (s *Server) assertionClient(ctx context.Context, record Request, assertion 
 		return "", unknownClient("the client assertion has no sub claim")
 	}
 	return token.Subject, nil
+}
+
+// sandboxClient verifies a sandbox assertion the way verifyWorkload does,
+// matches its subject against the patterns, and records the application it
+// matched. The subject is returned with a refusal too, so the record names
+// the sandbox the server turned away.
+func (s *Server) sandboxClient(ctx context.Context, record *Request, assertion string) (string, *denial) {
+	subject, refusal := s.verifyWorkload(ctx, assertion)
+	if refusal != nil {
+		return "", refusal
+	}
+	application, ok := s.matchSubject(subject)
+	if !ok {
+		return subject, unknownClient("no application credential matches " + subject)
+	}
+	record.Application = application
+	return subject, nil
 }
 
 // unknownClient is the RFC 6749 section 5.2 answer to a client that did not
@@ -371,21 +535,31 @@ type denial struct {
 // claimSub reads the sub claim from a JWT without verifying the signature. It
 // returns an empty string when it cannot read the claim.
 func claimSub(token string) string {
+	return unverified(token).Sub
+}
+
+// payload is what unverified reads from a JWT.
+type payload struct {
+	Sub string `json:"sub"`
+	Iss string `json:"iss"`
+}
+
+// unverified decodes the payload of a JWT without checking the signature.
+// It returns the zero value when the token does not decode.
+func unverified(token string) payload {
 	parts := strings.Split(token, ".")
 	if len(parts) != jwtSegments {
-		return ""
+		return payload{}
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return ""
+		return payload{}
 	}
-	var claims struct {
-		Sub string `json:"sub"`
+	var claims payload
+	if err := json.Unmarshal(decoded, &claims); err != nil {
+		return payload{}
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ""
-	}
-	return claims.Sub
+	return claims
 }
 
 // issuerOf reconstructs the URL that the client requested for discovery.

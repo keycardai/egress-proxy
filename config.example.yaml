@@ -60,6 +60,15 @@ policy:
   cluster_cidrs: ["10.42.0.0/16", "10.43.0.0/16"]   # joined to the platform deny list
   deny_list_exceptions: []                          # announced on every start; never 169.254.169.254
 
+# any_endpoint stands in for the endpoint list where something in front of
+# the proxy decides the hosts: every host off the platform deny list may be
+# reached, the request's origin (https://host[:port]) is the resource the
+# exchange asks for, and the credential goes in at this placement on every
+# request. It cannot be set beside endpoints or listen.dns_port.
+# any_endpoint:
+#   credential:
+#     placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
+
 endpoints:
   - url: "https://api.github.com/"                # host, port and path; also the exchange's resource
     credential:

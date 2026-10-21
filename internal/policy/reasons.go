@@ -72,6 +72,12 @@ const (
 	// Discovery failed, the zone was unreachable, the exchange exceeded its
 	// budget, or the zone returned an error that is not a policy refusal.
 	ReasonExchangeFailed Reason = "exchange_failed"
+	// ReasonAuthorizationRequired means the zone refused the token exchange
+	// because the person it acts for has not authorized the endpoint
+	// resource: an OAuth resource with no grant of theirs. The zone answers
+	// insufficient_authorization. The refusal holds until that person
+	// authorizes the resource, and the next request then succeeds.
+	ReasonAuthorizationRequired Reason = "authorization_required"
 	// ReasonUpstreamFailed means an allowed request produced no response
 	// from the upstream.
 	ReasonUpstreamFailed Reason = "upstream_failed"
@@ -79,6 +85,74 @@ const (
 	// a server name the policy allowed. The handshake fails and no request
 	// crosses the tunnel.
 	ReasonCertificateUnavailable Reason = "certificate_unavailable"
+	// ReasonProxyUnauthenticated means the CONNECT carried no
+	// Proxy-Authorization matching listen.connect_auth_file. The proxy
+	// answers 407 before any decision or leaf.
+	ReasonProxyUnauthenticated Reason = "proxy_unauthenticated"
+	// ReasonSandboxUnidentified means sandbox_assertion is configured and
+	// the request carried no assertion, more than one, or one the proxy
+	// could not verify: a bad signature, the wrong audience, an expired or
+	// over-long lifetime, or a missing claim.
+	ReasonSandboxUnidentified Reason = "sandbox_unidentified"
+	// ReasonSandboxUnknown means the assertion verified, names no
+	// application, and names a sandbox that no entry in sandboxes maps to
+	// an identity.
+	ReasonSandboxUnknown Reason = "sandbox_unknown"
+	// ReasonApplicationUnknown means the assertion verified and its app
+	// claim names an application that no entry in applications maps to an
+	// identity. The sandbox map is not consulted for such a request.
+	ReasonApplicationUnknown Reason = "application_unknown"
 	// ReasonEndpointAllowed is the reason on every allow, at both scopes.
 	ReasonEndpointAllowed Reason = "endpoint_allowed"
 )
+
+// Title is the sentence a refusal body carries for the reason, for a human
+// reading it off a client that shows the body and nothing else. It is short
+// and ends without a period. The code is the contract; a title may be
+// reworded.
+//
+//nolint:cyclop,funlen // one arm per reason code, so exhaustive fails the build on a code with no title
+func (r Reason) Title() string {
+	switch r {
+	case ReasonDenyAlways:
+		return "The destination is on the platform deny list"
+	case ReasonNoMatchingEndpoint:
+		return "No endpoint in the document matches this request"
+	case ReasonHostMismatch:
+		return "The request names two different hosts"
+	case ReasonNoSNI:
+		return "The TLS handshake named no server"
+	case ReasonCleartextNotForwarded:
+		return "The proxy forwards no cleartext HTTP"
+	case ReasonNotRedirected:
+		return "The connection was opened to the proxy itself"
+	case ReasonMalformedRequest:
+		return "The request has no well-formed host and path"
+	case ReasonNotAProxyRequest:
+		return "The proxy listener serves no requests of its own"
+	case ReasonCredentialUnavailable:
+		return "No credential is available for this endpoint"
+	case ReasonExchangeDenied:
+		return "The zone refused to issue a credential"
+	case ReasonExchangeFailed:
+		return "The token exchange did not complete"
+	case ReasonAuthorizationRequired:
+		return "The person this request acts for has not authorized the resource"
+	case ReasonUpstreamFailed:
+		return "The upstream produced no response"
+	case ReasonCertificateUnavailable:
+		return "The proxy could not mint a certificate for this server"
+	case ReasonProxyUnauthenticated:
+		return "The CONNECT carried no valid proxy credential"
+	case ReasonSandboxUnidentified:
+		return "The request carried no verifiable sandbox assertion"
+	case ReasonSandboxUnknown:
+		return "The assertion names a sandbox the proxy does not know"
+	case ReasonApplicationUnknown:
+		return "The assertion names an application the proxy does not know"
+	case ReasonEndpointAllowed:
+		return "The request is allowed"
+	default:
+		return "The request was refused"
+	}
+}

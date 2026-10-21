@@ -102,9 +102,10 @@ stdout user
 stdout userpass
 
 # Must fail: an endpoint whose resource the source does not hold. Nothing
-# is dialed and the proxy answers 403 inside the tunnel.
+# is dialed and the proxy answers 403 inside the tunnel. git shows the
+# status and not the body, which is application/problem+json; the audit
+# record below names the reason.
 ! exec git ls-remote https://localhost:$UPSTREAM_PORT/nocred.git
-stderr 'egress-proxy: credential_unavailable'
 stderr 'returned error: 403'
 
 # Every request the server answered arrived with the credentials the

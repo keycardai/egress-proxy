@@ -1142,3 +1142,32 @@ func TestEveryEarlierExampleStillParses(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigDigestOfEarlierExamplesIsStable pins the config digest of
+// documents written before the schema grew applications. A sidecar running
+// an older build and one running this build answer such a document alike, so
+// they must share a digest. A new field is added to decisionInputs with
+// omitempty, so a document that leaves it out hashes as it always did.
+// The values were re-pinned when 0.2.0 moved endpoints to `url` and the
+// resource became derived, which changed every document's digest on purpose.
+func TestConfigDigestOfEarlierExamplesIsStable(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		want string
+	}{
+		"minimal.yaml": {
+			want: "sha256:0a00d1549d283ef85e2fcbb4f29d7872a290bd45dc1544e877271f531094b955",
+		},
+		"sandbox-identity.yaml": {
+			want: "sha256:e48fd9797f1d7e0c1ab128876fb7a7fa958b9adf915861ebd275ef9a430f2dcf",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Load(filepath.Join("testdata", "compat", name), config.Overrides{})
+			require.NoError(t, err, "Load")
+			assert.Equal(t, tc.want, cfg.ConfigDigest, "the config digest")
+		})
+	}
+}

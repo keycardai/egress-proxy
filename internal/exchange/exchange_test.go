@@ -307,6 +307,10 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 		wantErr     error
 		// wantMessage names the failure in the error text. Empty checks no text.
 		wantMessage string
+		// wantDetail is the prose the refusal carries: the zone's
+		// error_description, or the class of failure when the zone gave
+		// none. Empty checks no detail.
+		wantDetail string
 		// wantExchange is the number of token requests the fixture recorded.
 		wantExchange int
 	}{
@@ -314,12 +318,14 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			name:         "the zone's policy does not grant the resource",
 			resource:     "https://not-granted.example/",
 			wantErr:      credential.ErrExchangeDenied,
+			wantDetail:   "no policy grants https://not-granted.example/",
 			wantExchange: 1,
 		},
 		{
 			name:         "the ServiceAccount is not the one the impersonated user is named after",
 			tokenSubject: "system:serviceaccount:" + namespace + ":another-user",
 			wantErr:      credential.ErrExchangeDenied,
+			wantDetail:   "system:serviceaccount:" + namespace + ":another-user cannot act for " + user,
 			wantExchange: 1,
 		},
 		{
@@ -346,6 +352,7 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			},
 			wantErr:      credential.ErrExchangeFailed,
 			wantMessage:  "reading token file",
+			wantDetail:   "the client authentication was not prepared",
 			wantExchange: 0,
 		},
 		{
@@ -372,12 +379,14 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			name:         "discovery finds no metadata",
 			noMetadata:   true,
 			wantErr:      credential.ErrExchangeFailed,
+			wantDetail:   "the zone answered 404",
 			wantExchange: 0,
 		},
 		{
 			name:         "the zone is unreachable",
 			unreachable:  true,
 			wantErr:      credential.ErrExchangeFailed,
+			wantDetail:   "the exchange did not complete",
 			wantExchange: 0,
 		},
 		{
@@ -385,6 +394,7 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			stall:        true,
 			timeout:      200 * time.Millisecond,
 			wantErr:      credential.ErrExchangeFailed,
+			wantDetail:   "the exchange ran past its budget",
 			wantExchange: 0,
 		},
 	}
@@ -427,6 +437,9 @@ func TestFailuresAreTwoClasses(t *testing.T) {
 			assert.Len(t, zone.server.Requests(), tc.wantExchange, "token requests the zone recorded")
 			if tc.wantMessage != "" {
 				require.ErrorContains(t, err, tc.wantMessage, "the message names the failure")
+			}
+			if tc.wantDetail != "" {
+				assert.Equal(t, tc.wantDetail, credential.Detail(err), "the detail the refusal carries")
 			}
 		})
 	}
@@ -543,8 +556,33 @@ func TestAPolicyRefusalIsExchangeDenied(t *testing.T) {
 			value, err := zone.source(t).Credential(t.Context(), resource)
 			require.ErrorIs(t, err, tc.wantErr, "the failure class for %s", tc.code)
 			assert.Empty(t, value, "a failed exchange yields no credential")
+			assert.Contains(t, credential.Detail(err), "the zone said so", "every class carries the zone's error_description")
 		})
 	}
+}
+
+// TestAMissingGrantIsAuthorizationRequired pins the zone's answer when the
+// person the exchange acts for has not authorized the resource: its own
+// class, so an agent can tell "ask your human" from "policy says no", and
+// a detail that carries the zone's sentence and the CLI command that
+// person runs.
+func TestAMissingGrantIsAuthorizationRequired(t *testing.T) {
+	t.Parallel()
+	zone := newZone(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(
+			w,
+			`{"error":"insufficient_authorization","error_description":"User authorization is required for resource %s."}`,
+			resource,
+		)
+	})
+	value, err := zone.source(t).Credential(t.Context(), resource)
+	require.ErrorIs(t, err, credential.ErrAuthorizationRequired)
+	assert.Empty(t, value)
+	assert.Equal(t, "User authorization is required for resource "+resource+". "+
+		"Run 'keycard auth resource "+resource+"' as that person, then retry.", credential.Detail(err),
+		"the zone's sentence, then the command; the test zone is an address, so no --zone")
 }
 
 // TestTheExchangeRefusesAnUnsafeZone checks the limits on the leg that offers
@@ -561,6 +599,8 @@ func TestTheExchangeRefusesAnUnsafeZone(t *testing.T) {
 		front http.HandlerFunc
 		// wantMessage names the refusal in the error text.
 		wantMessage string
+		// wantDetail is the refusal text alone, with no address in it.
+		wantDetail string
 	}{
 		{
 			name: "the token endpoint redirects",
@@ -568,6 +608,7 @@ func TestTheExchangeRefusesAnUnsafeZone(t *testing.T) {
 				http.Redirect(w, r, "/somewhere-else", http.StatusTemporaryRedirect)
 			},
 			wantMessage: "redirected the exchange",
+			wantDetail:  "the zone redirected the exchange",
 		},
 		{
 			name: "the token response is larger than the limit",
@@ -576,6 +617,7 @@ func TestTheExchangeRefusesAnUnsafeZone(t *testing.T) {
 				fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer"}`, strings.Repeat("a", 2<<20))
 			},
 			wantMessage: "1 MiB",
+			wantDetail:  "the zone answered with more than 1 MiB",
 		},
 	}
 	for _, tc := range tests {
@@ -611,6 +653,7 @@ func TestTheExchangeRefusesAnUnsafeZone(t *testing.T) {
 			assert.Empty(t, value, "a refused exchange yields no credential")
 			assert.NotContains(t, err.Error(), clientSecret, "the message NEVER includes the client secret")
 			require.ErrorContains(t, err, tc.wantMessage, "the message names the refusal")
+			assert.Equal(t, tc.wantDetail, credential.Detail(err), "the detail the refusal carries")
 		})
 	}
 }

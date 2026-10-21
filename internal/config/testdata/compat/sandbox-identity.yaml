@@ -1,0 +1,39 @@
+# The first document with sandbox_assertion and sandboxes: every request
+# proves which sandbox sent it, and the proxy brokers credentials as that
+# sandbox's own application. listen.connect_auth_file authenticates the
+# CONNECT itself. Kept so a later schema still parses it.
+version: 1
+
+sandbox:
+  id: "openshell-local"
+
+listen:
+  connect_auth_file: "/run/secrets/connect-auth"
+
+sandbox_assertion:
+  header: X-Keycard-Sandbox-Assertion
+  issuer_key_file: "/etc/keycard/middleware.pub"
+  audience: keycard-egress-proxy
+  max_age: "30s"
+
+sandboxes:
+  - name: keycard-demo
+    workspace: default
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "demo-application"
+      client_secret_file: "/run/secrets/keycard-demo"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+  - name: troy-research
+    identity:
+      zone_url: "https://acme.keycard.cloud"
+      client_id: "research-application"
+      client_secret_file: "/run/secrets/troy-research"
+      impersonate:
+        user: "igmua2g0fwapl21qll7tczdw7t"
+
+endpoints:
+  - url: "https://api.github.com/"
+    credential:
+      placement: {kind: header, name: Authorization, template: "Bearer {credential}"}
