@@ -56,6 +56,12 @@ var (
 	// ErrExchangeFailed means that the exchange did not complete. The source
 	// does not know whether the credential would have been granted.
 	ErrExchangeFailed = errors.New("the token exchange failed")
+	// ErrAuthorizationRequired means that the zone would issue the
+	// credential, but the person the exchange acts for has not authorized
+	// the resource: it is an OAuth resource and they hold no grant for its
+	// provider. A retry answers the same until that person authorizes it,
+	// and then succeeds with nothing restarted.
+	ErrAuthorizationRequired = errors.New("the person has not authorized the resource")
 )
 
 // ExchangeError is a source failure with the reason that the refusal

@@ -460,6 +460,8 @@ func credentialReason(err error) policy.Reason {
 		return policy.ReasonExchangeDenied
 	case errors.Is(err, credential.ErrExchangeFailed):
 		return policy.ReasonExchangeFailed
+	case errors.Is(err, credential.ErrAuthorizationRequired):
+		return policy.ReasonAuthorizationRequired
 	default:
 		return policy.ReasonCredentialUnavailable
 	}
@@ -675,8 +677,8 @@ func statusFor(reason policy.Reason) int {
 		return http.StatusProxyAuthRequired
 	case policy.ReasonDenyAlways, policy.ReasonNoMatchingEndpoint, policy.ReasonHostMismatch, policy.ReasonNoSNI,
 		policy.ReasonCleartextNotForwarded, policy.ReasonNotRedirected, policy.ReasonCredentialUnavailable,
-		policy.ReasonExchangeDenied, policy.ReasonSandboxUnidentified, policy.ReasonSandboxUnknown,
-		policy.ReasonApplicationUnknown:
+		policy.ReasonExchangeDenied, policy.ReasonAuthorizationRequired, policy.ReasonSandboxUnidentified,
+		policy.ReasonSandboxUnknown, policy.ReasonApplicationUnknown:
 		return http.StatusForbidden
 	case policy.ReasonEndpointAllowed:
 		// An allow never reaches this function. The case is here because

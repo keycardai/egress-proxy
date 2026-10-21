@@ -72,6 +72,12 @@ const (
 	// Discovery failed, the zone was unreachable, the exchange exceeded its
 	// budget, or the zone returned an error that is not a policy refusal.
 	ReasonExchangeFailed Reason = "exchange_failed"
+	// ReasonAuthorizationRequired means the zone refused the token exchange
+	// because the person it acts for has not authorized the endpoint
+	// resource: an OAuth resource with no grant of theirs. The zone answers
+	// insufficient_authorization. The refusal holds until that person
+	// authorizes the resource, and the next request then succeeds.
+	ReasonAuthorizationRequired Reason = "authorization_required"
 	// ReasonUpstreamFailed means an allowed request produced no response
 	// from the upstream.
 	ReasonUpstreamFailed Reason = "upstream_failed"
@@ -105,7 +111,7 @@ const (
 // and ends without a period. The code is the contract; a title may be
 // reworded.
 //
-//nolint:cyclop // one arm per reason code, so exhaustive fails the build on a code with no title
+//nolint:cyclop,funlen // one arm per reason code, so exhaustive fails the build on a code with no title
 func (r Reason) Title() string {
 	switch r {
 	case ReasonDenyAlways:
@@ -130,6 +136,8 @@ func (r Reason) Title() string {
 		return "The zone refused to issue a credential"
 	case ReasonExchangeFailed:
 		return "The token exchange did not complete"
+	case ReasonAuthorizationRequired:
+		return "The person this request acts for has not authorized the resource"
 	case ReasonUpstreamFailed:
 		return "The upstream produced no response"
 	case ReasonCertificateUnavailable:

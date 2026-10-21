@@ -594,7 +594,11 @@ func TestEveryReasonHasATitle(t *testing.T) {
 		"credential_unavailable":  {policy.ReasonCredentialUnavailable, "No credential is available for this endpoint"},
 		"exchange_denied":         {policy.ReasonExchangeDenied, "The zone refused to issue a credential"},
 		"exchange_failed":         {policy.ReasonExchangeFailed, "The token exchange did not complete"},
-		"upstream_failed":         {policy.ReasonUpstreamFailed, "The upstream produced no response"},
+		"authorization_required": {
+			policy.ReasonAuthorizationRequired,
+			"The person this request acts for has not authorized the resource",
+		},
+		"upstream_failed": {policy.ReasonUpstreamFailed, "The upstream produced no response"},
 		"certificate_unavailable": {
 			policy.ReasonCertificateUnavailable,
 			"The proxy could not mint a certificate for this server",

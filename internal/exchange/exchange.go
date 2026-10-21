@@ -29,6 +29,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,6 +47,13 @@ const (
 	codeUnauthorizedClient = "unauthorized_client"
 	codeInvalidGrant       = "invalid_grant"
 )
+
+// codeAuthorizationRequired is the zone's answer when the person the
+// exchange acts for holds no grant for the resource's provider
+// (draft-ietf-oauth-first-party-apps). It is not a policy refusal: the
+// person authorizes the resource once, with the Keycard CLI, and the same
+// exchange then succeeds.
+const codeAuthorizationRequired = "insufficient_authorization"
 
 // schemeHTTPS is the only scheme the exchange connects with. Client
 // authentication goes to the zone, so cleartext would put it on the wire.
@@ -110,6 +118,7 @@ type Source struct {
 	// subject is the substitute-user token. The process does not change the
 	// impersonated user, so it builds the token once.
 	subject  string
+	zone     string
 	timeout  time.Duration
 	describe string
 }
@@ -141,6 +150,7 @@ func New(opts Options) (*Source, error) {
 		client:      oauth.NewTokenExchangeClient(opts.ZoneURL, clientOpts...),
 		application: application,
 		subject:     substituteUserToken(opts.ImpersonateUser),
+		zone:        opts.ZoneURL,
 		timeout:     timeout,
 		describe: fmt.Sprintf("a Keycard token exchange at %s impersonating %s, %s",
 			opts.ZoneURL, opts.ImpersonateUser, describe),
@@ -315,7 +325,7 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 
 	response, err := s.client.ExchangeToken(ctx, *request)
 	if err != nil {
-		return "", classify(err, refusedOnPolicy)
+		return "", classify(err, refusedOnPolicy, s.zone, resource)
 	}
 	return response.AccessToken, nil
 }
@@ -335,16 +345,37 @@ func (s *Source) Describe() string {
 // An OAuth answer carries its error_description as the detail, whichever
 // class it falls in. The description is the zone's prose about its policy
 // and never holds a credential.
-func classify(err error, refused func(code string) bool) error {
+func classify(err error, refused func(code string) bool, zone, resource string) error {
 	var oauthErr *oauth.OAuthError
 	if !errors.As(err, &oauthErr) {
 		return failed(failureDetail(err), err)
 	}
-	class := credential.ErrExchangeFailed
-	if refused(oauthErr.ErrorCode) {
-		class = credential.ErrExchangeDenied
+	switch {
+	case oauthErr.ErrorCode == codeAuthorizationRequired:
+		return &credential.ExchangeError{
+			Class:  credential.ErrAuthorizationRequired,
+			Detail: strings.TrimSpace(oauthErr.Message + " " + authorizationHint(zone, resource)),
+			Cause:  err,
+		}
+	case refused(oauthErr.ErrorCode):
+		return &credential.ExchangeError{Class: credential.ErrExchangeDenied, Detail: oauthErr.Message, Cause: err}
+	default:
+		return &credential.ExchangeError{Class: credential.ErrExchangeFailed, Detail: oauthErr.Message, Cause: err}
 	}
-	return &credential.ExchangeError{Class: class, Detail: oauthErr.Message, Cause: err}
+}
+
+// authorizationHint is the sentence that tells the person how to authorize
+// the resource: the Keycard CLI's own consent command, the one it prints for
+// the same answer. The zone id is the first label of the zone's host, which
+// is how the CLI names a zone. The agent reading the refusal cannot run it;
+// the person it acts for can.
+func authorizationHint(zone, resource string) string {
+	parsed, err := url.Parse(zone)
+	if err != nil || parsed.Hostname() == "" || net.ParseIP(parsed.Hostname()) != nil {
+		return fmt.Sprintf("Run 'keycard auth resource %s' as that person, then retry.", resource)
+	}
+	zoneID, _, _ := strings.Cut(parsed.Hostname(), ".")
+	return fmt.Sprintf("Run 'keycard auth resource %s --zone %s' as that person, then retry.", resource, zoneID)
 }
 
 // failed is an exchange_failed error with the detail the refusal carries.

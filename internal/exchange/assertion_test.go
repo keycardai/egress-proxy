@@ -215,6 +215,18 @@ func TestAssertionSourceFailures(t *testing.T) {
 			},
 			want: credential.ErrExchangeDenied, wantMsg: "no grant", wantDetail: "no grant",
 		},
+		"a missing grant of the owner's is authorization_required": {
+			answer: tokenAnswer{
+				status: http.StatusForbidden,
+				body: map[string]any{
+					"error":             "insufficient_authorization",
+					"error_description": "User authorization is required for resource " + resource + ".",
+				},
+			},
+			want: credential.ErrAuthorizationRequired, wantMsg: "User authorization is required",
+			wantDetail: "User authorization is required for resource " + resource + ". " +
+				"Run 'keycard auth resource " + resource + "' as that person, then retry.",
+		},
 		"a server error is a failure": {
 			answer: tokenAnswer{status: http.StatusInternalServerError, body: map[string]any{"error": "server_error"}},
 			want:   credential.ErrExchangeFailed, wantMsg: "server_error", wantDetail: "server_error",

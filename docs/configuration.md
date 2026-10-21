@@ -153,9 +153,12 @@ none. The proxy rejects a partial identity supplied only by the environment.
 
 If the zone refuses an exchange on policy, the proxy denies the request with
 `exchange_denied` and returns 403, because a retry gets the same answer. If
-the exchange fails for another reason, the proxy denies the request with
-`exchange_failed` and returns 502. The proxy makes no exchange for a request
-that the endpoint list denies.
+the person the exchange acts for has not authorized the resource, the zone
+answers `insufficient_authorization` and the proxy denies the request with
+`authorization_required` and 403, with the consent command in the detail: a
+retry succeeds once that person has run it. If the exchange fails for another
+reason, the proxy denies the request with `exchange_failed` and returns 502.
+The proxy makes no exchange for a request that the endpoint list denies.
 
 ### `listen`
 
@@ -584,6 +587,7 @@ identifies a captured connection in the audit stream.
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
 | `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the proxy does not support the placement, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. For an identity with `client_assertion: sandbox`, `invalid_client` is a refusal too: no token credential matches the sandbox's subject. A retry gets the same answer. |
+| `authorization_required` | deny | request | The zone would issue the credential, but the person the exchange acts for has not authorized the endpoint resource: an OAuth resource with no grant of theirs. The zone answers `insufficient_authorization`. The detail carries the zone's sentence and the Keycard CLI command that person runs, `keycard auth resource <resource> --zone <zone>`; the next request after that succeeds with nothing restarted. The agent cannot run it: the grant is the person's. |
 | `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it refused the exchange for a reason that is not its policy, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |
 | `certificate_unavailable` | deny | connection | The policy allowed the server name and the proxy could not mint a leaf for it. The handshake fails and no request crosses the tunnel. |
@@ -593,8 +597,8 @@ identifies a captured connection in the audit stream.
 | `application_unknown` | deny | request | The assertion verified and its `app` claim names an application that no entry in `applications` maps. The sandbox it names is not consulted. |
 
 A refusal names its reason in the `X-Keycard-Deny-Reason` header. It holds
-the connection or request ID in `X-Keycard-Request-Id`. An `exchange_denied`
-or `exchange_failed` refusal also carries `X-Keycard-Deny-Detail`: the zone's
+the connection or request ID in `X-Keycard-Request-Id`. An `exchange_denied`,
+`authorization_required` or `exchange_failed` refusal also carries `X-Keycard-Deny-Detail`: the zone's
 `error_description`, or the class of failure when the zone described none,
 such as `the zone answered 404` or `the exchange ran past its budget`. A
 `credential_unavailable` refusal carries it when the source made no exchange

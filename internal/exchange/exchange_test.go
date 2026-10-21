@@ -556,9 +556,33 @@ func TestAPolicyRefusalIsExchangeDenied(t *testing.T) {
 			value, err := zone.source(t).Credential(t.Context(), resource)
 			require.ErrorIs(t, err, tc.wantErr, "the failure class for %s", tc.code)
 			assert.Empty(t, value, "a failed exchange yields no credential")
-			assert.Equal(t, "the zone said so", credential.Detail(err), "both classes carry the zone's error_description")
+			assert.Contains(t, credential.Detail(err), "the zone said so", "every class carries the zone's error_description")
 		})
 	}
+}
+
+// TestAMissingGrantIsAuthorizationRequired pins the zone's answer when the
+// person the exchange acts for has not authorized the resource: its own
+// class, so an agent can tell "ask your human" from "policy says no", and
+// a detail that carries the zone's sentence and the CLI command that
+// person runs.
+func TestAMissingGrantIsAuthorizationRequired(t *testing.T) {
+	t.Parallel()
+	zone := newZone(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(
+			w,
+			`{"error":"insufficient_authorization","error_description":"User authorization is required for resource %s."}`,
+			resource,
+		)
+	})
+	value, err := zone.source(t).Credential(t.Context(), resource)
+	require.ErrorIs(t, err, credential.ErrAuthorizationRequired)
+	assert.Empty(t, value)
+	assert.Equal(t, "User authorization is required for resource "+resource+". "+
+		"Run 'keycard auth resource "+resource+"' as that person, then retry.", credential.Detail(err),
+		"the zone's sentence, then the command; the test zone is an address, so no --zone")
 }
 
 // TestTheExchangeRefusesAnUnsafeZone checks the limits on the leg that offers

@@ -71,6 +71,7 @@ type AssertionSource struct {
 	// answers the token exchange for the sandbox owner. Exactly one is set.
 	sandbox  *oauth.ClientCredentialsClient
 	owner    *oauth.TokenExchangeClient
+	zone     string
 	timeout  time.Duration
 	describe string
 	now      func() time.Time
@@ -105,7 +106,7 @@ func NewAssertionSource(opts AssertionOptions) (*AssertionSource, error) {
 		timeout = DefaultTimeout
 	}
 	httpClient := newHTTPClient(timeout, opts.Roots, opts.DenyAddr)
-	source := &AssertionSource{timeout: timeout, now: time.Now, cache: make(map[cacheKey]cached)}
+	source := &AssertionSource{zone: opts.ZoneURL, timeout: timeout, now: time.Now, cache: make(map[cacheKey]cached)}
 	switch {
 	case opts.ImpersonateOwner:
 		source.owner = oauth.NewTokenExchangeClient(opts.ZoneURL, oauth.WithTokenExchangeHTTPClient(httpClient))
@@ -183,7 +184,7 @@ func (s *AssertionSource) request(ctx context.Context, token, ownerID, resource 
 		})
 	}
 	if err != nil {
-		return nil, classify(err, refusedOnSubject)
+		return nil, classify(err, refusedOnSubject, s.zone, resource)
 	}
 	return response, nil
 }

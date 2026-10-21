@@ -51,10 +51,11 @@ import (
 const (
 	HeaderReason    = "X-Keycard-Deny-Reason"
 	HeaderRequestID = "X-Keycard-Request-Id"
-	// HeaderDetail carries the zone's reason on an exchange_denied or
-	// exchange_failed refusal: its error_description, or the class of
-	// failure when the zone described none. It is prose about policy and
-	// never holds a credential. Other reasons set no detail.
+	// HeaderDetail carries the zone's reason on an exchange_denied,
+	// authorization_required or exchange_failed refusal: its
+	// error_description, or the class of failure when the zone described
+	// none. It is prose about policy and never holds a credential. Other
+	// reasons set no detail.
 	HeaderDetail = "X-Keycard-Deny-Detail"
 )
 
