@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/keycardai/egress-proxy/compare/v0.2.2...v0.2.3) (2026-11-23)
+
+
+### Bug Fixes
+
+* build with Go 1.27.4 for the net/http security fix; add CODEOWNERS ([#69](https://github.com/keycardai/egress-proxy/issues/69)) ([dcf3506](https://github.com/keycardai/egress-proxy/commit/dcf350699d832726bc3d20c9538c502edde727ca))
+
 ## [0.2.2](https://github.com/keycardai/egress-proxy/compare/v0.2.1...v0.2.2) (2026-10-20)
 
 
