@@ -27,7 +27,7 @@ require (
 	github.com/moby/sys/capability v0.4.0
 	github.com/rogpeppe/go-internal v1.16.0
 	github.com/stretchr/testify v1.12.1
-	github.com/urfave/cli/v3 v3.13.0
+	github.com/urfave/cli/v3 v3.14.0
 	go.yaml.in/yaml/v2 v2.4.4
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
 	golang.org/x/net v0.60.0
