@@ -18,7 +18,7 @@
 #      directories it writes must already belong to the uid it runs as.
 #
 # Base images are pinned by tag and digest. Dependabot updates them.
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 # AGENT_UID must equal the pod's workload securityContext.runAsUser. The
 # build hands the trust store to it, and the netsetup owner match tells this
