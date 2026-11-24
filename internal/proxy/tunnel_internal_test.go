@@ -20,6 +20,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/keycardai/go-sdk/oauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -415,7 +416,8 @@ func TestRewriteClearsTheUserinfo(t *testing.T) {
 			if !tc.noCredential {
 				writer, err := credential.NewWriter(tc.placement)
 				require.NoError(t, err, "NewWriter")
-				fwd.setCredential(writer, tc.placement, secret)
+				fwd.setCredential(credential.Issued{Value: secret}, tc.placement)
+				fwd.writer = writer
 			}
 			in := httptest.NewRequestWithContext(
 				context.WithValue(t.Context(), forwardKey{}, fwd),
@@ -460,7 +462,18 @@ func TestEmitForwardedRedactsTheCredential(t *testing.T) {
 	const wantBasicText = `Get "https://git.example/repo.git": Basic ` + credential.Marker + " refused"
 
 	withSecret := func(fwd *forward, placement credential.Placement) *forward {
-		fwd.setCredential(nil, placement, secret)
+		fwd.setCredential(credential.Issued{Value: secret}, placement)
+		return fwd
+	}
+
+	// A Keycard-Password method writes the username beside the password.
+	passwordText := `Get "https://api.example/?user=svc%40corp&pass=` + escaped + `": refused`
+	const wantPasswordText = `Get "https://api.example/?user=` + credential.Marker +
+		`&pass=` + credential.Marker + `": refused`
+	withPassword := func(fwd *forward) *forward {
+		fwd.setCredential(credential.Issued{Value: secret, Token: &oauth.TokenResponse{
+			AccessToken: secret, TokenType: oauth.TokenTypeKeycardPassword, Username: "svc@corp",
+		}}, queryKeyPlacement)
 		return fwd
 	}
 	deniedError := func(text string) *forward {
@@ -507,6 +520,11 @@ func TestEmitForwardedRedactsTheCredential(t *testing.T) {
 			name:  "an upstream failure naming the basic credentials",
 			fwd:   withSecret(&forward{err: textError(basicText)}, basicPlacement),
 			field: outcomeError, want: wantBasicText,
+		},
+		{
+			name:  "an upstream failure naming the username and password a method writes",
+			fwd:   withPassword(&forward{err: textError(passwordText)}),
+			field: outcomeError, want: wantPasswordText,
 		},
 	}
 	for _, tc := range tests {
@@ -598,7 +616,8 @@ func TestAFailedCredentialWriteDenies(t *testing.T) {
 			server.reverse.Transport = refuseUnwritten{next: upstream}
 
 			fwd := &forward{host: allowedHost, port: 443, requestID: "req-1"}
-			fwd.setCredential(tc.writer, queryKeyPlacement, secret)
+			fwd.setCredential(credential.Issued{Value: secret}, queryKeyPlacement)
+			fwd.writer = tc.writer
 			request := httptest.NewRequestWithContext(
 				context.WithValue(t.Context(), forwardKey{}, fwd),
 				http.MethodGet, "https://"+allowedHost+"/geocode?q=here", nil,

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"syscall"
 	"time"
 
@@ -295,14 +296,19 @@ func (b *limitedBody) Close() error {
 // Credential exchanges for the resource's access token. It returns
 // credential.ErrExchangeDenied or credential.ErrExchangeFailed for a failure.
 // The proxy maps each error to the denial reason with the same name.
-func (s *Source) Credential(ctx context.Context, resource string) (string, error) {
+//
+// A Bearer or Basic token goes where the endpoint placement says. For any
+// other token_type, Credential returns the token response too. Its method
+// says where the credential goes, and the proxy refuses a token_type it does
+// not know.
+func (s *Source) Credential(ctx context.Context, resource string) (credential.Issued, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	// Both mechanisms ignore the prepare options, so they are nil.
 	request, err := s.application.PrepareTokenExchangeRequest(ctx, s.subject, resource, nil)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)
+		return credential.Issued{}, fmt.Errorf("%w: %w", credential.ErrExchangeFailed, err)
 	}
 	// PrepareTokenExchangeRequest types the subject as an access token. This
 	// exchange sends the substitute-user type.
@@ -310,9 +316,19 @@ func (s *Source) Credential(ctx context.Context, resource string) (string, error
 
 	response, err := s.client.ExchangeToken(ctx, *request)
 	if err != nil {
-		return "", classify(err)
+		return credential.Issued{}, classify(err)
 	}
-	return response.AccessToken, nil
+	if placedByEndpoint(response.TokenType) {
+		return credential.Issued{Value: response.AccessToken}, nil
+	}
+	return credential.Issued{Value: response.AccessToken, Token: response}, nil
+}
+
+// placedByEndpoint reports whether a token_type goes where the endpoint
+// placement says. The SDK reports a response without token_type as Bearer.
+// RFC 6749 section 5.1 compares token_type without regard to case.
+func placedByEndpoint(tokenType string) bool {
+	return strings.EqualFold(tokenType, oauth.TokenTypeBearer) || strings.EqualFold(tokenType, oauth.TokenTypeBasic)
 }
 
 // Describe names the zone, the user, and the mechanism. It never includes the

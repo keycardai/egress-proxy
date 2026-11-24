@@ -374,6 +374,25 @@ refuses the document at start-up, and the writer refuses the same names.
 
 The proxy allows `Authorization`, which most endpoints use.
 
+The zone can say where the credential goes. When the exchange returns a
+`Keycard-API-Key` or `Keycard-Password` token, the token's `method` replaces
+the endpoint placement, and the proxy does not write the placement.
+`Keycard-API-Key` puts the key in a header, a query parameter, a cookie, or
+`Authorization` under a scheme the method names. `Keycard-Password` puts the
+username and the password each in a header or a query parameter. The method
+replaces every value the workload sent under the names it uses. A query
+parameter it writes goes after the others. The rest of the query keeps its
+order.
+
+A `Bearer` or `Basic` token, and every credential from `static_file`, goes
+where the endpoint placement says. The placement stays required on every
+credentialed endpoint until a later major release.
+
+The proxy denies with `credential_unavailable` a token it cannot write: an
+unknown `token_type`, a method that is missing or breaks a rule of its token
+type, a method that names a header in the table above, or a value with a
+control character in a header. `decision.error` names the rule.
+
 A basic placement also removes any userinfo from the request line. The
 document names the user and the credential is the password. A user or
 password in a clone URL has no effect on what the proxy sends. Use a basic
@@ -418,7 +437,7 @@ identifies a captured connection in the audit stream.
 | `host_mismatch` | deny | both | The SNI differs from the CONNECT authority, the request `Host` header differs from the SNI and port, or a captured connection names a destination that differs from the address it used. |
 | `malformed_request` | deny | both | The request uses an asterisk-form target, a path whose escaped or decoded form holds dot segments, a path that escapes an unreserved character or uses lowercase hex, a path that changes or ties the selected endpoint after percent-decoding, a query that does not parse, or a CONNECT authority with a bad port. |
 | `not_a_proxy_request` | deny | request | An origin-form request reached the CONNECT listener. The listener does not serve requests of its own. |
-| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, or the writer reported an error. `decision.error` identifies the cause. |
+| `credential_unavailable` | deny | request | The proxy did not put a credential in the request. The process has no source, the source has none for the endpoint resource, the zone returned a token the proxy cannot write, or the writer reported an error. `decision.error` identifies the cause. |
 | `exchange_denied` | deny | request | The zone read its policy and refused the token exchange. Its policy does not permit this proxy to act for `identity.impersonate.user` on the endpoint resource, it does not permit this client to impersonate at all, or it does not know that user. The zone answers `access_denied`, `unauthorized_client`, or `invalid_grant`. A retry gets the same answer. |
 | `exchange_failed` | deny | request | The token exchange did not complete. Discovery failed, the zone was unreachable, it refused the exchange for a reason that is not its policy, or the exchange spent `limits.exchange_timeout`. The proxy does not know whether the credential would have been granted. |
 | `upstream_failed` | deny | request | An allowed request produced no response from the upstream. |

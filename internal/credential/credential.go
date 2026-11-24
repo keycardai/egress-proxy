@@ -1,8 +1,12 @@
-// Package credential writes a credential into an outbound request at the
-// place an endpoint names, and supplies the credential to write.
+// Package credential writes a credential into an outbound request and
+// supplies the credential to write.
 //
-// The placement wins. The proxy replaces whatever value the workload sent at
-// that place and writes the credential where the workload sent nothing.
+// A Keycard-API-Key or Keycard-Password token from the exchange has a method
+// that says where its credential goes. The method replaces the endpoint
+// placement. Every other credential goes where the endpoint placement says.
+//
+// The proxy replaces whatever value the workload sent at that place and
+// writes the credential where the workload sent nothing.
 //
 // A credential never reaches a log line or an audit record. The proxy
 // records a method, a path without its query, and a host, and it passes
@@ -18,6 +22,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/keycardai/go-sdk/oauth"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -73,6 +78,42 @@ type Placement struct {
 	User string `json:"user"`
 }
 
+// Issued is a credential a Source returns.
+type Issued struct {
+	// Value is the credential. It is the password of a Keycard-Password
+	// token.
+	Value string
+	// Token is the token exchange response when its method says where the
+	// credential goes. The method replaces the endpoint placement. Token is
+	// nil when the endpoint placement decides.
+	Token *oauth.TokenResponse
+}
+
+// Writer returns the writer for the credential: the token's method when
+// there is a token, and placement otherwise. An error from it denies the
+// request with credential_unavailable.
+//
+//nolint:ireturn // polymorphism intended
+func (i Issued) Writer(placement Placement) (Writer, error) {
+	if i.Token != nil {
+		return newMethodWriter(i.Token)
+	}
+	if err := Validate(i.Value); err != nil {
+		return nil, err
+	}
+	return NewWriter(placement)
+}
+
+// WireForms returns the secrets Redact covers for the credential. A method
+// writes the credential and the username as they are, or percent-encoded in
+// a query, and Redact covers both forms.
+func (i Issued) WireForms(placement Placement) []string {
+	if i.Token != nil {
+		return []string{i.Value, i.Token.Username}
+	}
+	return WireForms(placement, i.Value)
+}
+
 // Source supplies the credential for a resource.
 type Source interface {
 	// Credential returns the credential for the resource identifier an
@@ -80,7 +121,7 @@ type Source interface {
 	// the request with credential_unavailable.
 	//
 	// Implementations must not leak the secret in the error contents.
-	Credential(ctx context.Context, resource string) (string, error)
+	Credential(ctx context.Context, resource string) (Issued, error)
 	// Describe names the source for the start-up announcement and the admin
 	// socket. It never includes a credential.
 	Describe() string
@@ -198,6 +239,39 @@ func (w queryWriter) Write(out *http.Request, credential string) error {
 	}
 	values.Set(w.name, credential)
 	out.URL.RawQuery = values.Encode()
+	return nil
+}
+
+// methodWriter sets the fields a token's method names.
+type methodWriter struct {
+	token *oauth.TokenResponse
+}
+
+// allowHeader applies BannedHeaderName to the header a method names.
+var allowHeader = oauth.WithPlacementAllowHeader(func(name string) bool { //nolint:gochecknoglobals // a fixed option
+	return !BannedHeaderName(name)
+})
+
+// newMethodWriter refuses a token the proxy cannot write: an unknown
+// token_type, a method that breaks a rule of the token type, a method that
+// names a header BannedHeaderName bans, or a value that cannot go where the
+// method puts it.
+//
+//nolint:ireturn // polymorphism intended
+func newMethodWriter(token *oauth.TokenResponse) (Writer, error) {
+	if _, err := oauth.PlaceCredential(token, allowHeader); err != nil {
+		return nil, fmt.Errorf("%w: %w", errPlacement, err)
+	}
+	return methodWriter{token: token}, nil
+}
+
+// Write sets each field the token's method names and replaces every value
+// the workload sent under that header, parameter or cookie name. It writes
+// the token it was built from and ignores credential.
+func (w methodWriter) Write(out *http.Request, _ string) error {
+	if err := oauth.ApplyCredential(w.token, out, allowHeader); err != nil {
+		return fmt.Errorf("%w: %w", errPlacement, err)
+	}
 	return nil
 }
 

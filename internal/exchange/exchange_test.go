@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/keycardai/go-sdk/oauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -242,7 +243,7 @@ func TestTheWireForm(t *testing.T) {
 
 			value, err := source.Credential(t.Context(), resource)
 			require.NoError(t, err, "Credential")
-			assert.Equal(t, granted, value, "the credential the zone issued")
+			assert.Equal(t, credential.Issued{Value: granted}, value, "a Bearer token goes where the endpoint placement says")
 
 			requests := zone.server.Requests()
 			require.Len(t, requests, 1, "one exchange per call")
@@ -883,4 +884,73 @@ func TestTheZoneIssuerMustMatchTheConfiguredZone(t *testing.T) {
 	_, err = source.Credential(t.Context(), resource)
 	require.ErrorIs(t, err, credential.ErrExchangeFailed, "an issuer mismatch is exchange_failed")
 	assert.ErrorContains(t, err, "does not match", "the message names the mismatch")
+}
+
+// TestTheTokenTypeDecidesWhoPlacesTheCredential pins which token responses
+// go where the endpoint placement says and which keep the response, so
+// their method decides. An unknown token_type keeps the response, and the
+// proxy refuses it when it builds the writer.
+func TestTheTokenTypeDecidesWhoPlacesTheCredential(t *testing.T) {
+	t.Parallel()
+	const apiKeyMethod = `{"in":"header","name":"X-Api-Key"}` //nolint:gosec // G101: a method, not a credential
+	tests := []struct {
+		name string
+		// members are the token response members beside access_token.
+		members   string
+		wantToken *oauth.TokenResponse
+		// wantWriterErr is what Issued.Writer reports, when it refuses.
+		wantWriterErr string
+	}{
+		{name: "no token_type is Bearer", members: ``},
+		{name: "Bearer", members: `,"token_type":"Bearer"`},
+		{name: "bearer in lower case", members: `,"token_type":"bearer"`},
+		{name: "Basic", members: `,"token_type":"Basic","user_id":"x-access-token"`},
+		{
+			name:    "Keycard-API-Key",
+			members: `,"token_type":"Keycard-API-Key","method":` + apiKeyMethod,
+			wantToken: &oauth.TokenResponse{
+				AccessToken: granted, TokenType: oauth.TokenTypeKeycardAPIKey,
+				Method: json.RawMessage(apiKeyMethod),
+			},
+		},
+		{
+			name: "Keycard-Password",
+			members: `,"token_type":"Keycard-Password","username":"svc-user",` +
+				`"method":{"username":{"in":"header","name":"X-User"},"password":{"in":"header","name":"X-Pass"}}`,
+			wantToken: &oauth.TokenResponse{
+				AccessToken: granted, TokenType: oauth.TokenTypeKeycardPassword, Username: "svc-user",
+				Method: json.RawMessage(
+					`{"username":{"in":"header","name":"X-User"},"password":{"in":"header","name":"X-Pass"}}`,
+				),
+			},
+		},
+		{
+			name:          "an unknown token_type",
+			members:       `,"token_type":"DPoP"`,
+			wantToken:     &oauth.TokenResponse{AccessToken: granted, TokenType: "DPoP"},
+			wantWriterErr: "unsupported_token_type",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			zone := newZone(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"access_token":%q%s}`, granted, tc.members)
+			})
+			issued, err := zone.source(t).Credential(t.Context(), resource)
+			require.NoError(t, err, "Credential")
+			assert.Equal(t, credential.Issued{Value: granted, Token: tc.wantToken}, issued, "Credential")
+
+			placement := credential.Placement{
+				Kind: credential.KindHeader, Name: "Authorization", Template: "Bearer " + credential.Token,
+			}
+			_, err = issued.Writer(placement)
+			if tc.wantWriterErr != "" {
+				require.ErrorContains(t, err, tc.wantWriterErr, "Writer")
+				return
+			}
+			require.NoError(t, err, "Writer")
+		})
+	}
 }

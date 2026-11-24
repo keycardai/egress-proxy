@@ -260,7 +260,7 @@ type forward struct {
 	requestID string
 	// secret is the endpoint's credential and writer is where it goes. Both
 	// are empty for an endpoint that names none. wireForms are the secrets
-	// redact covers, from credential.WireForms.
+	// redact covers, from credential.Issued.WireForms.
 	writer    credential.Writer
 	secret    string
 	wireForms []string
@@ -278,11 +278,11 @@ type forward struct {
 }
 
 // setCredential puts the endpoint credential on the forward together with
-// every form the placement puts on the wire. Set the two together so that
+// every form the writer puts on the wire. Set the two together so that
 // redact always covers what the writer sends.
-func (f *forward) setCredential(writer credential.Writer, placement credential.Placement, secret string) {
-	f.writer, f.secret = writer, secret
-	f.wireForms = credential.WireForms(placement, secret)
+func (f *forward) setCredential(issued credential.Issued, placement credential.Placement) {
+	f.secret = issued.Value
+	f.wireForms = issued.WireForms(placement)
 }
 
 // redact replaces every wire form of the endpoint credential in text. Text
@@ -452,20 +452,18 @@ func (s *Server) resolveCredential(ctx context.Context, endpoint policy.Endpoint
 	if s.opts.Credentials == nil {
 		return errNoSource
 	}
-	writer, err := credential.NewWriter(*endpoint.Credential)
-	if err != nil {
-		return err //nolint:wrapcheck // the message already names the placement
-	}
-	secret, err := s.opts.Credentials.Credential(ctx, endpoint.Resource)
+	issued, err := s.opts.Credentials.Credential(ctx, endpoint.Resource)
 	if err != nil {
 		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
 	}
 	// Attach the secret as soon as it exists, so redact covers every failure
 	// after this point. A forward the proxy denies never reaches the writer.
-	fwd.setCredential(writer, *endpoint.Credential, secret)
-	if err := credential.Validate(secret); err != nil {
+	fwd.setCredential(issued, *endpoint.Credential)
+	writer, err := issued.Writer(*endpoint.Credential)
+	if err != nil {
 		return fmt.Errorf("resource %s: %w", endpoint.Resource, err)
 	}
+	fwd.writer = writer
 	return nil
 }
 

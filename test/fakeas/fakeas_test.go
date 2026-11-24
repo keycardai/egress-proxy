@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -352,4 +353,66 @@ func unsigned(t *testing.T, claims jwt.Claims) string {
 	require.NoError(t, err, "encode the claims")
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + "."
+}
+
+// TestTokenResponseMembers pins the token_type, username and method a
+// granted exchange returns. The proxy reads them to decide where the
+// credential goes, so a scenario sets them through Options.Tokens.
+func TestTokenResponseMembers(t *testing.T) {
+	t.Parallel()
+	method := json.RawMessage(`{"in":"header","name":"X-Api-Key"}`)
+	tests := []struct {
+		name   string
+		tokens map[string]fakeas.Token
+		want   map[string]any
+	}{
+		{
+			name: "a resource without a token is Bearer",
+			want: map[string]any{"token_type": "Bearer"},
+		},
+		{
+			name:   "a Keycard-API-Key token has its method",
+			tokens: map[string]fakeas.Token{resource: {Type: "Keycard-API-Key", Method: method}},
+			//nolint:gosec // G101: a method, not a credential
+			want: map[string]any{
+				"token_type": "Keycard-API-Key",
+				"method":     map[string]any{"in": "header", "name": "X-Api-Key"},
+			},
+		},
+		{
+			name:   "a Keycard-Password token has its username",
+			tokens: map[string]fakeas.Token{resource: {Type: "Keycard-Password", Username: "svc-user"}},
+			want:   map[string]any{"token_type": "Keycard-Password", "username": "svc-user"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			zone := fakeas.New(fakeas.Options{
+				Credentials:   map[string]string{resource: credential},
+				Tokens:        tc.tokens,
+				ClientSecrets: map[string]string{client: "secret"},
+			})
+			form := exchangeForm("", user)
+			form.Del("client_assertion")
+			form.Del("client_assertion_type")
+			form.Del("client_id")
+			req := tokenRequest(t, form)
+			req.SetBasicAuth(client, "secret")
+			recorder := httptest.NewRecorder()
+			zone.ServeHTTP(recorder, req)
+			require.Equal(t, http.StatusOK, recorder.Code, "status, body %s", recorder.Body)
+
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body), "decode %s", recorder.Body)
+			//nolint:gosec // G101: a test fixture, not a credential
+			want := map[string]any{
+				"access_token":      credential,
+				"expires_in":        float64(300),
+				"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+			}
+			maps.Copy(want, tc.want)
+			assert.Equal(t, want, body, "the token response")
+		})
+	}
 }

@@ -883,13 +883,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ----------------------------------------------------------------------------
-github.com/keycardai/go-sdk/oauth v0.23.3
+github.com/keycardai/go-sdk/oauth v0.27.2-0.20261124231148-51ee3d919dd2
 License: MIT
-Source: https://github.com/keycardai/go-sdk/blob/v0.23.3/LICENSE
+Source: https://github.com/keycardai/go-sdk/blob/51ee3d919dd2/LICENSE
 
 MIT LICENSE
 
-Copyright © 2026 Keycard Labs, inc.
+Copyright (c) 2026 Keycard Labs, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 

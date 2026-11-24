@@ -109,12 +109,13 @@ func (e staticEntry) validate(path string, i int, seen map[string]string) error 
 }
 
 // Credential returns the credential the file holds for the resource.
-func (s *StaticFile) Credential(_ context.Context, resource string) (string, error) {
+// The endpoint placement says where it goes.
+func (s *StaticFile) Credential(_ context.Context, resource string) (Issued, error) {
 	value, ok := s.byResource[resource]
 	if !ok {
-		return "", ErrUnavailable
+		return Issued{}, ErrUnavailable
 	}
-	return value, nil
+	return Issued{Value: value}, nil
 }
 
 // Describe names the file and how many credentials it holds.
