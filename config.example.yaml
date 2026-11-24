@@ -60,6 +60,9 @@ policy:
   cluster_cidrs: ["10.42.0.0/16", "10.43.0.0/16"]   # joined to the platform deny list
   deny_list_exceptions: []                          # announced on every start; never 169.254.169.254
 
+# A Keycard-API-Key or Keycard-Password token from the exchange names where its
+# credential goes, and that replaces the placement. Every other credential goes
+# where the placement says.
 endpoints:
   - url: "https://api.github.com/"                # host, port and path; also the exchange's resource
     credential:

@@ -383,7 +383,9 @@ var errSomethingElse = errors.New("something else")
 // exchange, whose failures use the same two classes for every zone response.
 type refusingSource struct{ err error }
 
-func (s refusingSource) Credential(context.Context, string) (string, error) { return "", s.err }
+func (s refusingSource) Credential(context.Context, string) (credential.Issued, error) {
+	return credential.Issued{}, s.err
+}
 
 func (refusingSource) Describe() string { return "a source that refuses every resource" }
 

@@ -10,6 +10,7 @@
 package fakeas
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -66,6 +67,10 @@ type Options struct {
 	// Credentials maps each resource to the access token that the server issues.
 	// The server returns access_denied for an unmapped resource.
 	Credentials map[string]string
+	// Tokens maps a resource to the token_type, username and method the
+	// server returns beside its access token. A resource it omits gets a
+	// Bearer token.
+	Tokens map[string]Token
 	// Namespace is the ServiceAccount namespace that the impersonation rule uses.
 	// The default is "agents".
 	Namespace string
@@ -78,6 +83,14 @@ type Options struct {
 	// Assertions checks the signature, issuer, audience and expiry of each
 	// client assertion. When it is nil, the server refuses every assertion.
 	Assertions *oidc.IDTokenVerifier
+}
+
+// Token is the token_type, username and method of a token response. The
+// zero Token is a Bearer token.
+type Token struct {
+	Type     string          `json:"token_type"`
+	Username string          `json:"username,omitempty"`
+	Method   json.RawMessage `json:"method,omitempty"`
 }
 
 // Request contains one token request as the server read it.
@@ -200,12 +213,25 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeDenial(w, *refusal)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, s.tokenResponse(record.Form.Get("resource"), value))
+}
+
+// tokenResponse is the token response for a granted resource.
+func (s *Server) tokenResponse(resource, value string) map[string]any {
+	token := s.opts.Tokens[resource]
+	response := map[string]any{
 		"access_token":      value,
-		"token_type":        "Bearer",
+		"token_type":        cmp.Or(token.Type, "Bearer"),
 		"expires_in":        expiresIn,
 		"issued_token_type": issuedTypeAccessToken,
-	})
+	}
+	if token.Username != "" {
+		response["username"] = token.Username
+	}
+	if token.Method != nil {
+		response["method"] = token.Method
+	}
+	return response
 }
 
 // requestShape rejects anything other than a form POST before the server

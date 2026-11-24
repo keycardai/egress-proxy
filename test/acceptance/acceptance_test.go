@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	// net/http/cgi does not pass the Proxy request header to the child
@@ -29,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,7 +120,8 @@ func TestAcceptance(t *testing.T) {
 // upstream <path>".
 //
 // The log line includes the target with its query and the Authorization
-// header. A scenario can then verify what the proxy wrote into the request.
+// header. One line per header follows it, "  header NAME=VALUE", sorted by
+// name. A scenario can then verify what the proxy wrote into the request.
 func cmdUpstream(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 1 {
 		ts.Fatalf("usage: upstream DIR")
@@ -247,10 +250,12 @@ var zoneForger = sync.OnceValues(func() (*fakeas.Signer, error) {
 
 // cmdFakeAS starts a fake Keycard zone over TLS in the test process:
 //
-//	fakeas DIR RESOURCE=CREDENTIAL...
+//	fakeas DIR RESOURCE=CREDENTIAL[@TOKEN]...
 //
 // It grants each named resource the credential beside it and refuses other
-// resources with access_denied. It verifies a client assertion against the
+// resources with access_denied. TOKEN names a JSON file that holds the
+// token_type, username and method to return beside the credential, in the
+// form of fakeas.Token. A resource without one gets a Bearer token. It verifies a client assertion against the
 // key satoken signs with. It writes its CA certificate to DIR/ca.crt,
 // appends one line per token request to DIR/requests.log, and exports its port
 // as $ZONE_PORT. It exports the known client as $ZONE_CLIENT_ID and
@@ -261,12 +266,19 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	}
 	dir := ts.MkAbs(args[0])
 	grants := make(map[string]string, len(args)-1)
+	tokens := make(map[string]fakeas.Token)
 	for _, arg := range args[1:] {
 		resource, value, ok := strings.Cut(arg, "=")
 		if !ok {
-			ts.Fatalf("fakeas: %q is not RESOURCE=CREDENTIAL", arg)
+			ts.Fatalf("fakeas: %q is not RESOURCE=CREDENTIAL[@TOKEN]", arg)
 		}
+		value, tokenFile, hasToken := strings.Cut(value, "@")
 		grants[resource] = value
+		if hasToken {
+			var token fakeas.Token
+			ts.Check(json.Unmarshal([]byte(ts.ReadFile(tokenFile)), &token))
+			tokens[resource] = token
+		}
 	}
 	authority, err := ca.New(ca.Options{CommonName: "acceptance zone CA"})
 	ts.Check(err)
@@ -281,6 +293,7 @@ func cmdFakeAS(ts *testscript.TestScript, neg bool, args []string) {
 	ts.Check(err)
 	zone := fakeas.New(fakeas.Options{
 		Credentials:      grants,
+		Tokens:           tokens,
 		ClientSecrets:    map[string]string{zoneClientID: zoneClientSecret},
 		AssertionClients: []string{zoneClientID},
 		Assertions:       signer.Verifier(),
@@ -348,6 +361,11 @@ func upstreamHandler(requests io.Writer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(requests, "request %s %s host=%s authorization=%q\n",
 			r.Method, r.URL.RequestURI(), r.Host, r.Header.Get("Authorization"))
+		for _, name := range slices.Sorted(maps.Keys(r.Header)) {
+			for _, value := range r.Header[name] {
+				fmt.Fprintf(requests, "  header %s=%q\n", name, value)
+			}
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		switch {
 		case r.URL.Path == "/header/bad-trailer":

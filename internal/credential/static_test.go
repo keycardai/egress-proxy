@@ -56,7 +56,7 @@ func TestStaticFileAnswersByResource(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "Credential")
-			assert.Equal(t, tc.want, got, "the credential for %s", tc.resource)
+			assert.Equal(t, credential.Issued{Value: tc.want}, got, "the credential for %s", tc.resource)
 		})
 	}
 }

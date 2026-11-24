@@ -77,7 +77,9 @@ request gets. It does not control what an upstream sends back.
 - The proxy streams responses without adding a buffer between the upstream
   and the workload.
 - The proxy writes a credential into a request only at the placement the
-  endpoint names, and the credential reaches no log line and no audit record.
+  endpoint names, or where the zone's method says for a `Keycard-API-Key` or
+  `Keycard-Password` token. The credential reaches no log line and no audit
+  record.
 - The proxy mints the upstream credential only after the endpoint list allows
   the request. The exchange sends the user name without a signature, so the
   zone's policy must refuse an unauthorized user.
@@ -271,7 +273,8 @@ way.
 
 ### Credential injection
 
-The proxy writes a credential only at the placement that the endpoint names.
+The proxy writes a credential only at the placement that the endpoint names,
+or where the method of a `Keycard-API-Key` or `Keycard-Password` token says.
 
 | Threat | Mitigation | Test |
 |---|---|---|
@@ -284,6 +287,10 @@ The proxy writes a credential only at the placement that the endpoint names.
 | A credential holding a carriage return or newline splits the outbound request head and injects a header. | The proxy refuses a credential with a control character when it loads the source and when the source returns one. It denies the request with `credential_unavailable`. | `TestValidate`, `TestLoadStaticFileRefusals` |
 | A header placement names a header that the connection, the proxy, or the upstream trusts, such as `Host`. `net/http` writes `Host` from the request target, so the credential would not reach the wire. | `credential.NewWriter` refuses banned names. The document parser and endpoints built in code get the same refusal. The list includes the hop-by-hop headers in RFC 9110 section 7.6.1, `Content-Length`, `Host`, `Forwarded`, and the `x-forwarded-` and `sec-` families. `Authorization` is allowed. | `TestNewWriterRefusesABannedHeaderName`, `TestNewWriterAcceptsAHeaderName`, config `a header placement naming Host` |
 | A header placement names a header that would split the request head. | The writer refuses a name that is not a valid header name, which denies the request. | `TestNewWriterRefusals` |
+| The zone returns a token whose `token_type` the proxy does not know, such as a sender-constrained token, and the proxy writes it at the placement as if it were a bearer token. | Only `Bearer` and `Basic` go to the endpoint placement. Any other token goes through `oauth.PlaceCredential`, which refuses a `token_type` other than `Bearer`, `Basic`, `Keycard-API-Key` or `Keycard-Password`. The request is denied with `credential_unavailable` and nothing is dialed. | `TestTheTokenTypeDecidesWhoPlacesTheCredential`, `TestATokenTypeTheProxyDoesNotKnowIsRefused`, `exchange_credential_method.txtar` |
+| A token's method names a header that the connection, the proxy, or the upstream trusts, such as `Proxy-Authorization` or `X-Forwarded-For`. | The method writer applies `credential.BannedHeaderName` to every header a method names, the same list a header placement gets. A method with a banned name, an unknown member or `in` value, or two entries for one place is denied with `credential_unavailable`. | `TestAMethodTheProxyCannotWriteIsRefused`, `exchange_credential_method.txtar` |
+| A key, password or username holding a carriage return or newline splits the outbound request head when a method puts it in a header. | `oauth.PlaceCredential` refuses a header value with a character other than visible ASCII, space or tab, and a cookie value that is not a cookie-octet (RFC 6265 section 4.1.1). The request is denied with `credential_unavailable`. | `TestAMethodTheProxyCannotWriteIsRefused` |
+| The username of a `Keycard-Password` token reaches the audit stream or the log. | The forward's redaction covers the username beside the password, in raw and percent-encoded form. | `TestEmitForwardedRedactsTheCredential`, `TestIssuedWireFormsCoverTheUsername`, `exchange_credential_method.txtar` |
 | The credential writer fails and the request reaches the upstream with whatever the workload sent at the placement. | The rewrite records the failure. The round trip rejects the request before it dials. The request is denied with `credential_unavailable` and nothing is opened. | `TestAFailedCredentialWriteDenies` |
 | A credential reaches the audit stream or the log, where it outlives the request. | A record holds the method, the path without its query, and the host. `credential.Redact` processes request error text written by the proxy. It replaces the raw header form, the percent-encoded query form, and the base64 a basic placement writes. The raw credential does not appear in that base64. Raw ReverseProxy diagnostics are disabled because body-read errors can quote upstream response bytes. Incomplete responses still produce an audit record with an outcome error. | `TestRedact`, `TestEmitForwardedRedactsTheCredential`, `TestNoCredentialReachesARecordOrALogLine`, `credential_injection.txtar`, `git_basic_auth.txtar` |
 | A malformed credential document puts secret values, keys, or paths in a parser error printed at startup. | The static-file parser reports the file path and failing stage without including parser diagnostics. | `TestStaticFileParseErrorsDoNotExposeCredentials`, `credential_injection.txtar` |
